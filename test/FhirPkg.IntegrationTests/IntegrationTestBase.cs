@@ -1,8 +1,8 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Formats.Tar;
+using System.IO.Compression;
 using System.Text;
-using ICSharpCode.SharpZipLib.GZip;
-using ICSharpCode.SharpZipLib.Tar;
 
 namespace FhirPkg.IntegrationTests;
 
@@ -47,33 +47,32 @@ public abstract class IntegrationTestBase : IDisposable
         Dictionary<string, string>? extraFiles = null)
     {
         var ms = new MemoryStream();
-        using (var gzip = new GZipOutputStream(ms) { IsStreamOwner = false })
-        using (var tar = new TarOutputStream(gzip, Encoding.UTF8) { IsStreamOwner = false })
+        using (var gzip = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true))
         {
+            using var tar = new TarWriter(gzip, TarEntryFormat.Pax, leaveOpen: true);
+
             // Create package/ directory entry
-            var dirEntry = TarEntry.CreateTarEntry("package/");
-            tar.PutNextEntry(dirEntry);
-            tar.CloseEntry();
+            tar.WriteEntry(new PaxTarEntry(TarEntryType.Directory, "package/"));
 
             // Create package/package.json
             var manifest = $$"""{"name":"{{packageName}}","version":"{{version}}"}""";
             var manifestBytes = Encoding.UTF8.GetBytes(manifest);
-            var entry = TarEntry.CreateTarEntry("package/package.json");
-            entry.Size = manifestBytes.Length;
-            tar.PutNextEntry(entry);
-            tar.Write(manifestBytes, 0, manifestBytes.Length);
-            tar.CloseEntry();
+            var entry = new PaxTarEntry(TarEntryType.RegularFile, "package/package.json")
+            {
+                DataStream = new MemoryStream(manifestBytes)
+            };
+            tar.WriteEntry(entry);
 
             if (extraFiles is not null)
             {
                 foreach (var (name, content) in extraFiles)
                 {
                     var bytes = Encoding.UTF8.GetBytes(content);
-                    var fileEntry = TarEntry.CreateTarEntry($"package/{name}");
-                    fileEntry.Size = bytes.Length;
-                    tar.PutNextEntry(fileEntry);
-                    tar.Write(bytes, 0, bytes.Length);
-                    tar.CloseEntry();
+                    var fileEntry = new PaxTarEntry(TarEntryType.RegularFile, $"package/{name}")
+                    {
+                        DataStream = new MemoryStream(bytes)
+                    };
+                    tar.WriteEntry(fileEntry);
                 }
             }
         }

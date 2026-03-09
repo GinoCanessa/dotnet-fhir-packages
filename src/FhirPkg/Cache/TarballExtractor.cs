@@ -1,7 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
-using ICSharpCode.SharpZipLib.GZip;
-using ICSharpCode.SharpZipLib.Tar;
+using System.Formats.Tar;
+using System.IO.Compression;
 
 namespace FhirPkg.Cache;
 
@@ -19,7 +19,6 @@ namespace FhirPkg.Cache;
 public static class TarballExtractor
 {
     private const string PackageSubdirectory = "package";
-    private const int DefaultBufferSize = 81920; // 80 KB buffer for efficient I/O
 
     /// <summary>
     /// Extracts a .tgz tarball stream to the specified destination directory.
@@ -38,14 +37,14 @@ public static class TarballExtractor
 
         var fullDestination = Path.GetFullPath(destinationPath);
 
-        await ExtractUsingTarInputStreamAsync(tarballStream, fullDestination, ct).ConfigureAwait(false);
+        await ExtractUsingTarReaderAsync(tarballStream, fullDestination, ct).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Extracts the tarball using <see cref="TarInputStream"/> for better async control
+    /// Extracts the tarball using <see cref="TarReader"/> for async entry enumeration
     /// and path traversal validation.
     /// </summary>
-    private static async Task ExtractUsingTarInputStreamAsync(
+    private static async Task ExtractUsingTarReaderAsync(
         Stream tarballStream,
         string destinationPath,
         CancellationToken ct)
@@ -54,11 +53,10 @@ public static class TarballExtractor
         if (tarballStream.CanSeek)
             tarballStream.Position = 0;
 
-        await using var gzipStream = new GZipInputStream(tarballStream);
-        using var tarStream = new TarInputStream(gzipStream, nameEncoding: null);
-        var buffer = new byte[DefaultBufferSize];
+        await using var gzipStream = new GZipStream(tarballStream, CompressionMode.Decompress, leaveOpen: true);
+        await using var tarReader = new TarReader(gzipStream, leaveOpen: true);
 
-        while (tarStream.GetNextEntry() is { } entry)
+        while (await tarReader.GetNextEntryAsync(copyData: false, ct).ConfigureAwait(false) is { } entry)
         {
             ct.ThrowIfCancellationRequested();
 
@@ -76,7 +74,7 @@ public static class TarballExtractor
                     $"Tar entry '{entry.Name}' attempted path traversal outside destination directory.");
             }
 
-            if (entry.IsDirectory)
+            if (entry.EntryType == TarEntryType.Directory)
             {
                 Directory.CreateDirectory(targetPath);
                 continue;
@@ -87,13 +85,7 @@ public static class TarballExtractor
             if (parentDir is not null)
                 Directory.CreateDirectory(parentDir);
 
-            await using var outputStream = File.Create(targetPath);
-            int bytesRead;
-            while ((bytesRead = await tarStream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
-            {
-                ct.ThrowIfCancellationRequested();
-                await outputStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct).ConfigureAwait(false);
-            }
+            await entry.ExtractToFileAsync(targetPath, overwrite: true, ct).ConfigureAwait(false);
         }
     }
 
