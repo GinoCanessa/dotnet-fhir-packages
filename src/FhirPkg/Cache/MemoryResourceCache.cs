@@ -29,7 +29,11 @@ public class MemoryResourceCache
 {
     private readonly int _maxEntries;
     private readonly SafeMode _safeMode;
+#if NET9_0_OR_GREATER
     private readonly Lock _lock = new();
+#else
+    private readonly object _lock = new();
+#endif
     private readonly Dictionary<string, LinkedListNode<CacheEntry>> _map;
     private readonly LinkedList<CacheEntry> _lruList = new();
 

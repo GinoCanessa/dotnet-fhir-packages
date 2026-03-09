@@ -22,7 +22,11 @@ public static class CheckSum
         ArgumentNullException.ThrowIfNull(stream);
 
         byte[] hash = SHA1.HashData(stream);
+#if NET9_0_OR_GREATER
         return Convert.ToHexStringLower(hash);
+#else
+        return Convert.ToHexString(hash).ToLowerInvariant();
+#endif
     }
 
     /// <summary>
@@ -36,7 +40,11 @@ public static class CheckSum
         ArgumentNullException.ThrowIfNull(data);
 
         byte[] hash = SHA1.HashData(data);
+#if NET9_0_OR_GREATER
         return Convert.ToHexStringLower(hash);
+#else
+        return Convert.ToHexString(hash).ToLowerInvariant();
+#endif
     }
 
     /// <summary>

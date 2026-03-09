@@ -195,8 +195,8 @@ public class CacheIntegrationTests : IntegrationTestBase
         File.Exists(iniPath).ShouldBeTrue("packages.ini should be created after install");
 
         var sections = IniParser.ParseFile(iniPath);
-        sections.ShouldContainKey("packages");
-        sections["packages"].ShouldContainKey("test.package#1.0.0");
+        sections.Keys.ShouldContain("packages");
+        sections["packages"].Keys.ShouldContain("test.package#1.0.0");
     }
 
     // ───────────────────────── ListWithFilter ─────────────────────────

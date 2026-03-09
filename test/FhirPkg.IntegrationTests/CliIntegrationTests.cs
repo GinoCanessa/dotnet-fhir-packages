@@ -14,6 +14,9 @@ public class CliIntegrationTests : IntegrationTestBase
         Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
             "src", "FhirPkg.Cli", "FhirPkg.Cli.csproj"));
 
+    private static readonly string TargetFramework =
+        $"net{Environment.Version.Major}.{Environment.Version.Minor}";
+
     private async Task<(int ExitCode, string StdOut, string StdErr)> RunCli(params string[] args)
     {
         var allArgs = string.Join(" ", args) + $" --package-cache-folder \"{TempCacheDir}\"";
@@ -27,7 +30,7 @@ public class CliIntegrationTests : IntegrationTestBase
             StartInfo = new ProcessStartInfo
             {
                 FileName = "dotnet",
-                Arguments = $"run --project \"{CliProjectPath}\" -- {allArgs}",
+                Arguments = $"run --project \"{CliProjectPath}\" --framework {TargetFramework} -- {allArgs}",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,

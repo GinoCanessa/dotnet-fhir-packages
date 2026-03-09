@@ -72,7 +72,7 @@ public class PackageManifestTests
         var manifest = PackageManifest.Deserialize(FullManifestJson);
 
         manifest.Dependencies.ShouldNotBeNull();
-        manifest.Dependencies.ShouldContainKey("hl7.fhir.r4.expansions");
+        manifest.Dependencies.Keys.ShouldContain("hl7.fhir.r4.expansions");
         manifest.Dependencies!["hl7.fhir.r4.expansions"].ShouldBe("4.0.1");
     }
 

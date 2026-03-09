@@ -24,10 +24,10 @@ public class IniParserTests
     {
         var result = IniParser.Parse(PackagesIniContent);
 
-        result.ShouldContainKey("packages");
-        result.ShouldContainKey("metadata");
+        result.Keys.ShouldContain("packages");
+        result.Keys.ShouldContain("metadata");
 
-        result["packages"].ShouldContainKey("hl7.fhir.r4.core#4.0.1");
+        result["packages"].Keys.ShouldContain("hl7.fhir.r4.core#4.0.1");
         result["packages"]["hl7.fhir.r4.core#4.0.1"].ShouldBe("installed");
 
         result["metadata"]["version"].ShouldBe("1");
@@ -41,7 +41,7 @@ public class IniParserTests
 
         result.ShouldNotBeNull();
         // Should have at least the default empty-string section
-        result.ShouldContainKey("");
+        result.Keys.ShouldContain("");
     }
 
     [Fact]
@@ -56,7 +56,7 @@ public class IniParserTests
 
         var result = IniParser.Parse(content);
 
-        result["section"].ShouldContainKey("key");
+        result["section"].Keys.ShouldContain("key");
         result["section"]["key"].ShouldBe("value");
     }
 
@@ -82,7 +82,7 @@ public class IniParserTests
 
         var result = IniParser.Parse(content);
 
-        result.ShouldContainKey("");
+        result.Keys.ShouldContain("");
         result[""]["globalkey"].ShouldBe("globalvalue");
     }
 
@@ -96,7 +96,7 @@ public class IniParserTests
 
         var result = IniParser.Parse(content);
 
-        result["section"].ShouldContainKey("barekey");
+        result["section"].Keys.ShouldContain("barekey");
         result["section"]["barekey"].ShouldBe(string.Empty);
     }
 
