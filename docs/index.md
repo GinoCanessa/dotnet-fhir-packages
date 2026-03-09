@@ -24,6 +24,50 @@ or CI/CD pipelines.
 | [CLI Overview](cli-overview.md) | Installation, quick start, command summary, and environment variables. |
 | [CLI Reference](cli-reference.md) | Complete reference for all commands, options, arguments, and exit codes. |
 
+## Dependencies
+
+### CLI (.NET Global Tool)
+
+Running `fhir-pkg` requires the [.NET 10 SDK or runtime](https://dotnet.microsoft.com/).
+
+The CLI pulls in the following packages (resolved automatically on install):
+
+| Package | Purpose |
+|---------|---------|
+| [System.CommandLine](https://www.nuget.org/packages/System.CommandLine) | Command-line argument parsing |
+| [Spectre.Console](https://www.nuget.org/packages/Spectre.Console) | Rich terminal output (tables, progress bars, colors) |
+| **FhirPkg** (SDK) | Core FHIR package management logic (see below) |
+
+### SDK (NuGet Library)
+
+Integrating **FhirPkg** into your application requires a project targeting **net10.0**
+or later.
+
+| Package | Purpose |
+|---------|---------|
+| [Microsoft.Extensions.DependencyInjection.Abstractions](https://www.nuget.org/packages/Microsoft.Extensions.DependencyInjection.Abstractions) | Service registration abstractions |
+| [Microsoft.Extensions.Http](https://www.nuget.org/packages/Microsoft.Extensions.Http) | `IHttpClientFactory` support |
+| [Microsoft.Extensions.Logging.Abstractions](https://www.nuget.org/packages/Microsoft.Extensions.Logging.Abstractions) | Logging abstractions |
+| [Microsoft.Extensions.Options](https://www.nuget.org/packages/Microsoft.Extensions.Options) | Options / configuration binding |
+
+All four packages are transitive — they are restored automatically when you add
+**FhirPkg** to your project.
+
+### Development (Working With This Project)
+
+Building and testing locally requires the [.NET 10 SDK](https://dotnet.microsoft.com/).
+
+| Package | Purpose |
+|---------|---------|
+| [xunit](https://www.nuget.org/packages/xunit) | Test framework |
+| [xunit.runner.visualstudio](https://www.nuget.org/packages/xunit.runner.visualstudio) | VS / `dotnet test` integration |
+| [Microsoft.NET.Test.Sdk](https://www.nuget.org/packages/Microsoft.NET.Test.Sdk) | Test-host plumbing |
+| [Moq](https://www.nuget.org/packages/Moq) | Mocking (unit tests) |
+| [Shouldly](https://www.nuget.org/packages/Shouldly) | Fluent assertions |
+| [coverlet.collector](https://www.nuget.org/packages/coverlet.collector) | Code-coverage collection |
+
+All test dependencies are restored automatically by `dotnet restore`.
+
 ## Getting Started
 
 **Install the SDK:**
