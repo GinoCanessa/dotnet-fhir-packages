@@ -28,7 +28,7 @@ or CI/CD pipelines.
 
 ### CLI (.NET Global Tool)
 
-Running `fhir-pkg` requires the [.NET 10 SDK or runtime](https://dotnet.microsoft.com/).
+Running `fhir-pkg` requires the [.NET 8 SDK or runtime](https://dotnet.microsoft.com/) or later (.NET 8, 9, and 10 are supported; .NET 10 is recommended).
 
 The CLI pulls in the following packages (resolved automatically on install):
 
@@ -40,8 +40,8 @@ The CLI pulls in the following packages (resolved automatically on install):
 
 ### SDK (NuGet Library)
 
-Integrating **FhirPkg** into your application requires a project targeting **net10.0**
-or later.
+Integrating **FhirPkg** into your application requires a project targeting **net8.0**
+or later (net8.0, net9.0, and net10.0 are supported; net10.0 is recommended).
 
 | Package | Purpose |
 |---------|---------|
@@ -55,7 +55,7 @@ All four packages are transitive — they are restored automatically when you ad
 
 ### Development (Working With This Project)
 
-Building and testing locally requires the [.NET 10 SDK](https://dotnet.microsoft.com/).
+Building and testing locally requires the [.NET 8 SDK](https://dotnet.microsoft.com/) or later (.NET 10 is recommended).
 
 | Package | Purpose |
 |---------|---------|

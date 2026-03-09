@@ -100,7 +100,7 @@ services.AddFhirPackageManagement(options =>
 
 ## Prerequisites
 
-- [.NET 10.0 SDK](https://dotnet.microsoft.com/download) or later
+- [.NET 8.0 SDK](https://dotnet.microsoft.com/download) or later (8, 9, and 10 are supported; .NET 10 is recommended)
 
 ## Building from Source
 
