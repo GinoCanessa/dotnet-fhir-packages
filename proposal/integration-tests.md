@@ -428,11 +428,11 @@ public class MockRegistryServer : IAsyncDisposable
 
 ```bash
 # Run all integration tests (recorded/offline mode)
-dotnet test test/Firely.Fhir.Packages.IntegrationTests/ \
+dotnet test test/FhirPkg.IntegrationTests/ \
     --filter "Category=Integration"
 
 # Run against live registries
-FHIR_INTEGRATION_LIVE=1 dotnet test test/Firely.Fhir.Packages.IntegrationTests/ \
+FHIR_INTEGRATION_LIVE=1 dotnet test test/FhirPkg.IntegrationTests/ \
     --filter "Category=Integration"
 
 # Run a specific test suite
@@ -466,7 +466,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-      - run: dotnet test test/Firely.Fhir.Packages.IntegrationTests/
+      - run: dotnet test test/FhirPkg.IntegrationTests/
 
   integration-tests-live:
     runs-on: ubuntu-latest
@@ -476,7 +476,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
-      - run: dotnet test test/Firely.Fhir.Packages.IntegrationTests/
+      - run: dotnet test test/FhirPkg.IntegrationTests/
         env:
           FHIR_INTEGRATION_LIVE: '1'
 ```

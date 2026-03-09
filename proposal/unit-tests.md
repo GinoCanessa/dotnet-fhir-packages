@@ -433,10 +433,10 @@ TestData/
 
 ```bash
 # Run all unit tests
-dotnet test test/Firely.Fhir.Packages.Tests/
+dotnet test test/FhirPkg.Tests/
 
 # Run with coverage
-dotnet test test/Firely.Fhir.Packages.Tests/ --collect:"XPlat Code Coverage"
+dotnet test test/FhirPkg.Tests/ --collect:"XPlat Code Coverage"
 
 # Run specific test class
 dotnet test --filter "FullyQualifiedName~FhirSemVerTests"

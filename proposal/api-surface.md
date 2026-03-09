@@ -23,14 +23,14 @@ This document defines the complete public API for the FHIR Package Management li
 ## Namespace Structure
 
 ```
-Firely.Fhir.Packages
-├── Firely.Fhir.Packages                  # Core orchestrator, options, DI extensions
-├── Firely.Fhir.Packages.Models           # Data models: manifests, directives, records
-├── Firely.Fhir.Packages.Registry         # Registry client interfaces and implementations
-├── Firely.Fhir.Packages.Cache            # Cache interfaces and implementations
-├── Firely.Fhir.Packages.Resolution       # Dependency and version resolution
-├── Firely.Fhir.Packages.Indexing         # Resource indexing and discovery
-└── Firely.Fhir.Packages.Cli             # CLI tool (separate project)
+FhirPkg
+├── FhirPkg                  # Core orchestrator, options, DI extensions
+├── FhirPkg.Models           # Data models: manifests, directives, records
+├── FhirPkg.Registry         # Registry client interfaces and implementations
+├── FhirPkg.Cache            # Cache interfaces and implementations
+├── FhirPkg.Resolution       # Dependency and version resolution
+├── FhirPkg.Indexing         # Resource indexing and discovery
+└── FhirPkg.Cli             # CLI tool (separate project)
 ```
 
 ---
@@ -42,7 +42,7 @@ Firely.Fhir.Packages
 The primary entry point for all package management operations.
 
 ```csharp
-namespace Firely.Fhir.Packages;
+namespace FhirPkg;
 
 /// <summary>
 /// Primary interface for FHIR package management operations.
@@ -146,7 +146,7 @@ public interface IFhirPackageManager
 Interface for querying and downloading from package registries.
 
 ```csharp
-namespace Firely.Fhir.Packages.Registry;
+namespace FhirPkg.Registry;
 
 /// <summary>
 /// Interface for communicating with a FHIR package registry.
@@ -208,7 +208,7 @@ public interface IRegistryClient
 Interface for local package storage and retrieval.
 
 ```csharp
-namespace Firely.Fhir.Packages.Cache;
+namespace FhirPkg.Cache;
 
 /// <summary>
 /// Interface for the local FHIR package cache (~/.fhir/packages).
@@ -293,7 +293,7 @@ public interface IPackageCache
 Interface for resolving transitive dependency trees.
 
 ```csharp
-namespace Firely.Fhir.Packages.Resolution;
+namespace FhirPkg.Resolution;
 
 /// <summary>
 /// Resolves the complete transitive dependency tree for a package or project.
@@ -326,7 +326,7 @@ public interface IDependencyResolver
 Interface for resolving version specifiers to exact versions.
 
 ```csharp
-namespace Firely.Fhir.Packages.Resolution;
+namespace FhirPkg.Resolution;
 
 /// <summary>
 /// Resolves version specifiers (wildcards, ranges, tags) to exact versions.
@@ -359,7 +359,7 @@ public interface IVersionResolver
 Interface for indexing resources within packages.
 
 ```csharp
-namespace Firely.Fhir.Packages.Indexing;
+namespace FhirPkg.Indexing;
 
 /// <summary>
 /// Indexes FHIR resources within packages for efficient discovery.
@@ -402,7 +402,7 @@ public interface IPackageIndexer
 ### Package Identity
 
 ```csharp
-namespace Firely.Fhir.Packages.Models;
+namespace FhirPkg.Models;
 
 /// <summary>
 /// Immutable reference to a specific package version.
@@ -482,7 +482,7 @@ public record PackageDirective
 ### Package Manifest
 
 ```csharp
-namespace Firely.Fhir.Packages.Models;
+namespace FhirPkg.Models;
 
 /// <summary>
 /// Represents the package.json manifest from a FHIR package.
@@ -533,7 +533,7 @@ public record NpmRepository(string? Type, string? Url, string? Directory);
 ### Version Model
 
 ```csharp
-namespace Firely.Fhir.Packages.Models;
+namespace FhirPkg.Models;
 
 /// <summary>
 /// FHIR-aware semantic version with support for FHIR pre-release tag hierarchy.
@@ -606,7 +606,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
 ### Package Resolution Results
 
 ```csharp
-namespace Firely.Fhir.Packages.Models;
+namespace FhirPkg.Models;
 
 /// <summary>
 /// Result of resolving a directive to an exact version and download location.
@@ -734,7 +734,7 @@ public record PublishResult
 ### Package Download Result
 
 ```csharp
-namespace Firely.Fhir.Packages.Models;
+namespace FhirPkg.Models;
 
 /// <summary>
 /// Result of downloading a package tarball.
@@ -755,7 +755,7 @@ public record PackageDownloadResult : IAsyncDisposable
 ### Resource Indexing Models
 
 ```csharp
-namespace Firely.Fhir.Packages.Indexing;
+namespace FhirPkg.Indexing;
 
 /// <summary>
 /// Index of all resources in a package.
@@ -838,7 +838,7 @@ public record ResourceSearchCriteria
 ### Cache Metadata
 
 ```csharp
-namespace Firely.Fhir.Packages.Cache;
+namespace FhirPkg.Cache;
 
 /// <summary>
 /// Represents the packages.ini cache metadata file.
@@ -865,7 +865,7 @@ public record CacheMetadataEntry
 ### CI Build Models
 
 ```csharp
-namespace Firely.Fhir.Packages.Models;
+namespace FhirPkg.Models;
 
 /// <summary>
 /// A record from the build.fhir.org QA index (qas.json).
@@ -906,7 +906,7 @@ public record CiBuildManifest
 ## Enumerations
 
 ```csharp
-namespace Firely.Fhir.Packages.Models;
+namespace FhirPkg.Models;
 
 /// <summary>Classification of a package name.</summary>
 public enum PackageNameType
@@ -1005,7 +1005,7 @@ public enum RegistryType
 ### Implementations
 
 ```csharp
-namespace Firely.Fhir.Packages.Registry;
+namespace FhirPkg.Registry;
 
 /// <summary>
 /// Client for FHIR NPM registries (packages.fhir.org, packages2.fhir.org).
@@ -1045,7 +1045,7 @@ public class RedundantRegistryClient : IRegistryClient
 ### Registry Endpoint Configuration
 
 ```csharp
-namespace Firely.Fhir.Packages.Registry;
+namespace FhirPkg.Registry;
 
 /// <summary>
 /// Configuration for a package registry endpoint.
@@ -1100,7 +1100,7 @@ public record RegistryEndpoint
 ### Implementations
 
 ```csharp
-namespace Firely.Fhir.Packages.Cache;
+namespace FhirPkg.Cache;
 
 /// <summary>
 /// Disk-based package cache at ~/.fhir/packages.
@@ -1149,7 +1149,7 @@ public enum SafeMode
 ### Options Pattern Types
 
 ```csharp
-namespace Firely.Fhir.Packages;
+namespace FhirPkg;
 
 /// <summary>
 /// Root configuration for the FHIR package manager.
@@ -1288,7 +1288,7 @@ public enum PackageProgressPhase
 ## Dependency Injection Extensions
 
 ```csharp
-namespace Firely.Fhir.Packages;
+namespace FhirPkg;
 
 /// <summary>
 /// Extension methods for registering FHIR package services with Microsoft.Extensions.DI.

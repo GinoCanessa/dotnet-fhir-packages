@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This proposal defines a new C# library and CLI tool for client-side FHIR package management. The library consolidates the best features from the four major reference implementations (SUSHI/fhir-package-loader in TypeScript, Firely.Fhir.Packages in C#, Fhir.CodeGen.Packages in C#, and the Java IG Publisher) into a single, comprehensive, well-tested .NET SDK.
+This proposal defines a new C# library and CLI tool for client-side FHIR package management. The library consolidates the best features from the four major reference implementations (SUSHI/fhir-package-loader in TypeScript, FhirPkg in C#, Fhir.CodeGen.Packages in C#, and the Java IG Publisher) into a single, comprehensive, well-tested .NET SDK.
 
 The resulting library will be the definitive C# solution for discovering, resolving, downloading, caching, and managing FHIR packages from multiple registries — including published releases, CI builds, and private registries.
 

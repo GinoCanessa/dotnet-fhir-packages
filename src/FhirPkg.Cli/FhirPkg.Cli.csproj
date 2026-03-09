@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>FhirPkg.Cli</RootNamespace>
+
+    <!-- .NET tool metadata -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>fhir-pkg</ToolCommandName>
+    <PackageId>fhir-pkg</PackageId>
+    <Description>CLI tool for managing FHIR packages — install, restore, list, search, and cache management.</Description>
+    <Authors>Gino Canessa</Authors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.*" />
+    <PackageReference Include="Spectre.Console" Version="0.*" />
+    <ProjectReference Include="..\FhirPkg\FhirPkg.csproj" />
+  </ItemGroup>
+
+</Project>

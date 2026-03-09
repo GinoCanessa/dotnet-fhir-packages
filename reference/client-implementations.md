@@ -7,7 +7,7 @@ This document provides a cross-reference of the FHIR package management client i
 | Feature | SUSHI (TypeScript) | Firely (C#) | CodeGen (C#) | Java Publisher |
 |---------|-------------------|-------------|--------------|---------------|
 | **Language** | TypeScript/Node.js | C# (.NET) | C# (.NET 9) | Java |
-| **Package** | `fhir-package-loader` | `Firely.Fhir.Packages` | `Fhir.CodeGen.Packages` | Part of IG Publisher |
+| **Package** | `fhir-package-loader` | `FhirPkg` | `Fhir.CodeGen.Packages` | Part of IG Publisher |
 | **CLI** | `fpl install` | N/A | N/A | Part of publisher CLI |
 | **Browser Support** | Yes (IndexedDB) | No | No | No |
 | **Primary Registry** | `packages.fhir.org` | `packages.simplifier.net` | `packages2.fhir.org` | Via canonical URLs |
@@ -113,7 +113,7 @@ await loader.loadVirtualPackage(virtualPkg);
 
 ---
 
-## Firely.Fhir.Packages (C#)
+## FhirPkg (C#)
 
 ### Architecture
 

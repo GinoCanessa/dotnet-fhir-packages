@@ -5,14 +5,14 @@ This document defines the phased implementation plan for the FHIR Package Manage
 ## Project Structure
 
 ```
-Firely.Fhir.Packages/
-├── Firely.Fhir.Packages.sln
+FhirPkg/
+├── FhirPkg.sln
 ├── README.md
 ├── LICENSE
 │
 ├── src/
-│   ├── Firely.Fhir.Packages/                # Core library
-│   │   ├── Firely.Fhir.Packages.csproj
+│   ├── FhirPkg/                # Core library
+│   │   ├── FhirPkg.csproj
 │   │   ├── Models/
 │   │   │   ├── PackageReference.cs
 │   │   │   ├── PackageDirective.cs
@@ -65,8 +65,8 @@ Firely.Fhir.Packages/
 │   │       ├── IniParser.cs
 │   │       └── PackageFixups.cs
 │   │
-│   └── Firely.Fhir.Packages.Cli/            # CLI tool
-│       ├── Firely.Fhir.Packages.Cli.csproj
+│   └── FhirPkg.Cli/            # CLI tool
+│       ├── FhirPkg.Cli.csproj
 │       ├── Program.cs
 │       ├── Commands/
 │       │   ├── InstallCommand.cs
@@ -83,8 +83,8 @@ Firely.Fhir.Packages/
 │           └── JsonOutput.cs
 │
 ├── test/
-│   ├── Firely.Fhir.Packages.Tests/          # Unit tests
-│   │   ├── Firely.Fhir.Packages.Tests.csproj
+│   ├── FhirPkg.Tests/          # Unit tests
+│   │   ├── FhirPkg.Tests.csproj
 │   │   ├── Models/
 │   │   │   ├── PackageReferenceTests.cs
 │   │   │   ├── PackageDirectiveTests.cs
@@ -114,8 +114,8 @@ Firely.Fhir.Packages/
 │   │       ├── IniParserTests.cs
 │   │       └── PackageFixupsTests.cs
 │   │
-│   └── Firely.Fhir.Packages.IntegrationTests/  # Integration tests
-│       ├── Firely.Fhir.Packages.IntegrationTests.csproj
+│   └── FhirPkg.IntegrationTests/  # Integration tests
+│       ├── FhirPkg.IntegrationTests.csproj
 │       ├── RegistryIntegrationTests.cs
 │       ├── CacheIntegrationTests.cs
 │       ├── InstallIntegrationTests.cs
@@ -132,7 +132,7 @@ Firely.Fhir.Packages/
 
 ## Dependencies
 
-### Core Library (`Firely.Fhir.Packages`)
+### Core Library (`FhirPkg`)
 
 | Package | Purpose |
 |---------|---------|
@@ -143,7 +143,7 @@ Firely.Fhir.Packages/
 | `Microsoft.Extensions.Http` | HttpClientFactory integration |
 | `SharpZipLib` (or `System.IO.Compression`) | Tar/gzip extraction |
 
-### CLI Tool (`Firely.Fhir.Packages.Cli`)
+### CLI Tool (`FhirPkg.Cli`)
 
 | Package | Purpose |
 |---------|---------|

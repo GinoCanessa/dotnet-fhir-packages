@@ -1,6 +1,6 @@
 # CLI Documentation: `fhir-pkg`
 
-The `fhir-pkg` command-line tool provides a terminal interface for managing FHIR packages. It wraps the `Firely.Fhir.Packages` library and supports all package management operations: installing, restoring, listing, searching, and cache management.
+The `fhir-pkg` command-line tool provides a terminal interface for managing FHIR packages. It wraps the `FhirPkg` library and supports all package management operations: installing, restoring, listing, searching, and cache management.
 
 ## Installation
 
