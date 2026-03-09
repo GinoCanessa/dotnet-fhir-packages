@@ -13,9 +13,11 @@ namespace FhirPkg.Registry;
 /// Abstract base class that provides shared HTTP infrastructure for registry client implementations.
 /// </summary>
 /// <remarks>
-/// Configures the supplied <see cref="HttpClient"/> with authentication headers, user-agent, and
-/// custom headers from the <see cref="RegistryEndpoint"/>. Provides protected helper methods for
-/// common HTTP operations with consistent error handling:
+/// Applies authentication headers, user-agent, and custom headers from the
+/// <see cref="RegistryEndpoint"/> on each outbound request (via per-request
+/// <see cref="HttpRequestMessage"/> headers) so that a single <see cref="HttpClient"/>
+/// instance can be safely shared across multiple registry clients. Provides protected
+/// helper methods for common HTTP operations with consistent error handling:
 /// <list type="bullet">
 ///   <item><description>HTTP 404 → <see langword="null"/> (not found).</description></item>
 ///   <item><description>HTTP 5xx → <see cref="HttpRequestException"/> (server error).</description></item>
@@ -79,8 +81,6 @@ public abstract class RegistryClientBase : IRegistryClient
         EndpointConfig = endpoint;
         Logger = logger;
         BaseUrl = endpoint.Url.TrimEnd('/');
-
-        ConfigureHttpClient(httpClient, endpoint);
     }
 
     // ── Protected HTTP helpers ──────────────────────────────────────────
@@ -97,7 +97,8 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("GET JSON {Uri}", requestUri);
 
-        using var response = await Http.GetAsync(requestUri, cancellationToken).ConfigureAwait(false);
+        using var request = CreateRequestMessage(HttpMethod.Get, requestUri);
+        using var response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
         if (response.StatusCode is HttpStatusCode.NotFound)
         {
@@ -125,7 +126,8 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("GET JSON {Uri}", requestUri);
 
-        using var response = await Http.GetAsync(requestUri, cancellationToken).ConfigureAwait(false);
+        using var request = CreateRequestMessage(HttpMethod.Get, requestUri);
+        using var response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
         if (response.StatusCode is HttpStatusCode.NotFound)
         {
@@ -159,9 +161,19 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("GET stream {Uri}", requestUri);
 
-        var response = await Http.GetAsync(
-                requestUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-            .ConfigureAwait(false);
+        var request = CreateRequestMessage(HttpMethod.Get, requestUri);
+        HttpResponseMessage response;
+        try
+        {
+            response = await Http.SendAsync(
+                    request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            request.Dispose();
+            throw;
+        }
 
         if (response.StatusCode is HttpStatusCode.NotFound)
         {
@@ -198,8 +210,10 @@ public abstract class RegistryClientBase : IRegistryClient
 
         var json = JsonSerializer.Serialize(content, JsonOptions);
         using var httpContent = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        using var request = CreateRequestMessage(HttpMethod.Post, requestUri);
+        request.Content = httpContent;
 
-        var response = await Http.PostAsync(requestUri, httpContent, cancellationToken)
+        var response = await Http.SendAsync(request, cancellationToken)
             .ConfigureAwait(false);
 
         await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
@@ -222,7 +236,8 @@ public abstract class RegistryClientBase : IRegistryClient
         using var httpContent = new StreamContent(stream);
         httpContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
 
-        using var request = new HttpRequestMessage(HttpMethod.Put, requestUri) { Content = httpContent };
+        using var request = CreateRequestMessage(HttpMethod.Put, requestUri);
+        request.Content = httpContent;
         var response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
         await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
@@ -252,25 +267,33 @@ public abstract class RegistryClientBase : IRegistryClient
 
     // ── Private infrastructure ──────────────────────────────────────────
 
-    private static void ConfigureHttpClient(HttpClient httpClient, RegistryEndpoint endpoint)
+    /// <summary>
+    /// Creates an <see cref="HttpRequestMessage"/> with per-request headers from the endpoint configuration.
+    /// This avoids mutating <see cref="HttpClient.DefaultRequestHeaders"/> on a shared instance.
+    /// </summary>
+    private protected HttpRequestMessage CreateRequestMessage(HttpMethod method, string requestUri)
     {
-        httpClient.DefaultRequestHeaders.TryAddWithoutValidation(
-            "User-Agent",
-            endpoint.UserAgent ?? DefaultUserAgent);
+        var request = new HttpRequestMessage(method, requestUri);
 
-        if (endpoint.AuthHeaderValue is not null)
+        request.Headers.TryAddWithoutValidation(
+            "User-Agent",
+            EndpointConfig.UserAgent ?? DefaultUserAgent);
+
+        if (EndpointConfig.AuthHeaderValue is not null)
         {
-            httpClient.DefaultRequestHeaders.TryAddWithoutValidation(
-                "Authorization", endpoint.AuthHeaderValue);
+            request.Headers.TryAddWithoutValidation(
+                "Authorization", EndpointConfig.AuthHeaderValue);
         }
 
-        if (endpoint.CustomHeaders is { Count: > 0 } headers)
+        if (EndpointConfig.CustomHeaders is { Count: > 0 } headers)
         {
             foreach (var (name, value) in headers)
             {
-                httpClient.DefaultRequestHeaders.TryAddWithoutValidation(name, value);
+                request.Headers.TryAddWithoutValidation(name, value);
             }
         }
+
+        return request;
     }
 
     private async Task EnsureSuccessAsync(

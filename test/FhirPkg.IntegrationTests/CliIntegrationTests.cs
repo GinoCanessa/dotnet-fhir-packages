@@ -25,6 +25,8 @@ public class CliIntegrationTests : IntegrationTestBase
 
     private async Task<(int ExitCode, string StdOut, string StdErr)> RunCliRaw(string allArgs)
     {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -38,10 +40,24 @@ public class CliIntegrationTests : IntegrationTestBase
             }
         };
         process.Start();
-        var stdout = await process.StandardOutput.ReadToEndAsync();
-        var stderr = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        return (process.ExitCode, stdout, stderr);
+
+        // Read stdout and stderr concurrently to avoid deadlock when pipe buffers fill
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
+        var stderrTask = process.StandardError.ReadToEndAsync(cts.Token);
+
+        try
+        {
+            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+            await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { /* best effort */ }
+            throw new TimeoutException(
+                $"CLI process did not complete within the 60-second timeout. Args: {allArgs}");
+        }
+
+        return (process.ExitCode, stdoutTask.Result, stderrTask.Result);
     }
 
     [Fact]

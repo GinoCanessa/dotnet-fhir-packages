@@ -221,51 +221,62 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
 
         // Step 6: Verify checksum if configured
         Stream contentStream = downloadResult.Content;
-        if (_options.VerifyChecksums && resolved.ShaSum is not null)
+        MemoryStream? checksumBuffer = null;
+        try
         {
-            // Buffer the stream so we can compute the hash and then seek back for extraction
-            var memoryStream = new MemoryStream();
-            await contentStream.CopyToAsync(memoryStream, cancellationToken).ConfigureAwait(false);
-            memoryStream.Position = 0;
-
-            if (!CheckSum.Verify(memoryStream, resolved.ShaSum))
+            if (_options.VerifyChecksums && resolved.ShaSum is not null)
             {
-                _logger.LogError(
-                    "SHA-1 checksum verification failed for {Name}#{Version}. Expected: {Expected}.",
-                    resolved.Reference.Name, resolved.Reference.Version, resolved.ShaSum);
-                ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Failed);
-                throw new InvalidOperationException(
-                    $"SHA-1 checksum verification failed for {resolved.Reference.FhirDirective}.");
+                // Buffer the stream so we can compute the hash and then seek back for extraction
+                checksumBuffer = new MemoryStream();
+                await contentStream.CopyToAsync(checksumBuffer, cancellationToken).ConfigureAwait(false);
+                checksumBuffer.Position = 0;
+
+                if (!CheckSum.Verify(checksumBuffer, resolved.ShaSum))
+                {
+                    _logger.LogError(
+                        "SHA-1 checksum verification failed for {Name}#{Version}. Expected: {Expected}.",
+                        resolved.Reference.Name, resolved.Reference.Version, resolved.ShaSum);
+                    ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Failed);
+                    throw new InvalidOperationException(
+                        $"SHA-1 checksum verification failed for {resolved.Reference.FhirDirective}.");
+                }
+
+                checksumBuffer.Position = 0;
+                contentStream = checksumBuffer;
+                _logger.LogDebug("SHA-1 checksum verified for {Name}#{Version}.", resolved.Reference.Name, resolved.Reference.Version);
             }
 
-            memoryStream.Position = 0;
-            contentStream = memoryStream;
-            _logger.LogDebug("SHA-1 checksum verified for {Name}#{Version}.", resolved.Reference.Name, resolved.Reference.Version);
+            // Step 7: Install to cache
+            ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Extracting);
+
+            var installCacheOptions = new InstallCacheOptions
+            {
+                OverwriteExisting = options.OverwriteExisting,
+                VerifyChecksum = false // We already verified above
+            };
+
+            var record = await _cache.InstallAsync(resolved.Reference, contentStream, installCacheOptions, cancellationToken)
+                .ConfigureAwait(false);
+
+            _logger.LogInformation("Installed {Name}#{Version} to {Path}.",
+                record.Reference.Name, record.Reference.Version, record.DirectoryPath);
+
+            // Step 8: Recursively install dependencies if requested
+            if (options.IncludeDependencies)
+            {
+                await InstallDependenciesAsync(record, options, cancellationToken).ConfigureAwait(false);
+            }
+
+            ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Complete);
+            return record;
         }
-
-        // Step 7: Install to cache
-        ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Extracting);
-
-        var installCacheOptions = new InstallCacheOptions
+        finally
         {
-            OverwriteExisting = options.OverwriteExisting,
-            VerifyChecksum = false // We already verified above
-        };
-
-        var record = await _cache.InstallAsync(resolved.Reference, contentStream, installCacheOptions, cancellationToken)
-            .ConfigureAwait(false);
-
-        _logger.LogInformation("Installed {Name}#{Version} to {Path}.",
-            record.Reference.Name, record.Reference.Version, record.DirectoryPath);
-
-        // Step 8: Recursively install dependencies if requested
-        if (options.IncludeDependencies)
-        {
-            await InstallDependenciesAsync(record, options, cancellationToken).ConfigureAwait(false);
+            if (checksumBuffer is not null)
+            {
+                await checksumBuffer.DisposeAsync().ConfigureAwait(false);
+            }
         }
-
-        ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Complete);
-        return record;
     }
 
     /// <inheritdoc />

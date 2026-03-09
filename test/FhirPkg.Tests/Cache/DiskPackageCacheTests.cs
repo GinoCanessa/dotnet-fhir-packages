@@ -6,6 +6,14 @@ using Xunit;
 
 namespace FhirPkg.Tests.Cache;
 
+/// <summary>
+/// Serializes test classes that mutate process-global environment variables so they
+/// cannot race with one another when xUnit runs classes in parallel.
+/// </summary>
+[CollectionDefinition("EnvironmentVariable")]
+public class EnvironmentVariableCollection : ICollectionFixture<EnvironmentVariableCollection> { }
+
+[Collection("EnvironmentVariable")]
 public class DiskPackageCacheTests : IDisposable
 {
     private readonly string _tempDir;
