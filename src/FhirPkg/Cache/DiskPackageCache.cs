@@ -197,8 +197,8 @@ public class DiskPackageCache : IPackageCache
                 Directory.Delete(targetDirectory, recursive: true);
             }
 
-            // Extract to a temporary directory
-            var tempDir = Path.Combine(Path.GetTempPath(), $"fhir-pkg-{Guid.NewGuid():N}");
+            // Extract to a temporary directory (prefer system temp, fall back to cache)
+            var tempDir = TempDirectory.Create("fhir-pkg", CacheDirectory);
             try
             {
                 await TarballExtractor.ExtractAsync(tarballStream, tempDir, ct).ConfigureAwait(false);

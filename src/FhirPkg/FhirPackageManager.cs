@@ -758,12 +758,12 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
     /// <summary>
     /// Extracts a <see cref="PackageReference"/> from a tarball by reading its manifest.
     /// </summary>
-    private static async Task<PackageReference> ExtractReferenceFromTarballAsync(
+    private async Task<PackageReference> ExtractReferenceFromTarballAsync(
         string tarballPath,
         CancellationToken cancellationToken)
     {
-        // Create a temporary directory to extract the manifest
-        var tempDir = Path.Combine(Path.GetTempPath(), $"fhirpkg-{Guid.NewGuid():N}");
+        // Create a temporary directory (prefer system temp, fall back to cache)
+        var tempDir = TempDirectory.Create("fhirpkg", _cache.CacheDirectory);
         try
         {
             await using var stream = File.OpenRead(tarballPath);
