@@ -3,7 +3,7 @@
 
 using System.Text;
 using FhirPkg.Utilities;
-using FluentAssertions;
+using Shouldly;
 using Xunit;
 
 namespace FhirPkg.Tests.Utilities;
@@ -18,7 +18,7 @@ public class CheckSumTests
 
         var hash = CheckSum.ComputeSha1(data);
 
-        hash.Should().Be("da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        hash.ShouldBe("da39a3ee5e6b4b0d3255bfef95601890afd80709");
     }
 
     [Fact]
@@ -30,7 +30,7 @@ public class CheckSumTests
         var hashFromStream = CheckSum.ComputeSha1(stream);
         var hashFromBytes = CheckSum.ComputeSha1(data);
 
-        hashFromStream.Should().Be(hashFromBytes);
+        hashFromStream.ShouldBe(hashFromBytes);
     }
 
     [Fact]
@@ -42,7 +42,7 @@ public class CheckSumTests
 
         var result = CheckSum.Verify(stream, expectedHash);
 
-        result.Should().BeTrue();
+        result.ShouldBeTrue();
     }
 
     [Fact]
@@ -53,7 +53,7 @@ public class CheckSumTests
 
         var result = CheckSum.Verify(stream, "0000000000000000000000000000000000000000");
 
-        result.Should().BeFalse();
+        result.ShouldBeFalse();
     }
 
     [Theory]
@@ -67,7 +67,7 @@ public class CheckSumTests
 
         var result = CheckSum.Verify(stream, expectedHash);
 
-        result.Should().BeTrue();
+        result.ShouldBeTrue();
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public class CheckSumTests
 
         var result = CheckSum.Verify(stream, expectedHash);
 
-        result.Should().BeTrue();
+        result.ShouldBeTrue();
     }
 
     [Fact]
@@ -89,7 +89,7 @@ public class CheckSumTests
 
         var hash = CheckSum.ComputeSha1(data);
 
-        hash.Should().HaveLength(40);
-        hash.Should().MatchRegex("^[0-9a-f]{40}$");
+        hash.Length.ShouldBe(40);
+        hash.ShouldMatch("^[0-9a-f]{40}$");
     }
 }

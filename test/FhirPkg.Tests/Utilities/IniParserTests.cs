@@ -2,7 +2,7 @@
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
 using FhirPkg.Utilities;
-using FluentAssertions;
+using Shouldly;
 using Xunit;
 
 namespace FhirPkg.Tests.Utilities;
@@ -24,14 +24,14 @@ public class IniParserTests
     {
         var result = IniParser.Parse(PackagesIniContent);
 
-        result.Should().ContainKey("packages");
-        result.Should().ContainKey("metadata");
+        result.ShouldContainKey("packages");
+        result.ShouldContainKey("metadata");
 
-        result["packages"].Should().ContainKey("hl7.fhir.r4.core#4.0.1");
-        result["packages"]["hl7.fhir.r4.core#4.0.1"].Should().Be("installed");
+        result["packages"].ShouldContainKey("hl7.fhir.r4.core#4.0.1");
+        result["packages"]["hl7.fhir.r4.core#4.0.1"].ShouldBe("installed");
 
-        result["metadata"]["version"].Should().Be("1");
-        result["metadata"]["created"].Should().Be("2024-01-15");
+        result["metadata"]["version"].ShouldBe("1");
+        result["metadata"]["created"].ShouldBe("2024-01-15");
     }
 
     [Fact]
@@ -39,9 +39,9 @@ public class IniParserTests
     {
         var result = IniParser.Parse("");
 
-        result.Should().NotBeNull();
+        result.ShouldNotBeNull();
         // Should have at least the default empty-string section
-        result.Should().ContainKey("");
+        result.ShouldContainKey("");
     }
 
     [Fact]
@@ -56,8 +56,8 @@ public class IniParserTests
 
         var result = IniParser.Parse(content);
 
-        result["section"].Should().ContainKey("key");
-        result["section"]["key"].Should().Be("value");
+        result["section"].ShouldContainKey("key");
+        result["section"]["key"].ShouldBe("value");
     }
 
     [Fact]
@@ -67,8 +67,8 @@ public class IniParserTests
         var serialized = IniParser.Serialize(original);
         var reparsed = IniParser.Parse(serialized);
 
-        reparsed["packages"]["hl7.fhir.r4.core#4.0.1"].Should().Be("installed");
-        reparsed["metadata"]["version"].Should().Be("1");
+        reparsed["packages"]["hl7.fhir.r4.core#4.0.1"].ShouldBe("installed");
+        reparsed["metadata"]["version"].ShouldBe("1");
     }
 
     [Fact]
@@ -82,8 +82,8 @@ public class IniParserTests
 
         var result = IniParser.Parse(content);
 
-        result.Should().ContainKey("");
-        result[""]["globalkey"].Should().Be("globalvalue");
+        result.ShouldContainKey("");
+        result[""]["globalkey"].ShouldBe("globalvalue");
     }
 
     [Fact]
@@ -96,8 +96,8 @@ public class IniParserTests
 
         var result = IniParser.Parse(content);
 
-        result["section"].Should().ContainKey("barekey");
-        result["section"]["barekey"].Should().Be(string.Empty);
+        result["section"].ShouldContainKey("barekey");
+        result["section"]["barekey"].ShouldBe(string.Empty);
     }
 
     [Fact]
@@ -105,6 +105,6 @@ public class IniParserTests
     {
         var act = () => IniParser.Parse(null!);
 
-        act.Should().Throw<ArgumentNullException>();
+        Should.Throw<ArgumentNullException>(() => act());
     }
 }

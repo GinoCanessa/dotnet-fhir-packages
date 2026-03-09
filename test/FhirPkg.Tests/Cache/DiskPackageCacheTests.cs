@@ -1,7 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using FhirPkg.Cache;
-using FluentAssertions;
+using Shouldly;
 using Xunit;
 
 namespace FhirPkg.Tests.Cache;
@@ -33,8 +33,8 @@ public class DiskPackageCacheTests : IDisposable
     {
         var cache = new DiskPackageCache(_tempDir);
 
-        cache.CacheDirectory.Should().Be(_tempDir);
-        Directory.Exists(_tempDir).Should().BeTrue();
+        cache.CacheDirectory.ShouldBe(_tempDir);
+        Directory.Exists(_tempDir).ShouldBeTrue();
     }
 
     [Fact]
@@ -45,8 +45,8 @@ public class DiskPackageCacheTests : IDisposable
 
         var cache = new DiskPackageCache();
 
-        cache.CacheDirectory.Should().Be(envDir);
-        Directory.Exists(envDir).Should().BeTrue();
+        cache.CacheDirectory.ShouldBe(envDir);
+        Directory.Exists(envDir).ShouldBeTrue();
     }
 
     [Fact]
@@ -58,9 +58,9 @@ public class DiskPackageCacheTests : IDisposable
 
         var cache = new DiskPackageCache(explicitDir);
 
-        cache.CacheDirectory.Should().Be(explicitDir);
-        Directory.Exists(explicitDir).Should().BeTrue();
-        Directory.Exists(envDir).Should().BeFalse("env var path should not be created when explicit path is provided");
+        cache.CacheDirectory.ShouldBe(explicitDir);
+        Directory.Exists(explicitDir).ShouldBeTrue();
+        Directory.Exists(envDir).ShouldBeFalse("env var path should not be created when explicit path is provided");
     }
 
     [Fact]
@@ -74,6 +74,6 @@ public class DiskPackageCacheTests : IDisposable
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".fhir",
             "packages");
-        cache.CacheDirectory.Should().Be(expected);
+        cache.CacheDirectory.ShouldBe(expected);
     }
 }

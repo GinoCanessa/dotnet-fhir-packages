@@ -3,7 +3,7 @@
 
 using FhirPkg.Models;
 using FhirPkg.Registry;
-using FluentAssertions;
+using Shouldly;
 using Moq;
 using Xunit;
 
@@ -51,7 +51,7 @@ public class RedundantRegistryClientTests
 
         var result = await sut.ResolveAsync(directive);
 
-        result.Should().Be(expected);
+        result.ShouldBe(expected);
         client2.Verify(c => c.ResolveAsync(
             It.IsAny<PackageDirective>(),
             It.IsAny<VersionResolveOptions?>(),
@@ -86,7 +86,7 @@ public class RedundantRegistryClientTests
 
         var result = await sut.ResolveAsync(directive);
 
-        result.Should().Be(expected);
+        result.ShouldBe(expected);
     }
 
     [Fact]
@@ -111,7 +111,7 @@ public class RedundantRegistryClientTests
 
         var result = await sut.ResolveAsync(directive);
 
-        result.Should().BeNull();
+        result.ShouldBeNull();
     }
 
     [Fact]
@@ -142,7 +142,7 @@ public class RedundantRegistryClientTests
 
         var result = await sut.ResolveAsync(directive);
 
-        result.Should().Be(expected);
+        result.ShouldBe(expected);
     }
 
     [Fact]
@@ -150,7 +150,7 @@ public class RedundantRegistryClientTests
     {
         var act = () => new RedundantRegistryClient(Array.Empty<IRegistryClient>());
 
-        act.Should().Throw<ArgumentException>();
+        Should.Throw<ArgumentException>(() => act());
     }
 
     [Fact]
@@ -175,7 +175,7 @@ public class RedundantRegistryClientTests
         var sut = new RedundantRegistryClient(client1.Object, client2.Object);
         var results = await sut.SearchAsync(new PackageSearchCriteria { Name = "package" });
 
-        results.Should().HaveCount(3);
-        results.Select(r => r.Name).Should().Contain(["package.a", "package.b", "package.c"]);
+        results.Count.ShouldBe(3);
+        results.Select(r => r.Name).ShouldBe(new[] { "package.a", "package.b", "package.c" }, ignoreOrder: true);
     }
 }

@@ -2,7 +2,7 @@
 
 using System.Diagnostics;
 using System.Text.Json;
-using FluentAssertions;
+using Shouldly;
 using Xunit;
 
 namespace FhirPkg.IntegrationTests;
@@ -46,7 +46,7 @@ public class CliIntegrationTests : IntegrationTestBase
     {
         var (exitCode, _, _) = await RunCli("list");
 
-        exitCode.Should().Be(0);
+        exitCode.ShouldBe(0);
     }
 
     [Fact]
@@ -54,11 +54,11 @@ public class CliIntegrationTests : IntegrationTestBase
     {
         var (exitCode, stdout, _) = await RunCli("list", "--json");
 
-        exitCode.Should().Be(0);
+        exitCode.ShouldBe(0);
 
         // The JSON output should be parseable
         var act = () => JsonDocument.Parse(stdout);
-        act.Should().NotThrow("list --json should produce valid JSON");
+        Should.NotThrow(act, "list --json should produce valid JSON");
     }
 
     [Fact]
@@ -66,8 +66,8 @@ public class CliIntegrationTests : IntegrationTestBase
     {
         var (exitCode, stdout, _) = await RunCli("--help");
 
-        exitCode.Should().Be(0);
-        stdout.Should().Contain("fhir-pkg");
+        exitCode.ShouldBe(0);
+        stdout.ShouldContain("fhir-pkg");
     }
 
     [Fact]
@@ -75,7 +75,7 @@ public class CliIntegrationTests : IntegrationTestBase
     {
         var (exitCode, _, _) = await RunCliRaw($"list --package-cache-folder \"{TempCacheDir}\"");
 
-        exitCode.Should().Be(0);
+        exitCode.ShouldBe(0);
     }
 
     [Fact]
@@ -83,6 +83,6 @@ public class CliIntegrationTests : IntegrationTestBase
     {
         var (exitCode, _, _) = await RunCli("nonexistent-command-xyz");
 
-        exitCode.Should().NotBe(0);
+        exitCode.ShouldNotBe(0);
     }
 }

@@ -2,7 +2,7 @@
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
 using FhirPkg.Cache;
-using FluentAssertions;
+using Shouldly;
 using Xunit;
 
 namespace FhirPkg.Tests.Cache;
@@ -23,8 +23,8 @@ public class MemoryResourceCacheTests
         cache.Set("key1", resource);
         var result = cache.Get<TestResource>("key1");
 
-        result.Should().NotBeNull();
-        result!.Value.Should().Be("hello");
+        result.ShouldNotBeNull();
+        result!.Value.ShouldBe("hello");
     }
 
     [Fact]
@@ -34,7 +34,7 @@ public class MemoryResourceCacheTests
 
         var result = cache.Get<TestResource>("nonexistent");
 
-        result.Should().BeNull();
+        result.ShouldBeNull();
     }
 
     [Fact]
@@ -47,9 +47,9 @@ public class MemoryResourceCacheTests
         cache.Set("key3", new TestResource { Value = "third" });
 
         // key1 should have been evicted (LRU)
-        cache.Get<TestResource>("key1").Should().BeNull();
-        cache.Get<TestResource>("key2").Should().NotBeNull();
-        cache.Get<TestResource>("key3").Should().NotBeNull();
+        cache.Get<TestResource>("key1").ShouldBeNull();
+        cache.Get<TestResource>("key2").ShouldNotBeNull();
+        cache.Get<TestResource>("key3").ShouldNotBeNull();
     }
 
     [Fact]
@@ -61,9 +61,9 @@ public class MemoryResourceCacheTests
 
         cache.Clear();
 
-        cache.Count.Should().Be(0);
-        cache.Get<TestResource>("key1").Should().BeNull();
-        cache.Get<TestResource>("key2").Should().BeNull();
+        cache.Count.ShouldBe(0);
+        cache.Get<TestResource>("key1").ShouldBeNull();
+        cache.Get<TestResource>("key2").ShouldBeNull();
     }
 
     [Fact]
@@ -71,13 +71,13 @@ public class MemoryResourceCacheTests
     {
         var cache = new MemoryResourceCache(maxEntries: 10);
 
-        cache.Count.Should().Be(0);
+        cache.Count.ShouldBe(0);
 
         cache.Set("key1", new TestResource { Value = "a" });
-        cache.Count.Should().Be(1);
+        cache.Count.ShouldBe(1);
 
         cache.Set("key2", new TestResource { Value = "b" });
-        cache.Count.Should().Be(2);
+        cache.Count.ShouldBe(2);
     }
 
     [Fact]
@@ -88,8 +88,8 @@ public class MemoryResourceCacheTests
         cache.Set("key1", new TestResource { Value = "original" });
         cache.Set("key1", new TestResource { Value = "updated" });
 
-        cache.Count.Should().Be(1);
-        cache.Get<TestResource>("key1")!.Value.Should().Be("updated");
+        cache.Count.ShouldBe(1);
+        cache.Get<TestResource>("key1")!.Value.ShouldBe("updated");
     }
 
     [Fact]
@@ -106,9 +106,9 @@ public class MemoryResourceCacheTests
         // Adding key3 should evict key2 (now LRU), not key1
         cache.Set("key3", new TestResource { Value = "third" });
 
-        cache.Get<TestResource>("key1").Should().NotBeNull();
-        cache.Get<TestResource>("key2").Should().BeNull();
-        cache.Get<TestResource>("key3").Should().NotBeNull();
+        cache.Get<TestResource>("key1").ShouldNotBeNull();
+        cache.Get<TestResource>("key2").ShouldBeNull();
+        cache.Get<TestResource>("key3").ShouldNotBeNull();
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public class MemoryResourceCacheTests
     {
         var act = () => new MemoryResourceCache(maxEntries: 0);
 
-        act.Should().Throw<ArgumentOutOfRangeException>();
+        Should.Throw<ArgumentOutOfRangeException>(() => act());
     }
 
     [Fact]
@@ -128,6 +128,6 @@ public class MemoryResourceCacheTests
         // Asking for a different type should return null
         var result = cache.Get<List<string>>("key1");
 
-        result.Should().BeNull();
+        result.ShouldBeNull();
     }
 }

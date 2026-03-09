@@ -3,7 +3,7 @@
 
 using FhirPkg.Models;
 using FhirPkg.Resolution;
-using FluentAssertions;
+using Shouldly;
 using Xunit;
 
 namespace FhirPkg.Tests.Resolution;
@@ -22,7 +22,7 @@ public class DirectiveParserTests
     public void ClassifyName_CoreFull_ClassifiedCorrectly(
         string packageId, PackageNameType expected)
     {
-        DirectiveParser.ClassifyName(packageId).Should().Be(expected);
+        DirectiveParser.ClassifyName(packageId).ShouldBe(expected);
     }
 
     [Theory]
@@ -32,7 +32,7 @@ public class DirectiveParserTests
     public void ClassifyName_CorePartial_ClassifiedCorrectly(
         string packageId, PackageNameType expected)
     {
-        DirectiveParser.ClassifyName(packageId).Should().Be(expected);
+        DirectiveParser.ClassifyName(packageId).ShouldBe(expected);
     }
 
     [Theory]
@@ -42,7 +42,7 @@ public class DirectiveParserTests
     public void ClassifyName_GuideWithoutSuffix_ClassifiedCorrectly(
         string packageId, PackageNameType expected)
     {
-        DirectiveParser.ClassifyName(packageId).Should().Be(expected);
+        DirectiveParser.ClassifyName(packageId).ShouldBe(expected);
     }
 
     [Fact]
@@ -50,7 +50,7 @@ public class DirectiveParserTests
     {
         // A guide package with a FHIR version suffix
         DirectiveParser.ClassifyName("hl7.fhir.uv.extensions.r4")
-            .Should().Be(PackageNameType.GuideWithFhirSuffix);
+            .ShouldBe(PackageNameType.GuideWithFhirSuffix);
     }
 
     [Theory]
@@ -59,7 +59,7 @@ public class DirectiveParserTests
     public void ClassifyName_NonHl7Guide_ClassifiedCorrectly(
         string packageId, PackageNameType expected)
     {
-        DirectiveParser.ClassifyName(packageId).Should().Be(expected);
+        DirectiveParser.ClassifyName(packageId).ShouldBe(expected);
     }
 
     // ── ClassifyVersion ─────────────────────────────────────────────────
@@ -71,7 +71,7 @@ public class DirectiveParserTests
     public void ClassifyVersion_Exact_ClassifiedCorrectly(
         string version, VersionType expected)
     {
-        DirectiveParser.ClassifyVersion(version).Should().Be(expected);
+        DirectiveParser.ClassifyVersion(version).ShouldBe(expected);
     }
 
     [Theory]
@@ -82,25 +82,25 @@ public class DirectiveParserTests
     public void ClassifyVersion_Latest_ClassifiedCorrectly(
         string? version, VersionType expected)
     {
-        DirectiveParser.ClassifyVersion(version).Should().Be(expected);
+        DirectiveParser.ClassifyVersion(version).ShouldBe(expected);
     }
 
     [Fact]
     public void ClassifyVersion_CiBuild_ClassifiedCorrectly()
     {
-        DirectiveParser.ClassifyVersion("current").Should().Be(VersionType.CiBuild);
+        DirectiveParser.ClassifyVersion("current").ShouldBe(VersionType.CiBuild);
     }
 
     [Fact]
     public void ClassifyVersion_CiBuildBranch_ClassifiedCorrectly()
     {
-        DirectiveParser.ClassifyVersion("current$R5").Should().Be(VersionType.CiBuildBranch);
+        DirectiveParser.ClassifyVersion("current$R5").ShouldBe(VersionType.CiBuildBranch);
     }
 
     [Fact]
     public void ClassifyVersion_LocalBuild_ClassifiedCorrectly()
     {
-        DirectiveParser.ClassifyVersion("dev").Should().Be(VersionType.LocalBuild);
+        DirectiveParser.ClassifyVersion("dev").ShouldBe(VersionType.LocalBuild);
     }
 
     [Theory]
@@ -110,7 +110,7 @@ public class DirectiveParserTests
     public void ClassifyVersion_Wildcard_ClassifiedCorrectly(
         string version, VersionType expected)
     {
-        DirectiveParser.ClassifyVersion(version).Should().Be(expected);
+        DirectiveParser.ClassifyVersion(version).ShouldBe(expected);
     }
 
     [Theory]
@@ -120,7 +120,7 @@ public class DirectiveParserTests
     public void ClassifyVersion_Range_ClassifiedCorrectly(
         string version, VersionType expected)
     {
-        DirectiveParser.ClassifyVersion(version).Should().Be(expected);
+        DirectiveParser.ClassifyVersion(version).ShouldBe(expected);
     }
 
     // ── SplitDirective ──────────────────────────────────────────────────
@@ -130,9 +130,9 @@ public class DirectiveParserTests
     {
         var (packageId, version, alias) = DirectiveParser.SplitDirective("hl7.fhir.r4.core#4.0.1");
 
-        packageId.Should().Be("hl7.fhir.r4.core");
-        version.Should().Be("4.0.1");
-        alias.Should().BeNull();
+        packageId.ShouldBe("hl7.fhir.r4.core");
+        version.ShouldBe("4.0.1");
+        alias.ShouldBeNull();
     }
 
     [Fact]
@@ -140,9 +140,9 @@ public class DirectiveParserTests
     {
         var (packageId, version, alias) = DirectiveParser.SplitDirective("hl7.fhir.r4.core@4.0.1");
 
-        packageId.Should().Be("hl7.fhir.r4.core");
-        version.Should().Be("4.0.1");
-        alias.Should().BeNull();
+        packageId.ShouldBe("hl7.fhir.r4.core");
+        version.ShouldBe("4.0.1");
+        alias.ShouldBeNull();
     }
 
     [Fact]
@@ -150,9 +150,9 @@ public class DirectiveParserTests
     {
         var (packageId, version, alias) = DirectiveParser.SplitDirective("hl7.fhir.us.core");
 
-        packageId.Should().Be("hl7.fhir.us.core");
-        version.Should().BeNull();
-        alias.Should().BeNull();
+        packageId.ShouldBe("hl7.fhir.us.core");
+        version.ShouldBeNull();
+        alias.ShouldBeNull();
     }
 
     [Fact]
@@ -160,9 +160,9 @@ public class DirectiveParserTests
     {
         var (packageId, version, alias) = DirectiveParser.SplitDirective("v610@npm:hl7.fhir.us.core@6.1.0");
 
-        packageId.Should().Be("hl7.fhir.us.core");
-        version.Should().Be("6.1.0");
-        alias.Should().Be("v610");
+        packageId.ShouldBe("hl7.fhir.us.core");
+        version.ShouldBe("6.1.0");
+        alias.ShouldBe("v610");
     }
 
     [Fact]
@@ -170,7 +170,7 @@ public class DirectiveParserTests
     {
         var act = () => DirectiveParser.SplitDirective("");
 
-        act.Should().Throw<ArgumentException>();
+        Should.Throw<ArgumentException>(() => act());
     }
 
     // ── ExtractCiBranch ─────────────────────────────────────────────────
@@ -178,25 +178,25 @@ public class DirectiveParserTests
     [Fact]
     public void ExtractCiBranch_CurrentBranch_ReturnsBranch()
     {
-        DirectiveParser.ExtractCiBranch("current$R5").Should().Be("R5");
+        DirectiveParser.ExtractCiBranch("current$R5").ShouldBe("R5");
     }
 
     [Fact]
     public void ExtractCiBranch_JustCurrent_ReturnsNull()
     {
-        DirectiveParser.ExtractCiBranch("current").Should().BeNull();
+        DirectiveParser.ExtractCiBranch("current").ShouldBeNull();
     }
 
     [Fact]
     public void ExtractCiBranch_Null_ReturnsNull()
     {
-        DirectiveParser.ExtractCiBranch(null).Should().BeNull();
+        DirectiveParser.ExtractCiBranch(null).ShouldBeNull();
     }
 
     [Fact]
     public void ExtractCiBranch_ExactVersion_ReturnsNull()
     {
-        DirectiveParser.ExtractCiBranch("4.0.1").Should().BeNull();
+        DirectiveParser.ExtractCiBranch("4.0.1").ShouldBeNull();
     }
 
     // ── ExpandPartialCoreName ───────────────────────────────────────────
@@ -206,10 +206,10 @@ public class DirectiveParserTests
     {
         var expanded = DirectiveParser.ExpandPartialCoreName("hl7.fhir.r4");
 
-        expanded.Should().NotBeEmpty();
-        expanded.Should().Contain("hl7.fhir.r4.core");
-        expanded.Should().Contain("hl7.fhir.r4.expansions");
-        expanded.Should().Contain("hl7.fhir.r4.examples");
+        expanded.ShouldNotBeEmpty();
+        expanded.ShouldContain("hl7.fhir.r4.core");
+        expanded.ShouldContain("hl7.fhir.r4.expansions");
+        expanded.ShouldContain("hl7.fhir.r4.examples");
     }
 
     [Fact]
@@ -217,7 +217,7 @@ public class DirectiveParserTests
     {
         var expanded = DirectiveParser.ExpandPartialCoreName("some.unknown.prefix");
 
-        expanded.Should().BeEmpty();
+        expanded.ShouldBeEmpty();
     }
 
     // ── IsKnownCoreType ─────────────────────────────────────────────────
@@ -230,6 +230,6 @@ public class DirectiveParserTests
     [InlineData("unknown", false)]
     public void IsKnownCoreType_ReturnsExpected(string segment, bool expected)
     {
-        DirectiveParser.IsKnownCoreType(segment).Should().Be(expected);
+        DirectiveParser.IsKnownCoreType(segment).ShouldBe(expected);
     }
 }

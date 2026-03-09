@@ -3,7 +3,7 @@
 
 using FhirPkg.Models;
 using FhirPkg.Utilities;
-using FluentAssertions;
+using Shouldly;
 using Xunit;
 
 namespace FhirPkg.Tests.Utilities;
@@ -17,8 +17,8 @@ public class PackageFixupsTests
 
         var result = PackageFixups.Apply(reference);
 
-        result.Name.Should().Be("hl7.fhir.r4.core");
-        result.Version.Should().Be("4.0.1");
+        result.Name.ShouldBe("hl7.fhir.r4.core");
+        result.Version.ShouldBe("4.0.1");
     }
 
     [Fact]
@@ -28,8 +28,8 @@ public class PackageFixupsTests
 
         var result = PackageFixups.Apply(reference);
 
-        result.Name.Should().Be("hl7.fhir.r4b.core");
-        result.Version.Should().Be("4.3.0");
+        result.Name.ShouldBe("hl7.fhir.r4b.core");
+        result.Version.ShouldBe("4.3.0");
     }
 
     [Fact]
@@ -39,8 +39,8 @@ public class PackageFixupsTests
 
         var result = PackageFixups.Apply(reference);
 
-        result.Name.Should().Be("some.random.package");
-        result.Version.Should().Be("1.0.0");
+        result.Name.ShouldBe("some.random.package");
+        result.Version.ShouldBe("1.0.0");
     }
 
     [Fact]
@@ -50,7 +50,7 @@ public class PackageFixupsTests
 
         var result = PackageFixups.Apply(reference);
 
-        result.Version.Should().Be("6.1.0");
+        result.Version.ShouldBe("6.1.0");
     }
 
     [Fact]
@@ -60,7 +60,7 @@ public class PackageFixupsTests
 
         var result = PackageFixups.Apply(reference);
 
-        result.Version.Should().BeNull();
+        result.Version.ShouldBeNull();
     }
 
     [Fact]
@@ -70,7 +70,7 @@ public class PackageFixupsTests
 
         var result = PackageFixups.Apply(reference);
 
-        result.Name.Should().Be("hl7.fhir.uv.extensions.r4");
+        result.Name.ShouldBe("hl7.fhir.uv.extensions.r4");
     }
 
     [Fact]
@@ -80,7 +80,7 @@ public class PackageFixupsTests
 
         var result = PackageFixups.Apply(reference);
 
-        result.Name.Should().Be("hl7.fhir.uv.extensions.r5");
+        result.Name.ShouldBe("hl7.fhir.uv.extensions.r5");
     }
 
     [Fact]
@@ -91,6 +91,6 @@ public class PackageFixupsTests
         var result = PackageFixups.Apply(reference);
 
         // Since nothing changed, should return the same struct
-        result.Should().Be(reference);
+        result.ShouldBe(reference);
     }
 }

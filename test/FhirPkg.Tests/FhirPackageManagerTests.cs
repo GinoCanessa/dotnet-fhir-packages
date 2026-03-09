@@ -6,7 +6,7 @@ using FhirPkg.Indexing;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
-using FluentAssertions;
+using Shouldly;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Xunit;
@@ -58,9 +58,9 @@ public class FhirPackageManagerTests
 
         var result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 
-        result.Should().NotBeNull();
-        result!.Reference.Name.Should().Be("hl7.fhir.r4.core");
-        result.Reference.Version.Should().Be("4.0.1");
+        result.ShouldNotBeNull();
+        result!.Reference.Name.ShouldBe("hl7.fhir.r4.core");
+        result.Reference.Version.ShouldBe("4.0.1");
 
         // Verify no download was attempted
         _registryMock.Verify(r => r.DownloadAsync(
@@ -78,7 +78,7 @@ public class FhirPackageManagerTests
 
         var act = () => manager.InstallAsync(directive!);
 
-        await act.Should().ThrowAsync<ArgumentException>();
+        await Should.ThrowAsync<ArgumentException>(act);
     }
 
     [Fact]
@@ -105,8 +105,8 @@ public class FhirPackageManagerTests
 
         var result = await manager.ListCachedAsync("hl7");
 
-        result.Should().HaveCount(1);
-        result[0].Reference.Name.Should().Be("hl7.fhir.r4.core");
+        result.Count.ShouldBe(1);
+        result[0].Reference.Name.ShouldBe("hl7.fhir.r4.core");
     }
 
     [Fact]
@@ -157,8 +157,8 @@ public class FhirPackageManagerTests
 
         var result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 
-        result.Should().NotBeNull();
-        result!.Reference.Version.Should().Be("4.0.1");
+        result.ShouldNotBeNull();
+        result!.Reference.Version.ShouldBe("4.0.1");
     }
 
     [Fact]
@@ -177,6 +177,6 @@ public class FhirPackageManagerTests
 
         var result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 
-        result.Should().BeNull();
+        result.ShouldBeNull();
     }
 }

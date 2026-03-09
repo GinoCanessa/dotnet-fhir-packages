@@ -3,7 +3,7 @@
 
 using System.Text.Json;
 using FhirPkg.Models;
-using FluentAssertions;
+using Shouldly;
 using Xunit;
 
 namespace FhirPkg.Tests.Models;
@@ -41,17 +41,17 @@ public class PackageManifestTests
     {
         var manifest = PackageManifest.Deserialize(FullManifestJson);
 
-        manifest.Name.Should().Be("hl7.fhir.r4.core");
-        manifest.Version.Should().Be("4.0.1");
-        manifest.Description.Should().Be("FHIR R4 Core definitions");
-        manifest.License.Should().Be("CC0-1.0");
-        manifest.Author.Should().Be("HL7 International");
-        manifest.Homepage.Should().Be("https://hl7.org/fhir/R4/");
-        manifest.Canonical.Should().Be("http://hl7.org/fhir");
-        manifest.FhirVersions.Should().Contain("4.0.1");
-        manifest.Type.Should().Be("fhir.core");
-        manifest.Title.Should().Be("FHIR R4");
-        manifest.Keywords.Should().Contain("fhir");
+        manifest.Name.ShouldBe("hl7.fhir.r4.core");
+        manifest.Version.ShouldBe("4.0.1");
+        manifest.Description.ShouldBe("FHIR R4 Core definitions");
+        manifest.License.ShouldBe("CC0-1.0");
+        manifest.Author.ShouldBe("HL7 International");
+        manifest.Homepage.ShouldBe("https://hl7.org/fhir/R4/");
+        manifest.Canonical.ShouldBe("http://hl7.org/fhir");
+        manifest.FhirVersions.ShouldContain("4.0.1");
+        manifest.Type.ShouldBe("fhir.core");
+        manifest.Title.ShouldBe("FHIR R4");
+        manifest.Keywords.ShouldContain("fhir");
     }
 
     [Fact]
@@ -59,11 +59,11 @@ public class PackageManifestTests
     {
         var manifest = PackageManifest.Deserialize(MinimalManifestJson);
 
-        manifest.Name.Should().Be("minimal.package");
-        manifest.Version.Should().Be("1.0.0");
-        manifest.Description.Should().BeNull();
-        manifest.Dependencies.Should().BeNull();
-        manifest.FhirVersions.Should().BeNull();
+        manifest.Name.ShouldBe("minimal.package");
+        manifest.Version.ShouldBe("1.0.0");
+        manifest.Description.ShouldBeNull();
+        manifest.Dependencies.ShouldBeNull();
+        manifest.FhirVersions.ShouldBeNull();
     }
 
     [Fact]
@@ -71,9 +71,9 @@ public class PackageManifestTests
     {
         var manifest = PackageManifest.Deserialize(FullManifestJson);
 
-        manifest.Dependencies.Should().NotBeNull();
-        manifest.Dependencies.Should().ContainKey("hl7.fhir.r4.expansions");
-        manifest.Dependencies!["hl7.fhir.r4.expansions"].Should().Be("4.0.1");
+        manifest.Dependencies.ShouldNotBeNull();
+        manifest.Dependencies.ShouldContainKey("hl7.fhir.r4.expansions");
+        manifest.Dependencies!["hl7.fhir.r4.expansions"].ShouldBe("4.0.1");
     }
 
     [Fact]
@@ -89,8 +89,8 @@ public class PackageManifestTests
 
         var manifest = PackageManifest.Deserialize(json);
 
-        manifest.Name.Should().Be("case.test");
-        manifest.Version.Should().Be("2.0.0");
+        manifest.Name.ShouldBe("case.test");
+        manifest.Version.ShouldBe("2.0.0");
     }
 
     [Fact]
@@ -98,7 +98,7 @@ public class PackageManifestTests
     {
         var manifest = PackageManifest.Deserialize(FullManifestJson);
 
-        manifest.InferredFhirRelease.Should().Be(FhirRelease.R4);
+        manifest.InferredFhirRelease.ShouldBe(FhirRelease.R4);
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public class PackageManifestTests
 
         var manifest = PackageManifest.Deserialize(json);
 
-        manifest.InferredFhirRelease.Should().Be(FhirRelease.R5);
+        manifest.InferredFhirRelease.ShouldBe(FhirRelease.R5);
     }
 
     [Fact]
@@ -124,7 +124,7 @@ public class PackageManifestTests
     {
         var manifest = PackageManifest.Deserialize(MinimalManifestJson);
 
-        manifest.InferredFhirRelease.Should().BeNull();
+        manifest.InferredFhirRelease.ShouldBeNull();
     }
 
     [Fact]
@@ -135,10 +135,10 @@ public class PackageManifestTests
         var serialized = manifest.Serialize();
         var deserialized = PackageManifest.Deserialize(serialized);
 
-        deserialized.Name.Should().Be(manifest.Name);
-        deserialized.Version.Should().Be(manifest.Version);
-        deserialized.Description.Should().Be(manifest.Description);
-        deserialized.License.Should().Be(manifest.License);
+        deserialized.Name.ShouldBe(manifest.Name);
+        deserialized.Version.ShouldBe(manifest.Version);
+        deserialized.Description.ShouldBe(manifest.Description);
+        deserialized.License.ShouldBe(manifest.License);
     }
 
     [Fact]
@@ -146,7 +146,7 @@ public class PackageManifestTests
     {
         var act = () => PackageManifest.Deserialize("not valid json");
 
-        act.Should().Throw<JsonException>();
+        Should.Throw<JsonException>(() => act());
     }
 
     [Fact]
@@ -154,9 +154,9 @@ public class PackageManifestTests
     {
         var manifest = PackageManifest.Deserialize(FullManifestJson);
 
-        manifest.SemVer.Should().NotBeNull();
-        manifest.SemVer!.Major.Should().Be(4);
-        manifest.SemVer.Minor.Should().Be(0);
-        manifest.SemVer.Build.Should().Be(1);
+        manifest.SemVer.ShouldNotBeNull();
+        manifest.SemVer!.Major.ShouldBe(4);
+        manifest.SemVer.Minor.ShouldBe(0);
+        manifest.SemVer.Build.ShouldBe(1);
     }
 }

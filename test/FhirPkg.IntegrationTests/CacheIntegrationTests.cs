@@ -1,6 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
-using FluentAssertions;
+using Shouldly;
 using FhirPkg.Cache;
 using FhirPkg.Models;
 using FhirPkg.Utilities;
@@ -22,7 +22,7 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         var packages = await cache.ListPackagesAsync();
 
-        packages.Should().BeEmpty();
+        packages.ShouldBeEmpty();
     }
 
     // ───────────────────────── Install ─────────────────────────
@@ -38,15 +38,15 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         var record = await cache.InstallAsync(reference, tarball);
 
-        record.Should().NotBeNull();
-        record.Reference.Name.Should().Be("test.package");
-        record.Reference.Version.Should().Be("1.0.0");
+        record.ShouldNotBeNull();
+        record.Reference.Name.ShouldBe("test.package");
+        record.Reference.Version.ShouldBe("1.0.0");
 
         // Verify directory structure: {cache}/test.package#1.0.0/package/
         var pkgDir = Path.Combine(TempCacheDir, "test.package#1.0.0", "package");
-        Directory.Exists(pkgDir).Should().BeTrue("package content directory should exist");
-        File.Exists(Path.Combine(pkgDir, "package.json")).Should().BeTrue("manifest should exist");
-        File.Exists(Path.Combine(pkgDir, "Patient.json")).Should().BeTrue("resource file should exist");
+        Directory.Exists(pkgDir).ShouldBeTrue("package content directory should exist");
+        File.Exists(Path.Combine(pkgDir, "package.json")).ShouldBeTrue("manifest should exist");
+        File.Exists(Path.Combine(pkgDir, "Patient.json")).ShouldBeTrue("resource file should exist");
     }
 
     [Fact]
@@ -61,7 +61,7 @@ public class CacheIntegrationTests : IntegrationTestBase
         using var tarball2 = CreateTestTarball("test.package", "1.0.0");
         var act = () => cache.InstallAsync(reference, tarball2);
 
-        await act.Should().ThrowAsync<InvalidOperationException>();
+        await Should.ThrowAsync<InvalidOperationException>(act);
     }
 
     [Fact]
@@ -79,9 +79,9 @@ public class CacheIntegrationTests : IntegrationTestBase
         var record = await cache.InstallAsync(reference, tarball2,
             new InstallCacheOptions { OverwriteExisting = true });
 
-        record.Should().NotBeNull();
+        record.ShouldNotBeNull();
         var pkgDir = Path.Combine(TempCacheDir, "test.package#1.0.0", "package");
-        File.Exists(Path.Combine(pkgDir, "new.json")).Should().BeTrue("new file should exist after overwrite");
+        File.Exists(Path.Combine(pkgDir, "new.json")).ShouldBeTrue("new file should exist after overwrite");
     }
 
     // ───────────────────────── ReadManifest ─────────────────────────
@@ -97,9 +97,9 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         var manifest = await cache.ReadManifestAsync(reference);
 
-        manifest.Should().NotBeNull();
-        manifest!.Name.Should().Be("test.package");
-        manifest.Version.Should().Be("2.0.0");
+        manifest.ShouldNotBeNull();
+        manifest!.Name.ShouldBe("test.package");
+        manifest.Version.ShouldBe("2.0.0");
     }
 
     // ───────────────────────── Remove ─────────────────────────
@@ -115,8 +115,8 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         var removed = await cache.RemoveAsync(reference);
 
-        removed.Should().BeTrue();
-        Directory.Exists(Path.Combine(TempCacheDir, "test.package#1.0.0")).Should().BeFalse();
+        removed.ShouldBeTrue();
+        Directory.Exists(Path.Combine(TempCacheDir, "test.package#1.0.0")).ShouldBeFalse();
     }
 
     [Fact]
@@ -127,7 +127,7 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         var removed = await cache.RemoveAsync(reference);
 
-        removed.Should().BeFalse();
+        removed.ShouldBeFalse();
     }
 
     // ───────────────────────── Clear ─────────────────────────
@@ -145,10 +145,10 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         var count = await cache.ClearAsync();
 
-        count.Should().BeGreaterThanOrEqualTo(2);
+        count.ShouldBeGreaterThanOrEqualTo(2);
 
         var remaining = await cache.ListPackagesAsync();
-        remaining.Should().BeEmpty();
+        remaining.ShouldBeEmpty();
     }
 
     // ───────────────────── GetPackageContentPath ─────────────────────
@@ -164,9 +164,9 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         var path = cache.GetPackageContentPath(reference);
 
-        path.Should().NotBeNull();
-        path.Should().EndWith(Path.Combine("test.package#1.0.0", "package"));
-        Directory.Exists(path).Should().BeTrue();
+        path.ShouldNotBeNull();
+        path.ShouldEndWith(Path.Combine("test.package#1.0.0", "package"));
+        Directory.Exists(path).ShouldBeTrue();
     }
 
     [Fact]
@@ -177,7 +177,7 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         var path = cache.GetPackageContentPath(reference);
 
-        path.Should().BeNull();
+        path.ShouldBeNull();
     }
 
     // ───────────────────────── Metadata ─────────────────────────
@@ -192,11 +192,11 @@ public class CacheIntegrationTests : IntegrationTestBase
         await cache.InstallAsync(reference, tarball);
 
         var iniPath = Path.Combine(TempCacheDir, "packages.ini");
-        File.Exists(iniPath).Should().BeTrue("packages.ini should be created after install");
+        File.Exists(iniPath).ShouldBeTrue("packages.ini should be created after install");
 
         var sections = IniParser.ParseFile(iniPath);
-        sections.Should().ContainKey("packages");
-        sections["packages"].Should().ContainKey("test.package#1.0.0");
+        sections.ShouldContainKey("packages");
+        sections["packages"].ShouldContainKey("test.package#1.0.0");
     }
 
     // ───────────────────────── ListWithFilter ─────────────────────────
@@ -214,7 +214,7 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         var filtered = await cache.ListPackagesAsync(packageIdFilter: "hl7");
 
-        filtered.Should().ContainSingle()
-            .Which.Reference.Name.Should().Be("hl7.fhir.r4.core");
+        filtered.ShouldHaveSingleItem()
+            .Reference.Name.ShouldBe("hl7.fhir.r4.core");
     }
 }
