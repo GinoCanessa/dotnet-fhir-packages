@@ -74,7 +74,7 @@ These options apply to **every** command:
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--cache-path` | `-c` | string | `FHIR_PACKAGE_CACHE` env var or `~/.fhir/packages` | Local FHIR package cache directory |
+| `--package-cache-folder` | — | string | `PACKAGE_CACHE_FOLDER` env var or `~/.fhir/packages` | Local FHIR package cache directory |
 | `--verbose` | `-v` | bool | `FHIR_PKG_VERBOSE` env var | Enable verbose/debug output |
 | `--quiet` | `-q` | bool | `false` | Suppress all non-essential output |
 | `--no-color` | — | bool | `NO_COLOR` env var | Disable colored output |
@@ -114,7 +114,7 @@ fhir-pkg list --json | jq '.[].name'
 
 | Variable | Description |
 |----------|-------------|
-| `FHIR_PACKAGE_CACHE` | Override the default cache directory |
+| `PACKAGE_CACHE_FOLDER` | Override the default cache directory |
 | `FHIR_REGISTRY` | Custom registry URL |
 | `FHIR_REGISTRY_TOKEN` | Bearer token for registry authentication |
 | `FHIR_PKG_NO_CI` | Disable CI build resolution |

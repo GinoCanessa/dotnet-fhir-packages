@@ -33,7 +33,7 @@ command-specific logic runs.
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--cache-path <path>` | `-c` | `string` | `FHIR_PACKAGE_CACHE` env var, or `~/.fhir/packages` | Override the local FHIR package cache directory. |
+| `--package-cache-folder <path>` | — | `string` | `PACKAGE_CACHE_FOLDER` env var, or `~/.fhir/packages` | Override the local FHIR package cache directory. |
 | `--verbose` | `-v` | `bool` | `FHIR_PKG_VERBOSE` env var | Enable verbose / debug output. |
 | `--quiet` | `-q` | `bool` | `false` | Suppress all non-essential output. Only errors are shown. |
 | `--no-color` | — | `bool` | `NO_COLOR` env var | Disable ANSI colored output. |
@@ -661,7 +661,7 @@ tool checks two locations:
 
 | Variable | Description | Equivalent Option |
 |----------|-------------|-------------------|
-| `FHIR_PACKAGE_CACHE` | Override the default cache directory. | `--cache-path` |
+| `PACKAGE_CACHE_FOLDER` | Override the default cache directory. | `--package-cache-folder` |
 | `FHIR_REGISTRY` | Custom registry URL added to the default chain. | `--registry` |
 | `FHIR_REGISTRY_TOKEN` | Bearer token for registry authentication. | `--auth "Bearer ..."` |
 | `FHIR_PKG_NO_CI` | Set to `1` to disable CI build resolution. | `--no-ci` |

@@ -243,7 +243,7 @@ Top-level configuration for the SDK. See the
 ```csharp
 public class FhirPackageManagerOptions
 {
-    public string? CachePath { get; set; }                          // default: null → ~/.fhir/packages
+    public string? CachePath { get; set; }                          // default: null → PACKAGE_CACHE_FOLDER env var → ~/.fhir/packages
     public List<RegistryEndpoint> Registries { get; set; }          // default: []
     public bool IncludeCiBuilds { get; set; }                       // default: true
     public bool IncludeHl7WebsiteFallback { get; set; }             // default: true
@@ -833,7 +833,8 @@ public class InstallCacheOptions
 ### DiskPackageCache
 
 The default `IPackageCache` implementation. Stores packages in the standard FHIR
-directory layout:
+directory layout. When no explicit path is provided, the `PACKAGE_CACHE_FOLDER`
+environment variable is used if set; otherwise falls back to `~/.fhir/packages`:
 
 ```
 ~/.fhir/packages/

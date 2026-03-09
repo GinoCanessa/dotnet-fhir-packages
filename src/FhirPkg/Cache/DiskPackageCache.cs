@@ -9,7 +9,10 @@ using FhirPkg.Utilities;
 namespace FhirPkg.Cache;
 
 /// <summary>
-/// Disk-based FHIR package cache implementation rooted at ~/.fhir/packages.
+/// Disk-based FHIR package cache implementation.
+/// By default, the cache root is resolved as follows: an explicit path passed to
+/// the constructor takes priority; if <c>null</c>, the <c>PACKAGE_CACHE_FOLDER</c>
+/// environment variable is used when set; otherwise falls back to <c>~/.fhir/packages</c>.
 /// Provides thread-safe installation with atomic directory moves and
 /// concurrent-safe reads via a <see cref="SemaphoreSlim"/> for write operations.
 /// </summary>
@@ -50,12 +53,14 @@ public class DiskPackageCache : IPackageCache
     /// Creates a new <see cref="DiskPackageCache"/> using the specified or default cache directory.
     /// </summary>
     /// <param name="cacheDirectory">
-    /// Full path to the cache directory. If <c>null</c>, defaults to
+    /// Full path to the cache directory. If <c>null</c>, the <c>PACKAGE_CACHE_FOLDER</c>
+    /// environment variable is used when set; otherwise defaults to
     /// <c>~/.fhir/packages</c> (or <c>%USERPROFILE%\.fhir\packages</c> on Windows).
     /// </param>
     public DiskPackageCache(string? cacheDirectory = null)
     {
         CacheDirectory = cacheDirectory
+            ?? Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER")
             ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".fhir",

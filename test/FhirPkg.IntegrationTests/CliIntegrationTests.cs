@@ -16,7 +16,12 @@ public class CliIntegrationTests : IntegrationTestBase
 
     private async Task<(int ExitCode, string StdOut, string StdErr)> RunCli(params string[] args)
     {
-        var allArgs = string.Join(" ", args) + $" --cache-path \"{TempCacheDir}\"";
+        var allArgs = string.Join(" ", args) + $" --package-cache-folder \"{TempCacheDir}\"";
+        return await RunCliRaw(allArgs);
+    }
+
+    private async Task<(int ExitCode, string StdOut, string StdErr)> RunCliRaw(string allArgs)
+    {
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -63,6 +68,14 @@ public class CliIntegrationTests : IntegrationTestBase
 
         exitCode.Should().Be(0);
         stdout.Should().Contain("fhir-pkg");
+    }
+
+    [Fact]
+    public async Task PackageCacheFolderOption_UsesSpecifiedPath()
+    {
+        var (exitCode, _, _) = await RunCliRaw($"list --package-cache-folder \"{TempCacheDir}\"");
+
+        exitCode.Should().Be(0);
     }
 
     [Fact]

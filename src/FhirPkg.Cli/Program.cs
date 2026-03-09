@@ -37,10 +37,10 @@ internal static class Program
             "fhir-pkg — CLI tool for managing FHIR packages: install, restore, list, search, and cache management.");
 
         // Global options (Recursive = true makes them available to all subcommands)
-        var cachePathOption = new Option<string?>("--cache-path", "-c")
+        var cachePathOption = new Option<string?>("--package-cache-folder")
         {
             Description = "Path to the local FHIR package cache directory.",
-            DefaultValueFactory = _ => Environment.GetEnvironmentVariable("FHIR_PACKAGE_CACHE"),
+            DefaultValueFactory = _ => Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER"),
             Recursive = true
         };
 
@@ -297,7 +297,7 @@ internal sealed class ConfigRegistry
 /// </summary>
 internal static class GlobalOptionsBinder
 {
-    /// <summary>The --cache-path / -c option.</summary>
+    /// <summary>The --package-cache-folder option.</summary>
     public static Option<string?> CachePathOption { get; set; } = null!;
 
     /// <summary>The --verbose / -v option.</summary>

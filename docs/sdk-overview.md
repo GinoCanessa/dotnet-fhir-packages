@@ -10,7 +10,8 @@ FhirPkg is a C# SDK for discovering, resolving, downloading, caching, and managi
   registry, CI builds, HL7 website, and custom/private registries with automatic
   fallback.
 - **Local disk cache** — stores packages in the standard `~/.fhir/packages`
-  layout, compatible with other FHIR tooling.
+  layout (or the directory specified by the `PACKAGE_CACHE_FOLDER` environment
+  variable), compatible with other FHIR tooling.
 - **Dependency resolution** — resolves full transitive dependency closures with
   conflict strategies, lock-file support, and circular-dependency detection.
 - **FHIR-aware versioning** — understands FHIR pre-release hierarchies
@@ -133,7 +134,7 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `CachePath` | `string?` | `~/.fhir/packages` | Local package cache directory |
+| `CachePath` | `string?` | `PACKAGE_CACHE_FOLDER` env var, or `~/.fhir/packages` | Local package cache directory |
 | `Registries` | `List<RegistryEndpoint>` | `[]` | Custom registry endpoints (priority order) |
 | `IncludeCiBuilds` | `bool` | `true` | Query the FHIR CI build registry |
 | `IncludeHl7WebsiteFallback` | `bool` | `true` | Fall back to hl7.org/fhir for core packages |

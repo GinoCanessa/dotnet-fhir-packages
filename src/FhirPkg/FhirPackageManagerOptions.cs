@@ -14,7 +14,8 @@ public class FhirPackageManagerOptions
 {
     /// <summary>
     /// Path to the local package cache directory.
-    /// When <c>null</c>, defaults to <c>~/.fhir/packages</c>.
+    /// When <c>null</c>, the <c>PACKAGE_CACHE_FOLDER</c> environment variable is used
+    /// if set; otherwise defaults to <c>~/.fhir/packages</c>.
     /// </summary>
     public string? CachePath { get; set; }
 
