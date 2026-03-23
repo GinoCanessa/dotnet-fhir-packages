@@ -20,59 +20,59 @@ internal static class InstallCommand
     /// <returns>A fully configured <see cref="Command"/> for the install subcommand.</returns>
     public static Command Build()
     {
-        var packagesArg = new Argument<string[]>("packages")
+        Argument<string[]> packagesArg = new Argument<string[]>("packages")
         {
             Description = "One or more package directives (e.g. hl7.fhir.r4.core#4.0.1)",
             Arity = ArgumentArity.OneOrMore
         };
 
-        var withDependenciesOption = new Option<bool>("--with-dependencies", "-d")
+        Option<bool> withDependenciesOption = new Option<bool>("--with-dependencies", "-d")
         {
             Description = "Install transitive dependencies"
         };
 
-        var overwriteOption = new Option<bool>("--overwrite")
+        Option<bool> overwriteOption = new Option<bool>("--overwrite")
         {
             Description = "Overwrite packages already in the cache"
         };
 
-        var fhirVersionOption = new Option<string?>("--fhir-version", "-f")
+        Option<string?> fhirVersionOption = new Option<string?>("--fhir-version", "-f")
         {
             Description = "Preferred FHIR release (R4, R4B, R5, R6)"
         };
 
-        var preReleaseOption = new Option<bool?>("--pre-release")
+        Option<bool?> preReleaseOption = new Option<bool?>("--pre-release")
         {
             Description = "Include pre-release versions"
         };
 
-        var noPreReleaseOption = new Option<bool>("--no-pre-release")
+        Option<bool> noPreReleaseOption = new Option<bool>("--no-pre-release")
         {
             Description = "Exclude pre-release versions"
         };
 
-        var registryOption = new Option<string?>("--registry", "-r")
+        Option<string?> registryOption = new Option<string?>("--registry", "-r")
         {
             Description = "Custom registry URL"
         };
 
-        var authOption = new Option<string?>("--auth")
+        Option<string?> authOption = new Option<string?>("--auth")
         {
             Description = "Authentication header value (e.g. 'Bearer <token>')"
         };
 
-        var noCiOption = new Option<bool>("--no-ci")
+        Option<bool> noCiOption = new Option<bool>("--no-ci")
         {
             Description = "Exclude CI build registries"
         };
 
-        var progressOption = new Option<bool>("--progress")
+        Option<bool> progressOption = new Option<bool>("--progress")
         {
             Description = "Show download progress (default: true)",
             DefaultValueFactory = _ => true
         };
 
-        var command = new Command("install", "Install one or more FHIR packages into the local cache.")
+        Command command = new Command("install", "Install one or more FHIR packages into the local cache.")
         {
             packagesArg,
             withDependenciesOption,
@@ -88,30 +88,30 @@ internal static class InstallCommand
 
         command.Validators.Add(result =>
         {
-            var pre = result.GetValue(preReleaseOption);
-            var noPre = result.GetValue(noPreReleaseOption);
+            bool? pre = result.GetValue(preReleaseOption);
+            bool noPre = result.GetValue(noPreReleaseOption);
             if (pre == true && noPre)
                 result.AddError("Cannot specify both --pre-release and --no-pre-release.");
         });
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var packages = parseResult.GetValue(packagesArg)!;
-            var withDeps = parseResult.GetValue(withDependenciesOption);
-            var overwrite = parseResult.GetValue(overwriteOption);
-            var fhirVersion = parseResult.GetValue(fhirVersionOption);
-            var preRelease = parseResult.GetValue(preReleaseOption);
-            var noPreRelease = parseResult.GetValue(noPreReleaseOption);
-            var registry = parseResult.GetValue(registryOption);
-            var auth = parseResult.GetValue(authOption);
-            var noCi = parseResult.GetValue(noCiOption);
-            var showProgress = parseResult.GetValue(progressOption);
+            string[] packages = parseResult.GetValue(packagesArg)!;
+            bool withDeps = parseResult.GetValue(withDependenciesOption);
+            bool overwrite = parseResult.GetValue(overwriteOption);
+            string? fhirVersion = parseResult.GetValue(fhirVersionOption);
+            bool? preRelease = parseResult.GetValue(preReleaseOption);
+            bool noPreRelease = parseResult.GetValue(noPreReleaseOption);
+            string? registry = parseResult.GetValue(registryOption);
+            string? auth = parseResult.GetValue(authOption);
+            bool noCi = parseResult.GetValue(noCiOption);
+            bool showProgress = parseResult.GetValue(progressOption);
 
-            var globalOpts = parseResult.GetGlobalOptions();
+            GlobalOptions globalOpts = parseResult.GetGlobalOptions();
 
             try
             {
-                var mgrOptions = globalOpts.BuildManagerOptions();
+                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
 
                 if (registry is not null)
                 {
@@ -128,16 +128,16 @@ internal static class InstallCommand
                     mgrOptions.IncludeCiBuilds = false;
                 }
 
-                var manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
-                var installOptions = new InstallOptions
+                InstallOptions installOptions = new InstallOptions
                 {
                     IncludeDependencies = withDeps,
                     OverwriteExisting = overwrite,
                     AllowPreRelease = noPreRelease ? false : preRelease ?? true
                 };
 
-                if (fhirVersion is not null && Enum.TryParse<FhirRelease>(fhirVersion, ignoreCase: true, out var release))
+                if (fhirVersion is not null && Enum.TryParse<FhirRelease>(fhirVersion, ignoreCase: true, out FhirRelease release))
                 {
                     installOptions.PreferredFhirRelease = release;
                 }
@@ -182,7 +182,7 @@ internal static class InstallCommand
                     ConsoleOutput.WriteInstallResults(results);
                 }
 
-                var hasFailures = results.Any(r =>
+                bool hasFailures = results.Any(r =>
                     r.Status is PackageInstallStatus.Failed or PackageInstallStatus.NotFound);
 
                 return hasFailures ? ExitCodes.NotFound : ExitCodes.Success;

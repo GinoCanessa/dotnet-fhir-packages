@@ -69,10 +69,10 @@ public class RegistryClientBaseTests
     public async Task PerRequestHeaders_DoNotLeakAcrossClients()
     {
         // Arrange: two clients with different auth tokens sharing one HttpClient
-        var handler = new HeaderCapturingHandler();
-        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        HeaderCapturingHandler handler = new HeaderCapturingHandler();
+        using HttpClient httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
 
-        var ep1 = new RegistryEndpoint
+        RegistryEndpoint ep1 = new RegistryEndpoint
         {
             Url = "https://reg1.example.com/",
             Type = RegistryType.FhirNpm,
@@ -80,7 +80,7 @@ public class RegistryClientBaseTests
             UserAgent = "Agent-1",
         };
 
-        var ep2 = new RegistryEndpoint
+        RegistryEndpoint ep2 = new RegistryEndpoint
         {
             Url = "https://reg2.example.com/",
             Type = RegistryType.FhirNpm,
@@ -88,9 +88,9 @@ public class RegistryClientBaseTests
             UserAgent = "Agent-2",
         };
 
-        var logger = NullLogger.Instance;
-        var client1 = new TestableRegistryClient(httpClient, ep1, logger);
-        var client2 = new TestableRegistryClient(httpClient, ep2, logger);
+        NullLogger logger = NullLogger.Instance;
+        TestableRegistryClient client1 = new TestableRegistryClient(httpClient, ep1, logger);
+        TestableRegistryClient client2 = new TestableRegistryClient(httpClient, ep2, logger);
 
         // Act: make one request per client
         await client1.TestGetResponseAsync("https://reg1.example.com/pkg1", CancellationToken.None);
@@ -113,10 +113,10 @@ public class RegistryClientBaseTests
     [Fact]
     public async Task PerRequestHeaders_CustomHeaders_Applied()
     {
-        var handler = new HeaderCapturingHandler();
-        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        HeaderCapturingHandler handler = new HeaderCapturingHandler();
+        using HttpClient httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
 
-        var ep = new RegistryEndpoint
+        RegistryEndpoint ep = new RegistryEndpoint
         {
             Url = "https://private.example.com/",
             Type = RegistryType.FhirNpm,
@@ -124,14 +124,14 @@ public class RegistryClientBaseTests
             CustomHeaders = [("X-Tenant", "acme"), ("X-Correlation", "test-run-1")],
         };
 
-        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+        TestableRegistryClient client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
 
         await client.TestGetResponseAsync("https://private.example.com/pkg", CancellationToken.None);
 
-        var captured = handler.CapturedRequests.ShouldHaveSingleItem();
+        (string? Authorization, string? UserAgent, IEnumerable<KeyValuePair<string, IEnumerable<string>>> AllHeaders) captured = handler.CapturedRequests.ShouldHaveSingleItem();
         captured.Authorization.ShouldBe("Basic abc123");
 
-        var allHeaders = captured.AllHeaders.ToDictionary(
+        Dictionary<string, string> allHeaders = captured.AllHeaders.ToDictionary(
             h => h.Key,
             h => string.Join(", ", h.Value));
 
@@ -147,12 +147,12 @@ public class RegistryClientBaseTests
     [Fact]
     public async Task VirtualSearchAsync_ReturnsEmptyList()
     {
-        var handler = new HeaderCapturingHandler();
-        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
-        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
-        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+        HeaderCapturingHandler handler = new HeaderCapturingHandler();
+        using HttpClient httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        RegistryEndpoint ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        TestableRegistryClient client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
 
-        var result = await client.TestSearchAsync(CancellationToken.None);
+        IReadOnlyList<CatalogEntry> result = await client.TestSearchAsync(CancellationToken.None);
 
         result.ShouldNotBeNull();
         result.ShouldBeEmpty();
@@ -161,12 +161,12 @@ public class RegistryClientBaseTests
     [Fact]
     public async Task VirtualGetPackageListingAsync_ReturnsNull()
     {
-        var handler = new HeaderCapturingHandler();
-        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
-        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
-        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+        HeaderCapturingHandler handler = new HeaderCapturingHandler();
+        using HttpClient httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        RegistryEndpoint ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        TestableRegistryClient client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
 
-        var result = await client.TestGetPackageListingAsync(CancellationToken.None);
+        PackageListing? result = await client.TestGetPackageListingAsync(CancellationToken.None);
 
         result.ShouldBeNull();
     }
@@ -174,12 +174,12 @@ public class RegistryClientBaseTests
     [Fact]
     public async Task VirtualResolveAsync_ReturnsNull()
     {
-        var handler = new HeaderCapturingHandler();
-        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
-        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
-        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+        HeaderCapturingHandler handler = new HeaderCapturingHandler();
+        using HttpClient httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        RegistryEndpoint ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        TestableRegistryClient client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
 
-        var result = await client.TestResolveAsync(CancellationToken.None);
+        ResolvedDirective? result = await client.TestResolveAsync(CancellationToken.None);
 
         result.ShouldBeNull();
     }
@@ -187,12 +187,12 @@ public class RegistryClientBaseTests
     [Fact]
     public async Task VirtualDownloadAsync_ReturnsNull()
     {
-        var handler = new HeaderCapturingHandler();
-        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
-        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
-        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+        HeaderCapturingHandler handler = new HeaderCapturingHandler();
+        using HttpClient httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        RegistryEndpoint ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        TestableRegistryClient client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
 
-        var result = await client.TestDownloadAsync(CancellationToken.None);
+        PackageDownloadResult? result = await client.TestDownloadAsync(CancellationToken.None);
 
         result.ShouldBeNull();
     }
@@ -200,10 +200,10 @@ public class RegistryClientBaseTests
     [Fact]
     public void VirtualPublishAsync_ThrowsNotSupportedException()
     {
-        var handler = new HeaderCapturingHandler();
-        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
-        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
-        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+        HeaderCapturingHandler handler = new HeaderCapturingHandler();
+        using HttpClient httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        RegistryEndpoint ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        TestableRegistryClient client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
 
         Should.Throw<NotSupportedException>(async () =>
             await client.PublishAsync(

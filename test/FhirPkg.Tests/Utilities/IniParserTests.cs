@@ -22,7 +22,7 @@ public class IniParserTests
     [Fact]
     public void Parse_PackagesIni_AllSections()
     {
-        var result = IniParser.Parse(PackagesIniContent);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> result = IniParser.Parse(PackagesIniContent);
 
         result.Keys.ShouldContain("packages");
         result.Keys.ShouldContain("metadata");
@@ -37,7 +37,7 @@ public class IniParserTests
     [Fact]
     public void Parse_EmptyFile_ReturnsEmptySection()
     {
-        var result = IniParser.Parse("");
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> result = IniParser.Parse("");
 
         result.ShouldNotBeNull();
         // Should have at least the default empty-string section
@@ -47,14 +47,14 @@ public class IniParserTests
     [Fact]
     public void Parse_CommentsIgnored()
     {
-        var content = """
+        string content = """
             ; This is a comment
             # This is also a comment
             [section]
             key = value
             """;
 
-        var result = IniParser.Parse(content);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> result = IniParser.Parse(content);
 
         result["section"].Keys.ShouldContain("key");
         result["section"]["key"].ShouldBe("value");
@@ -63,9 +63,9 @@ public class IniParserTests
     [Fact]
     public void Serialize_RoundTrips()
     {
-        var original = IniParser.Parse(PackagesIniContent);
-        var serialized = IniParser.Serialize(original);
-        var reparsed = IniParser.Parse(serialized);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> original = IniParser.Parse(PackagesIniContent);
+        string serialized = IniParser.Serialize(original);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> reparsed = IniParser.Parse(serialized);
 
         reparsed["packages"]["hl7.fhir.r4.core#4.0.1"].ShouldBe("installed");
         reparsed["metadata"]["version"].ShouldBe("1");
@@ -74,13 +74,13 @@ public class IniParserTests
     [Fact]
     public void Parse_KeyWithoutSection_PlacedInDefaultSection()
     {
-        var content = """
+        string content = """
             globalkey = globalvalue
             [section]
             key = value
             """;
 
-        var result = IniParser.Parse(content);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> result = IniParser.Parse(content);
 
         result.Keys.ShouldContain("");
         result[""]["globalkey"].ShouldBe("globalvalue");
@@ -89,12 +89,12 @@ public class IniParserTests
     [Fact]
     public void Parse_BareKey_HasEmptyValue()
     {
-        var content = """
+        string content = """
             [section]
             barekey
             """;
 
-        var result = IniParser.Parse(content);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> result = IniParser.Parse(content);
 
         result["section"].Keys.ShouldContain("barekey");
         result["section"]["barekey"].ShouldBe(string.Empty);
@@ -103,7 +103,7 @@ public class IniParserTests
     [Fact]
     public void Parse_Null_Throws()
     {
-        var act = () => IniParser.Parse(null!);
+        Func<IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>> act = () => IniParser.Parse(null!);
 
         Should.Throw<ArgumentNullException>(() => act());
     }

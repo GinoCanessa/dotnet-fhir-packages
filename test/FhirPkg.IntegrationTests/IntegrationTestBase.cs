@@ -35,7 +35,7 @@ public abstract class IntegrationTestBase : IDisposable
 
     protected string CreateTestProject(string manifestJson)
     {
-        var dir = Path.Combine(TempCacheDir, "test-project");
+        string dir = Path.Combine(TempCacheDir, "test-project");
         Directory.CreateDirectory(dir);
         File.WriteAllText(Path.Combine(dir, "package.json"), manifestJson);
         return dir;
@@ -46,18 +46,18 @@ public abstract class IntegrationTestBase : IDisposable
         string version,
         Dictionary<string, string>? extraFiles = null)
     {
-        var ms = new MemoryStream();
-        using (var gzip = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true))
+        MemoryStream ms = new MemoryStream();
+        using (GZipStream gzip = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true))
         {
-            using var tar = new TarWriter(gzip, TarEntryFormat.Pax, leaveOpen: true);
+            using TarWriter tar = new TarWriter(gzip, TarEntryFormat.Pax, leaveOpen: true);
 
             // Create package/ directory entry
             tar.WriteEntry(new PaxTarEntry(TarEntryType.Directory, "package/"));
 
             // Create package/package.json
-            var manifest = $$"""{"name":"{{packageName}}","version":"{{version}}"}""";
-            var manifestBytes = Encoding.UTF8.GetBytes(manifest);
-            var entry = new PaxTarEntry(TarEntryType.RegularFile, "package/package.json")
+            string manifest = $$"""{"name":"{{packageName}}","version":"{{version}}"}""";
+            byte[] manifestBytes = Encoding.UTF8.GetBytes(manifest);
+            PaxTarEntry entry = new PaxTarEntry(TarEntryType.RegularFile, "package/package.json")
             {
                 DataStream = new MemoryStream(manifestBytes)
             };
@@ -65,10 +65,10 @@ public abstract class IntegrationTestBase : IDisposable
 
             if (extraFiles is not null)
             {
-                foreach (var (name, content) in extraFiles)
+                foreach ((string? name, string? content) in extraFiles)
                 {
-                    var bytes = Encoding.UTF8.GetBytes(content);
-                    var fileEntry = new PaxTarEntry(TarEntryType.RegularFile, $"package/{name}")
+                    byte[] bytes = Encoding.UTF8.GetBytes(content);
+                    PaxTarEntry fileEntry = new PaxTarEntry(TarEntryType.RegularFile, $"package/{name}")
                     {
                         DataStream = new MemoryStream(bytes)
                     };

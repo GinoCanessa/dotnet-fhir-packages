@@ -69,7 +69,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
     {
         ArgumentNullException.ThrowIfNull(criteria);
 
-        var queryParams = new List<string> { "op=find" };
+        List<string> queryParams = new List<string> { "op=find" };
 
         if (!string.IsNullOrWhiteSpace(criteria.Name))
             queryParams.Add($"name={Uri.EscapeDataString(criteria.Name)}");
@@ -80,11 +80,11 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
         if (!string.IsNullOrWhiteSpace(criteria.Canonical))
             queryParams.Add($"canonical={Uri.EscapeDataString(criteria.Canonical)}");
 
-        var url = $"{BaseUrl}/catalog?{string.Join('&', queryParams)}";
+        string url = $"{BaseUrl}/catalog?{string.Join('&', queryParams)}";
 
         Logger.LogInformation("Searching FHIR NPM catalog at {Url}", url);
 
-        var results = await GetJsonAsync<List<CatalogEntry>>(url, cancellationToken)
+        List<CatalogEntry>? results = await GetJsonAsync<List<CatalogEntry>>(url, cancellationToken)
             .ConfigureAwait(false);
 
         Logger.LogDebug("Catalog search returned {Count} entries", results?.Count ?? 0);
@@ -102,11 +102,11 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
 
-        var url = $"{BaseUrl}/{Uri.EscapeDataString(packageId)}";
+        string url = $"{BaseUrl}/{Uri.EscapeDataString(packageId)}";
 
         Logger.LogInformation("Fetching package listing for {PackageId} from {Url}", packageId, url);
 
-        var listing = await GetJsonAsync<PackageListing>(url, cancellationToken)
+        PackageListing? listing = await GetJsonAsync<PackageListing>(url, cancellationToken)
             .ConfigureAwait(false);
 
         if (listing is not null)
@@ -142,7 +142,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
             "Resolving {PackageId} ({VersionType}: {Version}) on FHIR NPM registry",
             directive.PackageId, directive.VersionType, directive.RequestedVersion ?? "latest");
 
-        var listing = await GetPackageListingAsync(directive.PackageId, cancellationToken)
+        PackageListing? listing = await GetPackageListingAsync(directive.PackageId, cancellationToken)
             .ConfigureAwait(false);
 
         if (listing?.Versions is null or { Count: 0 })
@@ -151,7 +151,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
             return null;
         }
 
-        var resolvedVersion = ResolveVersion(directive, listing, options);
+        string? resolvedVersion = ResolveVersion(directive, listing, options);
 
         if (resolvedVersion is null)
         {
@@ -161,7 +161,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
             return null;
         }
 
-        if (!listing.Versions.TryGetValue(resolvedVersion, out var versionInfo))
+        if (!listing.Versions.TryGetValue(resolvedVersion, out PackageVersionInfo? versionInfo))
         {
             Logger.LogWarning(
                 "Resolved version {Version} is not in the versions dictionary for {PackageId}",
@@ -169,7 +169,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
             return null;
         }
 
-        var tarballUrl = versionInfo.Distribution?.TarballUrl
+        string tarballUrl = versionInfo.Distribution?.TarballUrl
             ?? $"{BaseUrl}/{Uri.EscapeDataString(directive.PackageId)}"
              + $"/-/{Uri.EscapeDataString(directive.PackageId)}-{resolvedVersion}.tgz";
 
@@ -183,7 +183,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
             TarballUri = new Uri(tarballUrl),
             ShaSum = versionInfo.Distribution?.ShaSum,
             SourceRegistry = Endpoint,
-            PublicationDate = DateTime.TryParse(versionInfo.PublicationDate, out var pubDate) ? pubDate : null,
+            PublicationDate = DateTime.TryParse(versionInfo.PublicationDate, out DateTime pubDate) ? pubDate : null,
         };
     }
 
@@ -197,10 +197,10 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
     {
         ArgumentNullException.ThrowIfNull(resolved);
 
-        var url = resolved.TarballUri.ToString();
+        string url = resolved.TarballUri.ToString();
         Logger.LogInformation("Downloading tarball from {Url}", url);
 
-        var response = await GetResponseAsync(url, cancellationToken).ConfigureAwait(false);
+        HttpResponseMessage? response = await GetResponseAsync(url, cancellationToken).ConfigureAwait(false);
 
         if (response is null)
         {
@@ -210,7 +210,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
 
         try
         {
-            var result = await CreateDownloadResultAsync(response, cancellationToken)
+            PackageDownloadResult result = await CreateDownloadResultAsync(response, cancellationToken)
                 .ConfigureAwait(false);
 
             Logger.LogDebug(
@@ -236,7 +236,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
     {
         ArgumentNullException.ThrowIfNull(tarballStream);
 
-        var url = $"{BaseUrl}/{Uri.EscapeDataString(reference.Name)}";
+        string url = $"{BaseUrl}/{Uri.EscapeDataString(reference.Name)}";
 
         Logger.LogInformation(
             "Publishing {PackageId}@{Version} to {Url}",
@@ -244,7 +244,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
 
         try
         {
-            using var response = await PutStreamAsync(url, tarballStream, "application/gzip", cancellationToken)
+            using HttpResponseMessage response = await PutStreamAsync(url, tarballStream, "application/gzip", cancellationToken)
                 .ConfigureAwait(false);
 
             Logger.LogInformation(

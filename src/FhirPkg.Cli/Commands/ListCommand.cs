@@ -18,24 +18,24 @@ internal static class ListCommand
     /// <returns>A fully configured <see cref="Command"/> for the list subcommand.</returns>
     public static Command Build()
     {
-        var filterArg = new Argument<string?>("filter")
+        Argument<string?> filterArg = new Argument<string?>("filter")
         {
             Description = "Optional filter to match package names (supports glob patterns).",
             DefaultValueFactory = _ => null
         };
 
-        var sortOption = new Option<string>("--sort", "-s")
+        Option<string> sortOption = new Option<string>("--sort", "-s")
         {
             Description = "Sort order: name, version, date, size.",
             DefaultValueFactory = _ => "name"
         };
 
-        var showSizeOption = new Option<bool>("--show-size")
+        Option<bool> showSizeOption = new Option<bool>("--show-size")
         {
             Description = "Include package sizes in the output."
         };
 
-        var command = new Command("list", "List FHIR packages in the local cache.")
+        Command command = new Command("list", "List FHIR packages in the local cache.")
         {
             filterArg,
             sortOption,
@@ -44,23 +44,23 @@ internal static class ListCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var filter = parseResult.GetValue(filterArg);
-            var sort = parseResult.GetValue(sortOption);
-            var showSize = parseResult.GetValue(showSizeOption);
+            string? filter = parseResult.GetValue(filterArg);
+            string? sort = parseResult.GetValue(sortOption);
+            bool showSize = parseResult.GetValue(showSizeOption);
 
-            var globalOpts = parseResult.GetGlobalOptions();
+            GlobalOptions globalOpts = parseResult.GetGlobalOptions();
 
             try
             {
-                var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
+                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
                 if (globalOpts.Verbose)
                 {
                     ConsoleOutput.WriteVerbose($"Listing cached packages (filter: {filter ?? "*"}, sort: {sort})");
                 }
 
-                var packages = await manager.ListCachedAsync(filter, ct);
+                IReadOnlyList<PackageRecord> packages = await manager.ListCachedAsync(filter, ct);
 
                 // Apply client-side sorting
                 IReadOnlyList<PackageRecord> sorted = sort?.ToLowerInvariant() switch

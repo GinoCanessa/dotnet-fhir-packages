@@ -71,11 +71,11 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             return [];
         }
 
-        var url = $"{BaseUrl}/-/v1/search?text={Uri.EscapeDataString(criteria.Name)}";
+        string url = $"{BaseUrl}/-/v1/search?text={Uri.EscapeDataString(criteria.Name)}";
 
         Logger.LogInformation("Searching NPM registry at {Url}", url);
 
-        var response = await GetJsonAsync<NpmSearchResponse>(url, cancellationToken)
+        NpmSearchResponse? response = await GetJsonAsync<NpmSearchResponse>(url, cancellationToken)
             .ConfigureAwait(false);
 
         if (response?.Objects is null or { Count: 0 })
@@ -84,7 +84,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             return [];
         }
 
-        var entries = response.Objects
+        List<CatalogEntry> entries = response.Objects
             .Where(o => o.Package is not null)
             .Select(o => new CatalogEntry
             {
@@ -108,11 +108,11 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
 
-        var url = $"{BaseUrl}/{Uri.EscapeDataString(packageId)}";
+        string url = $"{BaseUrl}/{Uri.EscapeDataString(packageId)}";
 
         Logger.LogInformation("Fetching NPM package listing for {PackageId} from {Url}", packageId, url);
 
-        var listing = await GetJsonAsync<PackageListing>(url, cancellationToken)
+        PackageListing? listing = await GetJsonAsync<PackageListing>(url, cancellationToken)
             .ConfigureAwait(false);
 
         if (listing is not null)
@@ -144,7 +144,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             "Resolving {PackageId} ({VersionType}: {Version}) on NPM registry",
             directive.PackageId, directive.VersionType, directive.RequestedVersion ?? "latest");
 
-        var listing = await GetPackageListingAsync(directive.PackageId, cancellationToken)
+        PackageListing? listing = await GetPackageListingAsync(directive.PackageId, cancellationToken)
             .ConfigureAwait(false);
 
         if (listing?.Versions is null or { Count: 0 })
@@ -153,7 +153,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             return null;
         }
 
-        var resolvedVersion = ResolveVersion(directive, listing, options);
+        string? resolvedVersion = ResolveVersion(directive, listing, options);
 
         if (resolvedVersion is null)
         {
@@ -163,7 +163,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             return null;
         }
 
-        if (!listing.Versions.TryGetValue(resolvedVersion, out var versionInfo))
+        if (!listing.Versions.TryGetValue(resolvedVersion, out PackageVersionInfo? versionInfo))
         {
             Logger.LogWarning(
                 "Resolved version {Version} is not in the NPM versions dictionary for {PackageId}",
@@ -171,7 +171,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             return null;
         }
 
-        var tarballUrl = versionInfo.Distribution?.TarballUrl
+        string tarballUrl = versionInfo.Distribution?.TarballUrl
             ?? $"{BaseUrl}/{Uri.EscapeDataString(directive.PackageId)}" +
                $"/-/{Uri.EscapeDataString(directive.PackageId)}-{resolvedVersion}.tgz";
 
@@ -185,7 +185,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             TarballUri = new Uri(tarballUrl),
             ShaSum = versionInfo.Distribution?.ShaSum,
             SourceRegistry = Endpoint,
-            PublicationDate = DateTime.TryParse(versionInfo.PublicationDate, out var pubDate) ? pubDate : null,
+            PublicationDate = DateTime.TryParse(versionInfo.PublicationDate, out DateTime pubDate) ? pubDate : null,
         };
     }
 
@@ -199,10 +199,10 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     {
         ArgumentNullException.ThrowIfNull(resolved);
 
-        var url = resolved.TarballUri.ToString();
+        string url = resolved.TarballUri.ToString();
         Logger.LogInformation("Downloading tarball from NPM: {Url}", url);
 
-        var response = await GetResponseAsync(url, cancellationToken).ConfigureAwait(false);
+        HttpResponseMessage? response = await GetResponseAsync(url, cancellationToken).ConfigureAwait(false);
 
         if (response is null)
         {
@@ -231,7 +231,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     {
         ArgumentNullException.ThrowIfNull(tarballStream);
 
-        var url = $"{BaseUrl}/{Uri.EscapeDataString(reference.Name)}";
+        string url = $"{BaseUrl}/{Uri.EscapeDataString(reference.Name)}";
 
         Logger.LogInformation(
             "Publishing {PackageId}@{Version} to NPM registry at {Url}",
@@ -239,7 +239,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
 
         try
         {
-            using var response = await PutStreamAsync(
+            using HttpResponseMessage response = await PutStreamAsync(
                     url, tarballStream, "application/gzip", cancellationToken)
                 .ConfigureAwait(false);
 

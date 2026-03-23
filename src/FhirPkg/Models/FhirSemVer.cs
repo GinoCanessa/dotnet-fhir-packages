@@ -136,7 +136,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(versionString);
 
-        if (!TryParse(versionString, out var result))
+        if (!TryParse(versionString, out FhirSemVer? result))
             throw new FormatException($"Invalid version format: '{versionString}'.");
 
         return result;
@@ -160,7 +160,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         if (string.IsNullOrWhiteSpace(versionString))
             return false;
 
-        var input = versionString.AsSpan().Trim();
+        ReadOnlySpan<char> input = versionString.AsSpan().Trim();
 
         // Pure wildcard: "*", "x", "X"
         if (input is "*" or "x" or "X")
@@ -171,10 +171,10 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
 
         // Separate build metadata (everything after the first '+')
         string? buildMetadata = null;
-        var plusIndex = input.IndexOf('+');
+        int plusIndex = input.IndexOf('+');
         if (plusIndex >= 0)
         {
-            var bm = input[(plusIndex + 1)..];
+            ReadOnlySpan<char> bm = input[(plusIndex + 1)..];
             if (bm.Length == 0 || !IsValidIdentifier(bm))
                 return false;
             buildMetadata = new string(bm);
@@ -183,10 +183,10 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
 
         // Separate pre-release (everything after the first '-' in the remaining string)
         string? preRelease = null;
-        var dashIndex = input.IndexOf('-');
+        int dashIndex = input.IndexOf('-');
         if (dashIndex >= 0)
         {
-            var pr = input[(dashIndex + 1)..];
+            ReadOnlySpan<char> pr = input[(dashIndex + 1)..];
             if (pr.Length == 0 || !IsValidIdentifier(pr))
                 return false;
             preRelease = new string(pr);
@@ -194,17 +194,17 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         }
 
         // Parse the version core segments using span indexing (avoids Split allocation)
-        var firstDot = input.IndexOf('.');
+        int firstDot = input.IndexOf('.');
         if (firstDot < 0)
             return false;
 
-        var afterFirst = input[(firstDot + 1)..];
-        var secondDot = afterFirst.IndexOf('.');
+        ReadOnlySpan<char> afterFirst = input[(firstDot + 1)..];
+        int secondDot = afterFirst.IndexOf('.');
 
         if (secondDot < 0)
         {
             // Two segments: "4.x", "4.*", "4.X", or "4.0"
-            if (!TryParseSegment(input[..firstDot], out var major))
+            if (!TryParseSegment(input[..firstDot], out int major))
                 return false;
 
             if (preRelease is not null || buildMetadata is not null)
@@ -216,7 +216,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
                 return true;
             }
 
-            if (TryParseSegment(afterFirst, out var minor))
+            if (TryParseSegment(afterFirst, out int minor))
             {
                 result = new FhirSemVer(major, minor, 0, null, null, WildcardLevel.Patch);
                 return true;
@@ -227,17 +227,17 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         else
         {
             // Three segments
-            var seg0 = input[..firstDot];
-            var seg1 = afterFirst[..secondDot];
-            var seg2 = afterFirst[(secondDot + 1)..];
+            ReadOnlySpan<char> seg0 = input[..firstDot];
+            ReadOnlySpan<char> seg1 = afterFirst[..secondDot];
+            ReadOnlySpan<char> seg2 = afterFirst[(secondDot + 1)..];
 
             // Reject 4+ segments
             if (seg2.IndexOf('.') >= 0)
                 return false;
 
-            if (!TryParseSegment(seg0, out var major))
+            if (!TryParseSegment(seg0, out int major))
                 return false;
-            if (!TryParseSegment(seg1, out var minor))
+            if (!TryParseSegment(seg1, out int minor))
                 return false;
 
             if (IsWildcardSegment(seg2))
@@ -248,7 +248,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
                 return true;
             }
 
-            if (TryParseSegment(seg2, out var patch))
+            if (TryParseSegment(seg2, out int patch))
             {
                 result = new FhirSemVer(major, minor, patch, preRelease, buildMetadata, WildcardLevel.None);
                 return true;
@@ -284,7 +284,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     /// </summary>
     private static bool IsValidIdentifier(ReadOnlySpan<char> value)
     {
-        foreach (var ch in value)
+        foreach (char ch in value)
         {
             if (!char.IsLetterOrDigit(ch) && ch is not '.' and not '-')
                 return false;
@@ -367,7 +367,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         }
 
         // Compare numeric components
-        var result = Major.CompareTo(other.Major);
+        int result = Major.CompareTo(other.Major);
         if (result != 0) return result;
 
         result = Minor.CompareTo(other.Minor);
@@ -396,8 +396,8 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     /// </summary>
     private static int ComparePreReleaseSuffix(string a, string b)
     {
-        var suffixA = ExtractNumericSuffix(a);
-        var suffixB = ExtractNumericSuffix(b);
+        int suffixA = ExtractNumericSuffix(a);
+        int suffixB = ExtractNumericSuffix(b);
 
         if (suffixA != suffixB)
             return suffixA.CompareTo(suffixB);
@@ -411,7 +411,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     /// </summary>
     private static int ExtractNumericSuffix(string preRelease)
     {
-        var i = preRelease.Length - 1;
+        int i = preRelease.Length - 1;
         while (i >= 0 && char.IsAsciiDigit(preRelease[i]))
             i--;
 
@@ -423,7 +423,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
                 preRelease.AsSpan(i + 1),
                 NumberStyles.None,
                 CultureInfo.InvariantCulture,
-                out var suffix))
+                out int suffix))
         {
             return suffix;
         }
@@ -525,7 +525,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     /// </exception>
     public bool Satisfies(string versionSpecifier)
     {
-        var spec = Parse(versionSpecifier);
+        FhirSemVer spec = Parse(versionSpecifier);
         return Satisfies(spec);
     }
 
@@ -591,8 +591,8 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         ArgumentNullException.ThrowIfNull(versions);
         ArgumentException.ThrowIfNullOrEmpty(specifier);
 
-        var spec = Parse(specifier);
-        var allowPreRelease = includePreRelease || spec.IsPreRelease;
+        FhirSemVer spec = Parse(specifier);
+        bool allowPreRelease = includePreRelease || spec.IsPreRelease;
 
         return versions
             .Where(v => !v.IsWildcard)
@@ -648,17 +648,17 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         ArgumentException.ThrowIfNullOrEmpty(rangeExpression);
 
         // Materialize once so multiple pipe-separated parts can iterate the same source.
-        var versionList = versions as IReadOnlyList<FhirSemVer> ?? versions.ToList();
-        var parts = rangeExpression.Split('|');
+        IReadOnlyList<FhirSemVer> versionList = versions as IReadOnlyList<FhirSemVer> ?? versions.ToList();
+        string[] parts = rangeExpression.Split('|');
 
         if (parts.Length == 1)
             return EvaluateRangePart(versionList, parts[0].Trim());
 
         // Union results from all pipe-separated sub-expressions.
-        var results = new HashSet<FhirSemVer>();
-        foreach (var part in parts)
+        HashSet<FhirSemVer> results = new HashSet<FhirSemVer>();
+        foreach (string part in parts)
         {
-            foreach (var v in EvaluateRangePart(versionList, part.Trim()))
+            foreach (FhirSemVer v in EvaluateRangePart(versionList, part.Trim()))
                 results.Add(v);
         }
 
@@ -673,19 +673,19 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         string part)
     {
         // Hyphen range: "1.0.0 - 2.0.0"
-        var hyphenIndex = part.IndexOf(" - ", StringComparison.Ordinal);
+        int hyphenIndex = part.IndexOf(" - ", StringComparison.Ordinal);
         if (hyphenIndex >= 0)
         {
-            var lower = ParseExactForRange(part[..hyphenIndex].Trim(), part);
-            var upper = ParseExactForRange(part[(hyphenIndex + 3)..].Trim(), part);
+            FhirSemVer lower = ParseExactForRange(part[..hyphenIndex].Trim(), part);
+            FhirSemVer upper = ParseExactForRange(part[(hyphenIndex + 3)..].Trim(), part);
             return versions.Where(v => !v.IsWildcard && v >= lower && v <= upper);
         }
 
         // Caret range: "^3.0.1"
         if (part.StartsWith('^'))
         {
-            var baseVersion = ParseExactForRange(part[1..], part);
-            var ceiling = new FhirSemVer(
+            FhirSemVer baseVersion = ParseExactForRange(part[1..], part);
+            FhirSemVer ceiling = new FhirSemVer(
                 baseVersion.Major + 1, 0, 0, null, null, WildcardLevel.None);
             return versions.Where(v => !v.IsWildcard && v >= baseVersion && v < ceiling);
         }
@@ -693,14 +693,14 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         // Tilde range: "~3.0.1"
         if (part.StartsWith('~'))
         {
-            var baseVersion = ParseExactForRange(part[1..], part);
-            var ceiling = new FhirSemVer(
+            FhirSemVer baseVersion = ParseExactForRange(part[1..], part);
+            FhirSemVer ceiling = new FhirSemVer(
                 baseVersion.Major, baseVersion.Minor + 1, 0, null, null, WildcardLevel.None);
             return versions.Where(v => !v.IsWildcard && v >= baseVersion && v < ceiling);
         }
 
         // Wildcard or exact match
-        var specifier = Parse(part);
+        FhirSemVer specifier = Parse(part);
         return versions.Where(v => v.Satisfies(specifier));
     }
 
@@ -710,7 +710,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     /// </summary>
     private static FhirSemVer ParseExactForRange(string versionPart, string fullExpression)
     {
-        var version = Parse(versionPart);
+        FhirSemVer version = Parse(versionPart);
         if (version.IsWildcard)
         {
             throw new FormatException(

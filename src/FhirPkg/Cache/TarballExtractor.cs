@@ -35,7 +35,7 @@ public static class TarballExtractor
 
         Directory.CreateDirectory(destinationPath);
 
-        var fullDestination = Path.GetFullPath(destinationPath);
+        string fullDestination = Path.GetFullPath(destinationPath);
 
         await ExtractUsingTarReaderAsync(tarballStream, fullDestination, ct).ConfigureAwait(false);
     }
@@ -53,19 +53,19 @@ public static class TarballExtractor
         if (tarballStream.CanSeek)
             tarballStream.Position = 0;
 
-        await using var gzipStream = new GZipStream(tarballStream, CompressionMode.Decompress, leaveOpen: true);
-        await using var tarReader = new TarReader(gzipStream, leaveOpen: true);
+        await using GZipStream gzipStream = new GZipStream(tarballStream, CompressionMode.Decompress, leaveOpen: true);
+        await using TarReader tarReader = new TarReader(gzipStream, leaveOpen: true);
 
         while (await tarReader.GetNextEntryAsync(copyData: false, ct).ConfigureAwait(false) is { } entry)
         {
             ct.ThrowIfCancellationRequested();
 
             // Sanitize the entry name (remove leading ./ or /)
-            var entryName = SanitizeEntryName(entry.Name);
+            string entryName = SanitizeEntryName(entry.Name);
             if (string.IsNullOrEmpty(entryName))
                 continue;
 
-            var targetPath = Path.GetFullPath(Path.Combine(destinationPath, entryName));
+            string targetPath = Path.GetFullPath(Path.Combine(destinationPath, entryName));
 
             // Path traversal protection: ensure the target is within the destination
             if (!targetPath.StartsWith(destinationPath, StringComparison.OrdinalIgnoreCase))
@@ -81,7 +81,7 @@ public static class TarballExtractor
             }
 
             // Ensure parent directory exists
-            var parentDir = Path.GetDirectoryName(targetPath);
+            string? parentDir = Path.GetDirectoryName(targetPath);
             if (parentDir is not null)
                 Directory.CreateDirectory(parentDir);
 
@@ -100,7 +100,7 @@ public static class TarballExtractor
     {
         ArgumentNullException.ThrowIfNull(extractedPath);
 
-        var packageDir = Path.Combine(extractedPath, PackageSubdirectory);
+        string packageDir = Path.Combine(extractedPath, PackageSubdirectory);
 
         // If the package/ subdirectory already exists, nothing to do
         if (Directory.Exists(packageDir))
@@ -110,21 +110,21 @@ public static class TarballExtractor
         Directory.CreateDirectory(packageDir);
 
         // Move all top-level files into package/
-        foreach (var file in Directory.GetFiles(extractedPath))
+        foreach (string file in Directory.GetFiles(extractedPath))
         {
-            var fileName = Path.GetFileName(file);
-            var destination = Path.Combine(packageDir, fileName);
+            string fileName = Path.GetFileName(file);
+            string destination = Path.Combine(packageDir, fileName);
             File.Move(file, destination);
         }
 
         // Move all top-level subdirectories (except "package" itself) into package/
-        foreach (var dir in Directory.GetDirectories(extractedPath))
+        foreach (string dir in Directory.GetDirectories(extractedPath))
         {
-            var dirName = Path.GetFileName(dir);
+            string dirName = Path.GetFileName(dir);
             if (string.Equals(dirName, PackageSubdirectory, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            var destination = Path.Combine(packageDir, dirName);
+            string destination = Path.Combine(packageDir, dirName);
             Directory.Move(dir, destination);
         }
     }
@@ -136,7 +136,7 @@ public static class TarballExtractor
     private static string SanitizeEntryName(string entryName)
     {
         // Normalize separators
-        var sanitized = entryName.Replace('/', Path.DirectorySeparatorChar);
+        string sanitized = entryName.Replace('/', Path.DirectorySeparatorChar);
 
         // Remove leading .\ or ./ or \ or /
         sanitized = sanitized.TrimStart('.', Path.DirectorySeparatorChar, '/');

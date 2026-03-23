@@ -97,8 +97,8 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("GET JSON {Uri}", requestUri);
 
-        using var request = CreateRequestMessage(HttpMethod.Get, requestUri);
-        using var response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using HttpRequestMessage request = CreateRequestMessage(HttpMethod.Get, requestUri);
+        using HttpResponseMessage response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
         if (response.StatusCode is HttpStatusCode.NotFound)
         {
@@ -108,7 +108,7 @@ public abstract class RegistryClientBase : IRegistryClient
 
         await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
 
-        await using var stream = await response.Content
+        await using Stream stream = await response.Content
             .ReadAsStreamAsync(cancellationToken)
             .ConfigureAwait(false);
 
@@ -126,8 +126,8 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("GET JSON {Uri}", requestUri);
 
-        using var request = CreateRequestMessage(HttpMethod.Get, requestUri);
-        using var response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using HttpRequestMessage request = CreateRequestMessage(HttpMethod.Get, requestUri);
+        using HttpResponseMessage response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
         if (response.StatusCode is HttpStatusCode.NotFound)
         {
@@ -137,7 +137,7 @@ public abstract class RegistryClientBase : IRegistryClient
 
         await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
 
-        await using var stream = await response.Content
+        await using Stream stream = await response.Content
             .ReadAsStreamAsync(cancellationToken)
             .ConfigureAwait(false);
 
@@ -161,7 +161,7 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("GET stream {Uri}", requestUri);
 
-        var request = CreateRequestMessage(HttpMethod.Get, requestUri);
+        HttpRequestMessage request = CreateRequestMessage(HttpMethod.Get, requestUri);
         HttpResponseMessage response;
         try
         {
@@ -208,12 +208,12 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("POST JSON {Uri}", requestUri);
 
-        var json = JsonSerializer.Serialize(content, JsonOptions);
-        using var httpContent = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-        using var request = CreateRequestMessage(HttpMethod.Post, requestUri);
+        string json = JsonSerializer.Serialize(content, JsonOptions);
+        using StringContent httpContent = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        using HttpRequestMessage request = CreateRequestMessage(HttpMethod.Post, requestUri);
         request.Content = httpContent;
 
-        var response = await Http.SendAsync(request, cancellationToken)
+        HttpResponseMessage response = await Http.SendAsync(request, cancellationToken)
             .ConfigureAwait(false);
 
         await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
@@ -233,12 +233,12 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("PUT stream {Uri} ({ContentType})", requestUri, contentType);
 
-        using var httpContent = new StreamContent(stream);
+        using StreamContent httpContent = new StreamContent(stream);
         httpContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
 
-        using var request = CreateRequestMessage(HttpMethod.Put, requestUri);
+        using HttpRequestMessage request = CreateRequestMessage(HttpMethod.Put, requestUri);
         request.Content = httpContent;
-        var response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        HttpResponseMessage response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
         await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
         return response;
@@ -253,7 +253,7 @@ public abstract class RegistryClientBase : IRegistryClient
     protected static async Task<PackageDownloadResult> CreateDownloadResultAsync(
         HttpResponseMessage response, CancellationToken cancellationToken)
     {
-        var innerStream = await response.Content
+        Stream innerStream = await response.Content
             .ReadAsStreamAsync(cancellationToken)
             .ConfigureAwait(false);
 
@@ -273,7 +273,7 @@ public abstract class RegistryClientBase : IRegistryClient
     /// </summary>
     private protected HttpRequestMessage CreateRequestMessage(HttpMethod method, string requestUri)
     {
-        var request = new HttpRequestMessage(method, requestUri);
+        HttpRequestMessage request = new HttpRequestMessage(method, requestUri);
 
         request.Headers.TryAddWithoutValidation(
             "User-Agent",
@@ -287,7 +287,7 @@ public abstract class RegistryClientBase : IRegistryClient
 
         if (EndpointConfig.CustomHeaders is { Count: > 0 } headers)
         {
-            foreach (var (name, value) in headers)
+            foreach ((string? name, string? value) in headers)
             {
                 request.Headers.TryAddWithoutValidation(name, value);
             }
@@ -463,8 +463,8 @@ public abstract class RegistryClientBase : IRegistryClient
     protected static string? ResolveWildcard(
         PackageListing listing, string specifier, VersionResolveOptions? options)
     {
-        var versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
-        var includePreRelease = options?.AllowPreRelease ?? true;
+        IEnumerable<FhirSemVer> versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
+        bool includePreRelease = options?.AllowPreRelease ?? true;
 
         return FhirSemVer.MaxSatisfying(versions, specifier, includePreRelease)?.ToString();
     }
@@ -473,8 +473,8 @@ public abstract class RegistryClientBase : IRegistryClient
     protected static string? ResolveRange(
         PackageListing listing, string rangeExpression, VersionResolveOptions? options)
     {
-        var versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
-        var satisfying = FhirSemVer.SatisfyingRange(versions, rangeExpression);
+        IEnumerable<FhirSemVer> versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
+        IEnumerable<FhirSemVer> satisfying = FhirSemVer.SatisfyingRange(versions, rangeExpression);
 
         if (options?.AllowPreRelease is false)
             satisfying = satisfying.Where(v => !v.IsPreRelease);

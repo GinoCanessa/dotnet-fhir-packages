@@ -16,7 +16,7 @@ internal static class ConsoleOutput
     /// <param name="result">The install result to display.</param>
     public static void WriteInstallResult(PackageInstallResult result)
     {
-        var statusMarkup = result.Status switch
+        string statusMarkup = result.Status switch
         {
             PackageInstallStatus.Installed => "[green]✓ installed[/]",
             PackageInstallStatus.AlreadyCached => "[yellow]● already cached[/]",
@@ -48,16 +48,16 @@ internal static class ConsoleOutput
         AnsiConsole.MarkupLine("[bold]Install results:[/]");
         AnsiConsole.WriteLine();
 
-        foreach (var result in results)
+        foreach (PackageInstallResult result in results)
         {
             WriteInstallResult(result);
         }
 
         AnsiConsole.WriteLine();
 
-        var installed = results.Count(r => r.Status == PackageInstallStatus.Installed);
-        var cached = results.Count(r => r.Status == PackageInstallStatus.AlreadyCached);
-        var failed = results.Count(r => r.Status is PackageInstallStatus.Failed or PackageInstallStatus.NotFound);
+        int installed = results.Count(r => r.Status == PackageInstallStatus.Installed);
+        int cached = results.Count(r => r.Status == PackageInstallStatus.AlreadyCached);
+        int failed = results.Count(r => r.Status is PackageInstallStatus.Failed or PackageInstallStatus.NotFound);
 
         AnsiConsole.MarkupLine(
             $"[bold]Summary:[/] [green]{installed} installed[/], " +
@@ -77,12 +77,12 @@ internal static class ConsoleOutput
 
         if (closure.Resolved.Count > 0)
         {
-            var table = new Table()
+            Table table = new Table()
                 .Border(TableBorder.Rounded)
                 .AddColumn("[bold]Package[/]")
                 .AddColumn("[bold]Version[/]");
 
-            foreach (var (id, reference) in closure.Resolved.OrderBy(kvp => kvp.Key))
+            foreach ((string? id, PackageReference reference) in closure.Resolved.OrderBy(kvp => kvp.Key))
             {
                 table.AddRow(
                     Markup.Escape(id),
@@ -97,7 +97,7 @@ internal static class ConsoleOutput
             AnsiConsole.WriteLine();
             AnsiConsole.MarkupLine("[red bold]Missing packages:[/]");
 
-            foreach (var (id, reason) in closure.Missing.OrderBy(kvp => kvp.Key))
+            foreach ((string? id, string? reason) in closure.Missing.OrderBy(kvp => kvp.Key))
             {
                 AnsiConsole.MarkupLine($"  [red]✗[/] {Markup.Escape(id)}: {Markup.Escape(reason)}");
             }
@@ -130,7 +130,7 @@ internal static class ConsoleOutput
             return;
         }
 
-        var table = new Table()
+        Table table = new Table()
             .Border(TableBorder.Rounded)
             .AddColumn("[bold]Package[/]")
             .AddColumn("[bold]Version[/]")
@@ -142,12 +142,12 @@ internal static class ConsoleOutput
             table.AddColumn("[bold]Size[/]");
         }
 
-        foreach (var pkg in packages)
+        foreach (PackageRecord pkg in packages)
         {
-            var fhirVersion = pkg.Manifest?.FhirVersions?.FirstOrDefault() ?? "-";
-            var installedAt = pkg.InstalledAt?.ToString("yyyy-MM-dd HH:mm") ?? "-";
+            string fhirVersion = pkg.Manifest?.FhirVersions?.FirstOrDefault() ?? "-";
+            string installedAt = pkg.InstalledAt?.ToString("yyyy-MM-dd HH:mm") ?? "-";
 
-            var columns = new List<string>
+            List<string> columns = new List<string>
             {
                 Markup.Escape(pkg.Reference.Name),
                 Markup.Escape(pkg.Reference.Version ?? "?"),
@@ -179,14 +179,14 @@ internal static class ConsoleOutput
             return;
         }
 
-        var table = new Table()
+        Table table = new Table()
             .Border(TableBorder.Rounded)
             .AddColumn("[bold]Name[/]")
             .AddColumn("[bold]Version[/]")
             .AddColumn("[bold]FHIR[/]")
             .AddColumn("[bold]Description[/]");
 
-        foreach (var entry in entries)
+        foreach (CatalogEntry entry in entries)
         {
             table.AddRow(
                 Markup.Escape(entry.Name),
@@ -222,7 +222,7 @@ internal static class ConsoleOutput
         if (listing.DistTags is { Count: > 0 })
         {
             AnsiConsole.MarkupLine("  [bold]Dist tags:[/]");
-            foreach (var (tag, version) in listing.DistTags)
+            foreach ((string? tag, string? version) in listing.DistTags)
             {
                 AnsiConsole.MarkupLine($"    {Markup.Escape(tag)}: {Markup.Escape(version)}");
             }
@@ -232,19 +232,19 @@ internal static class ConsoleOutput
         {
             AnsiConsole.WriteLine();
 
-            var cachedVersions = cached?
+            HashSet<string?> cachedVersions = cached?
                 .Where(c => string.Equals(c.Reference.Name, listing.PackageId, StringComparison.OrdinalIgnoreCase))
                 .Select(c => c.Reference.Version)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
 
-            var table = new Table()
+            Table table = new Table()
                 .Border(TableBorder.Rounded)
                 .AddColumn("[bold]Version[/]")
                 .AddColumn("[bold]Cached[/]");
 
-            foreach (var (version, _) in listing.Versions.OrderByDescending(v => v.Key))
+            foreach ((string? version, PackageVersionInfo _) in listing.Versions.OrderByDescending(v => v.Key))
             {
-                var isCached = cachedVersions.Contains(version);
+                bool isCached = cachedVersions.Contains(version);
                 table.AddRow(
                     Markup.Escape(version),
                     isCached ? "[green]✓[/]" : "[grey]-[/]");

@@ -18,7 +18,7 @@ public class FhirSemVerTests
     public void Parse_ExactVersion_ReturnsCorrectComponents(
         string input, int expectedMajor, int expectedMinor, int expectedPatch)
     {
-        var version = FhirSemVer.Parse(input);
+        FhirSemVer version = FhirSemVer.Parse(input);
 
         version.Major.ShouldBe(expectedMajor);
         version.Minor.ShouldBe(expectedMinor);
@@ -33,7 +33,7 @@ public class FhirSemVerTests
     public void Parse_PreReleaseVersion_ParsesTag(
         string input, string expectedPreRelease, FhirPreReleaseType expectedType)
     {
-        var version = FhirSemVer.Parse(input);
+        FhirSemVer version = FhirSemVer.Parse(input);
 
         version.PreRelease.ShouldBe(expectedPreRelease);
         version.PreReleaseType.ShouldBe(expectedType);
@@ -46,7 +46,7 @@ public class FhirSemVerTests
     public void Parse_SnapshotPreRelease_ParsesCorrectly(
         string input, string expectedPreRelease, FhirPreReleaseType expectedType)
     {
-        var version = FhirSemVer.Parse(input);
+        FhirSemVer version = FhirSemVer.Parse(input);
 
         version.PreRelease.ShouldBe(expectedPreRelease);
         version.PreReleaseType.ShouldBe(expectedType);
@@ -55,7 +55,7 @@ public class FhirSemVerTests
     [Fact]
     public void Parse_CiBuildPreRelease_ParsesCorrectly()
     {
-        var version = FhirSemVer.Parse("5.0.0-cibuild");
+        FhirSemVer version = FhirSemVer.Parse("5.0.0-cibuild");
 
         version.PreRelease.ShouldBe("cibuild");
         version.PreReleaseType.ShouldBe(FhirPreReleaseType.CiBuild);
@@ -64,7 +64,7 @@ public class FhirSemVerTests
     [Fact]
     public void Parse_BuildMetadata_Ignored()
     {
-        var version = FhirSemVer.Parse("1.2.3+20240115");
+        FhirSemVer version = FhirSemVer.Parse("1.2.3+20240115");
 
         version.Major.ShouldBe(1);
         version.Minor.ShouldBe(2);
@@ -76,7 +76,7 @@ public class FhirSemVerTests
     [Fact]
     public void Parse_WildcardPatch_IsWildcard()
     {
-        var version = FhirSemVer.Parse("4.0.x");
+        FhirSemVer version = FhirSemVer.Parse("4.0.x");
 
         version.IsWildcard.ShouldBeTrue();
         version.Major.ShouldBe(4);
@@ -86,7 +86,7 @@ public class FhirSemVerTests
     [Fact]
     public void Parse_WildcardMinor_IsWildcard()
     {
-        var version = FhirSemVer.Parse("4.x");
+        FhirSemVer version = FhirSemVer.Parse("4.x");
 
         version.IsWildcard.ShouldBeTrue();
         version.Major.ShouldBe(4);
@@ -95,7 +95,7 @@ public class FhirSemVerTests
     [Fact]
     public void Parse_WildcardStar_IsWildcard()
     {
-        var version = FhirSemVer.Parse("4.*");
+        FhirSemVer version = FhirSemVer.Parse("4.*");
 
         version.IsWildcard.ShouldBeTrue();
         version.Major.ShouldBe(4);
@@ -104,7 +104,7 @@ public class FhirSemVerTests
     [Fact]
     public void Parse_WildcardAll_IsWildcard()
     {
-        var version = FhirSemVer.Parse("*");
+        FhirSemVer version = FhirSemVer.Parse("*");
 
         version.IsWildcard.ShouldBeTrue();
     }
@@ -112,7 +112,7 @@ public class FhirSemVerTests
     [Fact]
     public void Parse_UpperCaseX_IsWildcard()
     {
-        var version = FhirSemVer.Parse("4.0.X");
+        FhirSemVer version = FhirSemVer.Parse("4.0.X");
 
         version.IsWildcard.ShouldBeTrue();
     }
@@ -120,7 +120,7 @@ public class FhirSemVerTests
     [Fact]
     public void Parse_TwoSegment_TreatedAsWildcard()
     {
-        var version = FhirSemVer.Parse("4.0");
+        FhirSemVer version = FhirSemVer.Parse("4.0");
 
         version.IsWildcard.ShouldBeTrue();
         version.Major.ShouldBe(4);
@@ -130,7 +130,7 @@ public class FhirSemVerTests
     [Fact]
     public void Parse_EmptyString_Throws()
     {
-        var act = () => FhirSemVer.Parse("");
+        Func<FhirSemVer> act = () => FhirSemVer.Parse("");
 
         Should.Throw<ArgumentException>(() => act());
     }
@@ -138,7 +138,7 @@ public class FhirSemVerTests
     [Fact]
     public void TryParse_Valid_ReturnsTrue()
     {
-        var success = FhirSemVer.TryParse("4.0.1", out var result);
+        bool success = FhirSemVer.TryParse("4.0.1", out FhirSemVer? result);
 
         success.ShouldBeTrue();
         result.ShouldNotBeNull();
@@ -153,7 +153,7 @@ public class FhirSemVerTests
     [InlineData("a.b.c")]
     public void TryParse_Invalid_ReturnsFalse(string? input)
     {
-        var success = FhirSemVer.TryParse(input, out var result);
+        bool success = FhirSemVer.TryParse(input, out FhirSemVer? result);
 
         success.ShouldBeFalse();
         result.ShouldBeNull();
@@ -166,8 +166,8 @@ public class FhirSemVerTests
     [InlineData("2.0.0", "2.0.0-draft1")]
     public void CompareTo_Release_GreaterThanPreRelease(string release, string preRelease)
     {
-        var releaseVersion = FhirSemVer.Parse(release);
-        var preReleaseVersion = FhirSemVer.Parse(preRelease);
+        FhirSemVer releaseVersion = FhirSemVer.Parse(release);
+        FhirSemVer preReleaseVersion = FhirSemVer.Parse(preRelease);
 
         releaseVersion.CompareTo(preReleaseVersion).ShouldBeGreaterThan(0);
     }
@@ -176,8 +176,8 @@ public class FhirSemVerTests
     [InlineData("1.0.0-ballot1", "1.0.0-draft1")]
     public void CompareTo_Ballot_GreaterThanDraft(string ballot, string draft)
     {
-        var ballotVersion = FhirSemVer.Parse(ballot);
-        var draftVersion = FhirSemVer.Parse(draft);
+        FhirSemVer ballotVersion = FhirSemVer.Parse(ballot);
+        FhirSemVer draftVersion = FhirSemVer.Parse(draft);
 
         ballotVersion.CompareTo(draftVersion).ShouldBeGreaterThan(0);
     }
@@ -188,8 +188,8 @@ public class FhirSemVerTests
     [InlineData("4.0.2", "4.0.1")]
     public void CompareTo_HigherVersion_Greater(string higher, string lower)
     {
-        var higherVersion = FhirSemVer.Parse(higher);
-        var lowerVersion = FhirSemVer.Parse(lower);
+        FhirSemVer higherVersion = FhirSemVer.Parse(higher);
+        FhirSemVer lowerVersion = FhirSemVer.Parse(lower);
 
         higherVersion.CompareTo(lowerVersion).ShouldBeGreaterThan(0);
     }
@@ -197,8 +197,8 @@ public class FhirSemVerTests
     [Fact]
     public void CompareTo_SameVersion_Equal()
     {
-        var a = FhirSemVer.Parse("4.0.1");
-        var b = FhirSemVer.Parse("4.0.1");
+        FhirSemVer a = FhirSemVer.Parse("4.0.1");
+        FhirSemVer b = FhirSemVer.Parse("4.0.1");
 
         a.CompareTo(b).ShouldBe(0);
     }
@@ -206,8 +206,8 @@ public class FhirSemVerTests
     [Fact]
     public void Equals_SameVersion_True()
     {
-        var a = FhirSemVer.Parse("4.0.1");
-        var b = FhirSemVer.Parse("4.0.1");
+        FhirSemVer a = FhirSemVer.Parse("4.0.1");
+        FhirSemVer b = FhirSemVer.Parse("4.0.1");
 
         a.Equals(b).ShouldBeTrue();
         (a == b).ShouldBeTrue();
@@ -216,8 +216,8 @@ public class FhirSemVerTests
     [Fact]
     public void Equals_DifferentVersion_False()
     {
-        var a = FhirSemVer.Parse("4.0.1");
-        var b = FhirSemVer.Parse("5.0.0");
+        FhirSemVer a = FhirSemVer.Parse("4.0.1");
+        FhirSemVer b = FhirSemVer.Parse("5.0.0");
 
         a.Equals(b).ShouldBeFalse();
         (a != b).ShouldBeTrue();
@@ -226,8 +226,8 @@ public class FhirSemVerTests
     [Fact]
     public void Operator_LessThan_Works()
     {
-        var a = FhirSemVer.Parse("3.0.0");
-        var b = FhirSemVer.Parse("4.0.0");
+        FhirSemVer a = FhirSemVer.Parse("3.0.0");
+        FhirSemVer b = FhirSemVer.Parse("4.0.0");
 
         (a < b).ShouldBeTrue();
         (b < a).ShouldBeFalse();
@@ -236,8 +236,8 @@ public class FhirSemVerTests
     [Fact]
     public void Operator_GreaterThan_Works()
     {
-        var a = FhirSemVer.Parse("5.0.0");
-        var b = FhirSemVer.Parse("4.0.0");
+        FhirSemVer a = FhirSemVer.Parse("5.0.0");
+        FhirSemVer b = FhirSemVer.Parse("4.0.0");
 
         (a > b).ShouldBeTrue();
         (b > a).ShouldBeFalse();
@@ -246,9 +246,9 @@ public class FhirSemVerTests
     [Fact]
     public void Operator_LessThanOrEqual_Works()
     {
-        var a = FhirSemVer.Parse("3.0.0");
-        var b = FhirSemVer.Parse("3.0.0");
-        var c = FhirSemVer.Parse("4.0.0");
+        FhirSemVer a = FhirSemVer.Parse("3.0.0");
+        FhirSemVer b = FhirSemVer.Parse("3.0.0");
+        FhirSemVer c = FhirSemVer.Parse("4.0.0");
 
         (a <= b).ShouldBeTrue();
         (a <= c).ShouldBeTrue();
@@ -258,9 +258,9 @@ public class FhirSemVerTests
     [Fact]
     public void Operator_GreaterThanOrEqual_Works()
     {
-        var a = FhirSemVer.Parse("4.0.0");
-        var b = FhirSemVer.Parse("4.0.0");
-        var c = FhirSemVer.Parse("3.0.0");
+        FhirSemVer a = FhirSemVer.Parse("4.0.0");
+        FhirSemVer b = FhirSemVer.Parse("4.0.0");
+        FhirSemVer c = FhirSemVer.Parse("3.0.0");
 
         (a >= b).ShouldBeTrue();
         (a >= c).ShouldBeTrue();
@@ -272,7 +272,7 @@ public class FhirSemVerTests
     [Fact]
     public void Satisfies_ExactMatch_True()
     {
-        var version = FhirSemVer.Parse("4.0.1");
+        FhirSemVer version = FhirSemVer.Parse("4.0.1");
 
         version.Satisfies("4.0.1").ShouldBeTrue();
     }
@@ -280,7 +280,7 @@ public class FhirSemVerTests
     [Fact]
     public void Satisfies_ExactMismatch_False()
     {
-        var version = FhirSemVer.Parse("4.0.1");
+        FhirSemVer version = FhirSemVer.Parse("4.0.1");
 
         version.Satisfies("4.0.2").ShouldBeFalse();
     }
@@ -288,7 +288,7 @@ public class FhirSemVerTests
     [Fact]
     public void Satisfies_WildcardPatch_MatchesSameMajorMinor()
     {
-        var version = FhirSemVer.Parse("4.0.1");
+        FhirSemVer version = FhirSemVer.Parse("4.0.1");
 
         version.Satisfies("4.0.x").ShouldBeTrue();
     }
@@ -296,7 +296,7 @@ public class FhirSemVerTests
     [Fact]
     public void Satisfies_WildcardPatch_RejectsDifferentMinor()
     {
-        var version = FhirSemVer.Parse("4.1.0");
+        FhirSemVer version = FhirSemVer.Parse("4.1.0");
 
         version.Satisfies("4.0.x").ShouldBeFalse();
     }
@@ -304,7 +304,7 @@ public class FhirSemVerTests
     [Fact]
     public void Satisfies_WildcardMinor_MatchesSameMajor()
     {
-        var version = FhirSemVer.Parse("4.3.0");
+        FhirSemVer version = FhirSemVer.Parse("4.3.0");
 
         version.Satisfies("4.x").ShouldBeTrue();
     }
@@ -312,7 +312,7 @@ public class FhirSemVerTests
     [Fact]
     public void Satisfies_WildcardAll_MatchesAnything()
     {
-        var version = FhirSemVer.Parse("99.99.99");
+        FhirSemVer version = FhirSemVer.Parse("99.99.99");
 
         version.Satisfies("*").ShouldBeTrue();
     }
@@ -320,7 +320,7 @@ public class FhirSemVerTests
     [Fact]
     public void MaxSatisfying_PatchWildcard_ReturnsHighestPatch()
     {
-        var versions = new[]
+        FhirSemVer[] versions = new[]
         {
             FhirSemVer.Parse("4.0.0"),
             FhirSemVer.Parse("4.0.1"),
@@ -328,7 +328,7 @@ public class FhirSemVerTests
             FhirSemVer.Parse("4.1.0"),
         };
 
-        var result = FhirSemVer.MaxSatisfying(versions, "4.0.x");
+        FhirSemVer? result = FhirSemVer.MaxSatisfying(versions, "4.0.x");
 
         result.ShouldNotBeNull();
         result!.Patch.ShouldBe(2);
@@ -337,13 +337,13 @@ public class FhirSemVerTests
     [Fact]
     public void MaxSatisfying_NoMatch_ReturnsNull()
     {
-        var versions = new[]
+        FhirSemVer[] versions = new[]
         {
             FhirSemVer.Parse("3.0.0"),
             FhirSemVer.Parse("3.0.1"),
         };
 
-        var result = FhirSemVer.MaxSatisfying(versions, "4.0.x");
+        FhirSemVer? result = FhirSemVer.MaxSatisfying(versions, "4.0.x");
 
         result.ShouldBeNull();
     }
@@ -351,7 +351,7 @@ public class FhirSemVerTests
     [Fact]
     public void SatisfyingRange_Caret_IncludesMinorBumps()
     {
-        var versions = new[]
+        FhirSemVer[] versions = new[]
         {
             FhirSemVer.Parse("3.0.1"),
             FhirSemVer.Parse("3.1.0"),
@@ -359,7 +359,7 @@ public class FhirSemVerTests
             FhirSemVer.Parse("4.0.0"),
         };
 
-        var results = FhirSemVer.SatisfyingRange(versions, "^3.0.1").ToList();
+        List<FhirSemVer> results = FhirSemVer.SatisfyingRange(versions, "^3.0.1").ToList();
 
         results.ShouldContain(v => v.Minor == 0 && v.Patch == 1);
         results.ShouldContain(v => v.Minor == 1 && v.Patch == 0);
@@ -370,7 +370,7 @@ public class FhirSemVerTests
     [Fact]
     public void SatisfyingRange_Tilde_IncludesPatchOnly()
     {
-        var versions = new[]
+        FhirSemVer[] versions = new[]
         {
             FhirSemVer.Parse("3.0.1"),
             FhirSemVer.Parse("3.0.2"),
@@ -378,7 +378,7 @@ public class FhirSemVerTests
             FhirSemVer.Parse("3.1.0"),
         };
 
-        var results = FhirSemVer.SatisfyingRange(versions, "~3.0.1").ToList();
+        List<FhirSemVer> results = FhirSemVer.SatisfyingRange(versions, "~3.0.1").ToList();
 
         results.ShouldContain(v => v.Patch == 1);
         results.ShouldContain(v => v.Patch == 2);
@@ -389,14 +389,14 @@ public class FhirSemVerTests
     [Fact]
     public void SatisfyingRange_Pipe_EitherVersion()
     {
-        var versions = new[]
+        FhirSemVer[] versions = new[]
         {
             FhirSemVer.Parse("1.0.0"),
             FhirSemVer.Parse("2.0.0"),
             FhirSemVer.Parse("3.0.0"),
         };
 
-        var results = FhirSemVer.SatisfyingRange(versions, "1.0.0|3.0.0").ToList();
+        List<FhirSemVer> results = FhirSemVer.SatisfyingRange(versions, "1.0.0|3.0.0").ToList();
 
         results.Count.ShouldBe(2);
         results.ShouldContain(v => v.Major == 1);
@@ -406,7 +406,7 @@ public class FhirSemVerTests
     [Fact]
     public void ToString_ExactVersion_FormatsCorrectly()
     {
-        var version = FhirSemVer.Parse("4.0.1");
+        FhirSemVer version = FhirSemVer.Parse("4.0.1");
 
         version.ToString().ShouldBe("4.0.1");
     }
@@ -414,7 +414,7 @@ public class FhirSemVerTests
     [Fact]
     public void ToString_PreRelease_FormatsCorrectly()
     {
-        var version = FhirSemVer.Parse("6.0.0-ballot1");
+        FhirSemVer version = FhirSemVer.Parse("6.0.0-ballot1");
 
         version.ToString().ShouldBe("6.0.0-ballot1");
     }
@@ -422,7 +422,7 @@ public class FhirSemVerTests
     [Fact]
     public void ToString_WildcardAll_ReturnsAsterisk()
     {
-        var version = FhirSemVer.Parse("*");
+        FhirSemVer version = FhirSemVer.Parse("*");
 
         version.ToString().ShouldBe("*");
     }

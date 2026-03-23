@@ -78,8 +78,8 @@ public static class PackageFixups
     /// </remarks>
     public static PackageReference Apply(PackageReference reference)
     {
-        var name = reference.Name;
-        var version = reference.Version;
+        string name = reference.Name;
+        string? version = reference.Version;
 
         // Step 1: Strip "-cibuild" suffix from pre-release versions
         if (version is not null && version.EndsWith(CiBuildSuffix, StringComparison.OrdinalIgnoreCase))
@@ -89,14 +89,14 @@ public static class PackageFixups
 
         // Step 2: Apply known version fixups
         if (version is not null
-            && s_versionFixups.TryGetValue(name, out var versionMap)
-            && versionMap.TryGetValue(version, out var correctedVersion))
+            && s_versionFixups.TryGetValue(name, out Dictionary<string, string>? versionMap)
+            && versionMap.TryGetValue(version, out string? correctedVersion))
         {
             version = correctedVersion;
         }
 
         // Step 3: Apply package name remapping (e.g., generic extensions → version-specific)
-        if (s_nameFixups.TryGetValue(name, out var nameMap))
+        if (s_nameFixups.TryGetValue(name, out Dictionary<string, string>? nameMap))
         {
             name = ApplyNameMapping(name, version, nameMap);
         }
@@ -124,8 +124,8 @@ public static class PackageFixups
             return originalName;
 
         // Infer FHIR release from the major.minor version prefix
-        var fhirRelease = InferFhirReleaseFromVersion(version);
-        if (fhirRelease is not null && nameMap.TryGetValue(fhirRelease, out var mappedName))
+        string? fhirRelease = InferFhirReleaseFromVersion(version);
+        if (fhirRelease is not null && nameMap.TryGetValue(fhirRelease, out string? mappedName))
             return mappedName;
 
         return originalName;
@@ -138,25 +138,25 @@ public static class PackageFixups
     private static string? InferFhirReleaseFromVersion(string version)
     {
         // Try to extract the major version
-        var dotIndex = version.IndexOf('.');
-        var majorStr = dotIndex > 0 ? version[..dotIndex] : version;
+        int dotIndex = version.IndexOf('.');
+        string majorStr = dotIndex > 0 ? version[..dotIndex] : version;
 
-        if (!int.TryParse(majorStr, out var major))
+        if (!int.TryParse(majorStr, out int major))
             return null;
 
         // Check for R4B (4.3.x range)
         if (major == 4)
         {
-            var rest = dotIndex > 0 ? version[(dotIndex + 1)..] : string.Empty;
-            var secondDot = rest.IndexOf('.');
-            var minorStr = secondDot > 0 ? rest[..secondDot] : rest;
+            string rest = dotIndex > 0 ? version[(dotIndex + 1)..] : string.Empty;
+            int secondDot = rest.IndexOf('.');
+            string minorStr = secondDot > 0 ? rest[..secondDot] : rest;
 
             // Remove any pre-release suffix for minor parsing
-            var dashIndex = minorStr.IndexOf('-');
+            int dashIndex = minorStr.IndexOf('-');
             if (dashIndex > 0)
                 minorStr = minorStr[..dashIndex];
 
-            if (int.TryParse(minorStr, out var minor) && minor >= 3)
+            if (int.TryParse(minorStr, out int minor) && minor >= 3)
                 return "r4b";
 
             return "r4";

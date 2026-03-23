@@ -94,7 +94,7 @@ public class MemoryResourceCache
 
         lock (_lock)
         {
-            if (!_map.TryGetValue(key, out var node))
+            if (!_map.TryGetValue(key, out LinkedListNode<CacheEntry>? node))
                 return null;
 
             // Promote to most-recently-used (move to front of list)
@@ -125,7 +125,7 @@ public class MemoryResourceCache
         lock (_lock)
         {
             // If the key already exists, remove the old node
-            if (_map.TryGetValue(key, out var existingNode))
+            if (_map.TryGetValue(key, out LinkedListNode<CacheEntry>? existingNode))
             {
                 _lruList.Remove(existingNode);
                 _map.Remove(key);
@@ -134,15 +134,15 @@ public class MemoryResourceCache
             // Evict LRU entries until we have room
             while (_map.Count >= _maxEntries && _lruList.Last is not null)
             {
-                var lruNode = _lruList.Last!;
+                LinkedListNode<CacheEntry> lruNode = _lruList.Last!;
                 _map.Remove(lruNode.Value.Key);
                 _lruList.RemoveLast();
             }
 
             // Store the value (clone on write for Clone/Freeze modes)
-            var storedValue = _safeMode is SafeMode.Off ? value : DeepClone(value);
-            var entry = new CacheEntry(key, storedValue);
-            var newNode = _lruList.AddFirst(entry);
+            T storedValue = _safeMode is SafeMode.Off ? value : DeepClone(value);
+            CacheEntry entry = new CacheEntry(key, storedValue);
+            LinkedListNode<CacheEntry> newNode = _lruList.AddFirst(entry);
             _map[key] = newNode;
         }
     }
@@ -181,7 +181,7 @@ public class MemoryResourceCache
         if (value is ICloneable cloneable)
             return (T)cloneable.Clone();
 
-        var json = JsonSerializer.SerializeToUtf8Bytes(value, value.GetType(), s_jsonOptions);
+        byte[] json = JsonSerializer.SerializeToUtf8Bytes(value, value.GetType(), s_jsonOptions);
         return (T)JsonSerializer.Deserialize(json, value.GetType(), s_jsonOptions)!;
     }
 

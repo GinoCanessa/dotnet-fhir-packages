@@ -127,7 +127,7 @@ public record PackageManifest
     /// </summary>
     [JsonIgnore]
     public Version? SemVer => _parsedVersion ??= System.Version.TryParse(
-        StripPreReleaseSuffix(Version), out var v) ? v : null;
+        StripPreReleaseSuffix(Version), out Version? v) ? v : null;
 
     /// <summary>
     /// Infers the <see cref="FhirRelease"/> from <see cref="FhirVersions"/> or,
@@ -177,16 +177,16 @@ public record PackageManifest
         // Try fhirVersions first
         if (FhirVersions is { Count: > 0 })
         {
-            var release = FhirReleaseMapping.FromVersionString(FhirVersions[0]);
+            FhirRelease? release = FhirReleaseMapping.FromVersionString(FhirVersions[0]);
             if (release is not null) return release;
         }
 
         // Fall back to dependencies
         if (Dependencies is not null)
         {
-            foreach (var (name, _) in Dependencies)
+            foreach ((string? name, string _) in Dependencies)
             {
-                var release = FhirReleaseMapping.FromPackageName(name);
+                FhirRelease? release = FhirReleaseMapping.FromPackageName(name);
                 if (release is not null) return release;
             }
         }
@@ -196,7 +196,7 @@ public record PackageManifest
 
     private static string StripPreReleaseSuffix(string version)
     {
-        var dashIndex = version.IndexOf('-');
+        int dashIndex = version.IndexOf('-');
         return dashIndex >= 0 ? version[..dashIndex] : version;
     }
 }

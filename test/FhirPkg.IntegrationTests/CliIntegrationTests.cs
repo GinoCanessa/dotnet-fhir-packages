@@ -19,15 +19,15 @@ public class CliIntegrationTests : IntegrationTestBase
 
     private async Task<(int ExitCode, string StdOut, string StdErr)> RunCli(params string[] args)
     {
-        var allArgs = string.Join(" ", args) + $" --package-cache-folder \"{TempCacheDir}\"";
+        string allArgs = string.Join(" ", args) + $" --package-cache-folder \"{TempCacheDir}\"";
         return await RunCliRaw(allArgs);
     }
 
     private async Task<(int ExitCode, string StdOut, string StdErr)> RunCliRaw(string allArgs)
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 
-        var process = new Process
+        Process process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
@@ -42,8 +42,8 @@ public class CliIntegrationTests : IntegrationTestBase
         process.Start();
 
         // Read stdout and stderr concurrently to avoid deadlock when pipe buffers fill
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
-        var stderrTask = process.StandardError.ReadToEndAsync(cts.Token);
+        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
+        Task<string> stderrTask = process.StandardError.ReadToEndAsync(cts.Token);
 
         try
         {
@@ -63,7 +63,7 @@ public class CliIntegrationTests : IntegrationTestBase
     [Fact]
     public async Task List_EmptyCache_ExitCode0()
     {
-        var (exitCode, _, _) = await RunCli("list");
+        (int exitCode, string _, string _) = await RunCli("list");
 
         exitCode.ShouldBe(0);
     }
@@ -71,19 +71,19 @@ public class CliIntegrationTests : IntegrationTestBase
     [Fact]
     public async Task List_JsonOutput_ValidJson()
     {
-        var (exitCode, stdout, _) = await RunCli("list", "--json");
+        (int exitCode, string? stdout, string _) = await RunCli("list", "--json");
 
         exitCode.ShouldBe(0);
 
         // The JSON output should be parseable
-        var act = () => JsonDocument.Parse(stdout);
+        Func<JsonDocument> act = () => JsonDocument.Parse(stdout);
         Should.NotThrow(act, "list --json should produce valid JSON");
     }
 
     [Fact]
     public async Task Help_ShowsHelp()
     {
-        var (exitCode, stdout, _) = await RunCli("--help");
+        (int exitCode, string? stdout, string _) = await RunCli("--help");
 
         exitCode.ShouldBe(0);
         stdout.ShouldContain("fhir-pkg");
@@ -92,7 +92,7 @@ public class CliIntegrationTests : IntegrationTestBase
     [Fact]
     public async Task PackageCacheFolderOption_UsesSpecifiedPath()
     {
-        var (exitCode, _, _) = await RunCliRaw($"list --package-cache-folder \"{TempCacheDir}\"");
+        (int exitCode, string _, string _) = await RunCliRaw($"list --package-cache-folder \"{TempCacheDir}\"");
 
         exitCode.ShouldBe(0);
     }
@@ -100,7 +100,7 @@ public class CliIntegrationTests : IntegrationTestBase
     [Fact]
     public async Task InvalidCommand_ExitCodeNonZero()
     {
-        var (exitCode, _, _) = await RunCli("nonexistent-command-xyz");
+        (int exitCode, string _, string _) = await RunCli("nonexistent-command-xyz");
 
         exitCode.ShouldNotBe(0);
     }

@@ -67,7 +67,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ArgumentNullException.ThrowIfNull(options);
 
         _options = options;
-        var factory = loggerFactory ?? NullLoggerFactory.Instance;
+        ILoggerFactory factory = loggerFactory ?? NullLoggerFactory.Instance;
         _loggerFactory = factory;
         _logger = factory.CreateLogger<FhirPackageManager>();
 
@@ -75,7 +75,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         _cache = new DiskPackageCache(options.CachePath);
 
         // Build HTTP client with configured timeout and redirect policy
-        var handler = new HttpClientHandler
+        HttpClientHandler handler = new HttpClientHandler
         {
             AllowAutoRedirect = true,
             MaxAutomaticRedirections = options.MaxRedirects
@@ -157,7 +157,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         _logger.LogDebug("InstallAsync starting for directive '{Directive}'.", directive);
 
         // Step 1: Parse directive into a reference
-        var reference = PackageReference.Parse(directive);
+        PackageReference reference = PackageReference.Parse(directive);
         _logger.LogDebug("Parsed directive to reference: {Name}#{Version}.", reference.Name, reference.Version);
 
         // Step 2: Apply known fixups
@@ -167,7 +167,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         // Step 3: Check cache (skip download if already installed and not overwriting)
         if (!options.OverwriteExisting && reference.HasVersion)
         {
-            var isInstalled = await _cache.IsInstalledAsync(reference, cancellationToken).ConfigureAwait(false);
+            bool isInstalled = await _cache.IsInstalledAsync(reference, cancellationToken).ConfigureAwait(false);
             if (isInstalled)
             {
                 _logger.LogInformation("Package {Name}#{Version} is already cached.", reference.Name, reference.Version);
@@ -178,8 +178,8 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         // Step 4: Resolve directive to an exact version
         ReportProgress(options.Progress, reference.Name, PackageProgressPhase.Resolving);
 
-        var parsedDirective = DirectiveParser.Parse(directive);
-        var resolved = await _registryClient.ResolveAsync(parsedDirective, new VersionResolveOptions
+        PackageDirective parsedDirective = DirectiveParser.Parse(directive);
+        ResolvedDirective? resolved = await _registryClient.ResolveAsync(parsedDirective, new VersionResolveOptions
         {
             AllowPreRelease = options.AllowPreRelease,
             FhirRelease = options.PreferredFhirRelease
@@ -198,7 +198,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         // Re-check cache with the resolved exact version (the original directive may have been a wildcard)
         if (!options.OverwriteExisting)
         {
-            var isInstalled = await _cache.IsInstalledAsync(resolved.Reference, cancellationToken).ConfigureAwait(false);
+            bool isInstalled = await _cache.IsInstalledAsync(resolved.Reference, cancellationToken).ConfigureAwait(false);
             if (isInstalled)
             {
                 _logger.LogInformation("Resolved package {Name}#{Version} is already cached.",
@@ -211,7 +211,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         // Step 5: Download tarball
         ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Downloading);
 
-        await using var downloadResult = await _registryClient.DownloadAsync(resolved, cancellationToken).ConfigureAwait(false);
+        await using PackageDownloadResult? downloadResult = await _registryClient.DownloadAsync(resolved, cancellationToken).ConfigureAwait(false);
         if (downloadResult is null)
         {
             _logger.LogError("Failed to download package {Name}#{Version}.", resolved.Reference.Name, resolved.Reference.Version);
@@ -265,13 +265,13 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             // Step 7: Install to cache
             ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Extracting);
 
-            var installCacheOptions = new InstallCacheOptions
+            InstallCacheOptions installCacheOptions = new InstallCacheOptions
             {
                 OverwriteExisting = options.OverwriteExisting,
                 VerifyChecksum = false // We already verified above
             };
 
-            var record = await _cache.InstallAsync(resolved.Reference, contentStream, installCacheOptions, cancellationToken)
+            PackageRecord record = await _cache.InstallAsync(resolved.Reference, contentStream, installCacheOptions, cancellationToken)
                 .ConfigureAwait(false);
 
             _logger.LogInformation("Installed {Name}#{Version} to {Path}.",
@@ -305,22 +305,22 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         options ??= new InstallOptions();
-        var directiveList = directives.ToList();
+        List<string> directiveList = directives.ToList();
 
         if (directiveList.Count == 0)
             return [];
 
         _logger.LogInformation("InstallManyAsync starting for {Count} directives.", directiveList.Count);
 
-        var results = new PackageInstallResult[directiveList.Count];
-        using var semaphore = new SemaphoreSlim(_options.MaxParallelRegistryQueries);
+        PackageInstallResult[] results = new PackageInstallResult[directiveList.Count];
+        using SemaphoreSlim semaphore = new SemaphoreSlim(_options.MaxParallelRegistryQueries);
 
-        var tasks = directiveList.Select(async (directive, index) =>
+        IEnumerable<Task> tasks = directiveList.Select(async (directive, index) =>
         {
             await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                var record = await InstallAsync(directive, options, cancellationToken).ConfigureAwait(false);
+                PackageRecord? record = await InstallAsync(directive, options, cancellationToken).ConfigureAwait(false);
                 results[index] = record is not null
                     ? new PackageInstallResult
                     {
@@ -353,7 +353,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
 
-        var installed = results.Count(r => r.Status == PackageInstallStatus.Installed);
+        int installed = results.Count(r => r.Status == PackageInstallStatus.Installed);
         _logger.LogInformation("InstallManyAsync completed: {Installed}/{Total} packages installed.",
             installed, directiveList.Count);
 
@@ -374,29 +374,29 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         _logger.LogInformation("RestoreAsync starting for project at '{ProjectPath}'.", projectPath);
 
         // Step 1: Read project manifest (package.json)
-        var manifestPath = Path.Combine(projectPath, ManifestFileName);
+        string manifestPath = Path.Combine(projectPath, ManifestFileName);
         if (!File.Exists(manifestPath))
         {
             throw new FileNotFoundException(
                 $"Package manifest not found at '{manifestPath}'.", manifestPath);
         }
 
-        var manifestJson = await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false);
-        var manifest = JsonSerializer.Deserialize<PackageManifest>(manifestJson, s_jsonOptions)
+        string manifestJson = await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false);
+        PackageManifest manifest = JsonSerializer.Deserialize<PackageManifest>(manifestJson, s_jsonOptions)
             ?? throw new InvalidOperationException($"Failed to deserialize manifest at '{manifestPath}'.");
 
         _logger.LogDebug("Read manifest: {Name}@{Version} with {DepCount} dependencies.",
             manifest.Name, manifest.Version, manifest.Dependencies?.Count ?? 0);
 
         // Step 2: Check for existing lock file
-        var lockFilePath = Path.Combine(projectPath, LockFileName);
+        string lockFilePath = Path.Combine(projectPath, LockFileName);
         PackageClosure closure;
 
         if (File.Exists(lockFilePath) && !options.OverwriteExisting)
         {
             _logger.LogDebug("Found existing lock file at '{LockFilePath}'.", lockFilePath);
 
-            var lockFile = await ReadLockFileAsync(lockFilePath, cancellationToken).ConfigureAwait(false);
+            PackageLockFile lockFile = await ReadLockFileAsync(lockFilePath, cancellationToken).ConfigureAwait(false);
 
             // Verify lock file is not stale (all manifest dependencies are in the lock file)
             if (IsLockFileCurrent(manifest, lockFile))
@@ -414,7 +414,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         }
 
         // Step 3: Resolve full dependency tree
-        var resolveOptions = new DependencyResolveOptions
+        DependencyResolveOptions resolveOptions = new DependencyResolveOptions
         {
             ConflictStrategy = options.ConflictStrategy,
             MaxDepth = options.MaxDepth,
@@ -460,10 +460,10 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(directive);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var reference = PackageReference.Parse(directive);
+        PackageReference reference = PackageReference.Parse(directive);
         _logger.LogInformation("Removing package {Name}#{Version} from cache.", reference.Name, reference.Version);
 
-        var removed = await _cache.RemoveAsync(reference, cancellationToken).ConfigureAwait(false);
+        bool removed = await _cache.RemoveAsync(reference, cancellationToken).ConfigureAwait(false);
 
         if (removed)
         {
@@ -484,7 +484,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         _logger.LogInformation("Cleaning all packages from cache.");
-        var count = await _cache.ClearAsync(cancellationToken).ConfigureAwait(false);
+        int count = await _cache.ClearAsync(cancellationToken).ConfigureAwait(false);
         _memoryCache?.Clear();
 
         _logger.LogInformation("Removed {Count} packages from cache.", count);
@@ -527,8 +527,8 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
 
         _logger.LogDebug("ResolveAsync for directive '{Directive}'.", directive);
 
-        var parsedDirective = DirectiveParser.Parse(directive);
-        var resolved = await _registryClient.ResolveAsync(parsedDirective, cancellationToken: cancellationToken)
+        PackageDirective parsedDirective = DirectiveParser.Parse(directive);
+        ResolvedDirective? resolved = await _registryClient.ResolveAsync(parsedDirective, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         if (resolved is not null)
@@ -563,16 +563,16 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             tarballPath, registry.Url);
 
         // Extract the manifest to determine the package reference
-        var reference = await ExtractReferenceFromTarballAsync(tarballPath, cancellationToken).ConfigureAwait(false);
+        PackageReference reference = await ExtractReferenceFromTarballAsync(tarballPath, cancellationToken).ConfigureAwait(false);
 
         _logger.LogDebug("Publishing as {Name}#{Version}.", reference.Name, reference.Version);
 
         // Find the appropriate registry client for the target endpoint
-        var targetClient = FindRegistryClient(registry);
+        IRegistryClient targetClient = FindRegistryClient(registry);
 
         // Open a fresh stream for the actual publish
-        await using var tarballStream = File.OpenRead(tarballPath);
-        var result = await targetClient.PublishAsync(reference, tarballStream, cancellationToken).ConfigureAwait(false);
+        await using FileStream tarballStream = File.OpenRead(tarballPath);
+        PublishResult result = await targetClient.PublishAsync(reference, tarballStream, cancellationToken).ConfigureAwait(false);
 
         if (result.Success)
         {
@@ -613,7 +613,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         InstallOptions options,
         CancellationToken cancellationToken)
     {
-        var manifest = record.Manifest;
+        PackageManifest manifest = record.Manifest;
         if (manifest.Dependencies is null || manifest.Dependencies.Count == 0)
         {
             _logger.LogDebug("No dependencies for {Name}#{Version}.", record.Reference.Name, record.Reference.Version);
@@ -623,11 +623,11 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         _logger.LogDebug("Installing {Count} dependencies for {Name}#{Version}.",
             manifest.Dependencies.Count, record.Reference.Name, record.Reference.Version);
 
-        foreach (var (depName, depVersion) in manifest.Dependencies)
+        foreach ((string? depName, string? depVersion) in manifest.Dependencies)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var depDirective = string.IsNullOrEmpty(depVersion) ? depName : $"{depName}#{depVersion}";
+            string depDirective = string.IsNullOrEmpty(depVersion) ? depName : $"{depName}#{depVersion}";
             _logger.LogDebug("Installing dependency: {Directive}.", depDirective);
 
             try
@@ -650,7 +650,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         InstallOptions options,
         CancellationToken cancellationToken)
     {
-        var directives = closure.Resolved.Values
+        List<string> directives = closure.Resolved.Values
             .Where(r => r.HasVersion)
             .Select(r => r.FhirDirective)
             .ToList();
@@ -661,7 +661,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         _logger.LogDebug("Installing {Count} packages from closure.", directives.Count);
 
         // Install without recursing into dependencies (the closure already has everything resolved)
-        var installOptions = new InstallOptions
+        InstallOptions installOptions = new InstallOptions
         {
             IncludeDependencies = false,
             OverwriteExisting = options.OverwriteExisting,
@@ -682,9 +682,9 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             return true;
 
         // The lock file is stale if any manifest dependency is missing or has a changed version specifier
-        foreach (var (name, versionSpecifier) in manifest.Dependencies)
+        foreach ((string? name, string? versionSpecifier) in manifest.Dependencies)
         {
-            if (!lockFile.Dependencies.TryGetValue(name, out var lockedVersion))
+            if (!lockFile.Dependencies.TryGetValue(name, out string? lockedVersion))
                 return false;
 
             // If the version specifier changed (e.g., "4.0.x" → "5.0.x"), the lock file is stale
@@ -708,8 +708,8 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             return true;
 
         // Try to parse both and check satisfaction
-        if (FhirSemVer.TryParse(lockedVersion, out var lockedSemVer)
-            && FhirSemVer.TryParse(specifier, out var specifierSemVer))
+        if (FhirSemVer.TryParse(lockedVersion, out FhirSemVer? lockedSemVer)
+            && FhirSemVer.TryParse(specifier, out FhirSemVer? specifierSemVer))
         {
             // If the specifier is a wildcard or range, check if the locked version satisfies it
             if (specifierSemVer.IsWildcard)
@@ -727,7 +727,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         string path,
         CancellationToken cancellationToken)
     {
-        var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+        string json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
         return JsonSerializer.Deserialize<PackageLockFile>(json, s_jsonOptions)
             ?? throw new InvalidOperationException($"Failed to deserialize lock file at '{path}'.");
     }
@@ -740,7 +740,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         PackageClosure closure,
         CancellationToken cancellationToken)
     {
-        var lockFile = new PackageLockFile
+        PackageLockFile lockFile = new PackageLockFile
         {
             Updated = closure.Timestamp,
             Dependencies = closure.Resolved.ToDictionary(
@@ -749,7 +749,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             Missing = closure.Missing.Count > 0 ? closure.Missing : null
         };
 
-        var json = JsonSerializer.Serialize(lockFile, s_jsonOptions);
+        string json = JsonSerializer.Serialize(lockFile, s_jsonOptions);
         await File.WriteAllTextAsync(path, json, cancellationToken).ConfigureAwait(false);
     }
 
@@ -761,13 +761,13 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         CancellationToken cancellationToken)
     {
         // Create a temporary directory (prefer system temp, fall back to cache)
-        var tempDir = TempDirectory.Create("fhirpkg", _cache.CacheDirectory);
+        string tempDir = TempDirectory.Create("fhirpkg", _cache.CacheDirectory);
         try
         {
-            await using var stream = File.OpenRead(tarballPath);
+            await using FileStream stream = File.OpenRead(tarballPath);
             await TarballExtractor.ExtractAsync(stream, tempDir, cancellationToken).ConfigureAwait(false);
 
-            var manifestPath = Path.Combine(tempDir, "package", ManifestFileName);
+            string manifestPath = Path.Combine(tempDir, "package", ManifestFileName);
             if (!File.Exists(manifestPath))
             {
                 // Try without the package/ subdirectory
@@ -780,8 +780,8 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
                     $"No {ManifestFileName} found in tarball '{tarballPath}'.");
             }
 
-            var json = await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false);
-            var manifest = JsonSerializer.Deserialize<PackageManifest>(json, s_jsonOptions)
+            string json = await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false);
+            PackageManifest manifest = JsonSerializer.Deserialize<PackageManifest>(json, s_jsonOptions)
                 ?? throw new InvalidOperationException($"Failed to parse manifest in '{tarballPath}'.");
 
             return new PackageReference(manifest.Name, manifest.Version);

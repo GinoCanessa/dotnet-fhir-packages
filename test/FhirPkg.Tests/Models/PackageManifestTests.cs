@@ -39,7 +39,7 @@ public class PackageManifestTests
     [Fact]
     public void Deserialize_FullManifest_AllFieldsPopulated()
     {
-        var manifest = PackageManifest.Deserialize(FullManifestJson);
+        PackageManifest manifest = PackageManifest.Deserialize(FullManifestJson);
 
         manifest.Name.ShouldBe("hl7.fhir.r4.core");
         manifest.Version.ShouldBe("4.0.1");
@@ -57,7 +57,7 @@ public class PackageManifestTests
     [Fact]
     public void Deserialize_MinimalManifest_OnlyRequiredFields()
     {
-        var manifest = PackageManifest.Deserialize(MinimalManifestJson);
+        PackageManifest manifest = PackageManifest.Deserialize(MinimalManifestJson);
 
         manifest.Name.ShouldBe("minimal.package");
         manifest.Version.ShouldBe("1.0.0");
@@ -69,7 +69,7 @@ public class PackageManifestTests
     [Fact]
     public void Deserialize_WithDependencies_ParsedCorrectly()
     {
-        var manifest = PackageManifest.Deserialize(FullManifestJson);
+        PackageManifest manifest = PackageManifest.Deserialize(FullManifestJson);
 
         manifest.Dependencies.ShouldNotBeNull();
         manifest.Dependencies.Keys.ShouldContain("hl7.fhir.r4.expansions");
@@ -79,7 +79,7 @@ public class PackageManifestTests
     [Fact]
     public void Deserialize_CaseInsensitive_HandlesVariations()
     {
-        var json = """
+        string json = """
             {
                 "Name": "case.test",
                 "Version": "2.0.0",
@@ -87,7 +87,7 @@ public class PackageManifestTests
             }
             """;
 
-        var manifest = PackageManifest.Deserialize(json);
+        PackageManifest manifest = PackageManifest.Deserialize(json);
 
         manifest.Name.ShouldBe("case.test");
         manifest.Version.ShouldBe("2.0.0");
@@ -96,7 +96,7 @@ public class PackageManifestTests
     [Fact]
     public void InferredFhirRelease_FromFhirVersions_Correct()
     {
-        var manifest = PackageManifest.Deserialize(FullManifestJson);
+        PackageManifest manifest = PackageManifest.Deserialize(FullManifestJson);
 
         manifest.InferredFhirRelease.ShouldBe(FhirRelease.R4);
     }
@@ -104,7 +104,7 @@ public class PackageManifestTests
     [Fact]
     public void InferredFhirRelease_FromDependencies_WhenNoFhirVersions()
     {
-        var json = """
+        string json = """
             {
                 "name": "test.package",
                 "version": "1.0.0",
@@ -114,7 +114,7 @@ public class PackageManifestTests
             }
             """;
 
-        var manifest = PackageManifest.Deserialize(json);
+        PackageManifest manifest = PackageManifest.Deserialize(json);
 
         manifest.InferredFhirRelease.ShouldBe(FhirRelease.R5);
     }
@@ -122,7 +122,7 @@ public class PackageManifestTests
     [Fact]
     public void InferredFhirRelease_NoInfo_ReturnsNull()
     {
-        var manifest = PackageManifest.Deserialize(MinimalManifestJson);
+        PackageManifest manifest = PackageManifest.Deserialize(MinimalManifestJson);
 
         manifest.InferredFhirRelease.ShouldBeNull();
     }
@@ -130,10 +130,10 @@ public class PackageManifestTests
     [Fact]
     public void Serialize_RoundTrips()
     {
-        var manifest = PackageManifest.Deserialize(FullManifestJson);
+        PackageManifest manifest = PackageManifest.Deserialize(FullManifestJson);
 
-        var serialized = manifest.Serialize();
-        var deserialized = PackageManifest.Deserialize(serialized);
+        string serialized = manifest.Serialize();
+        PackageManifest deserialized = PackageManifest.Deserialize(serialized);
 
         deserialized.Name.ShouldBe(manifest.Name);
         deserialized.Version.ShouldBe(manifest.Version);
@@ -144,7 +144,7 @@ public class PackageManifestTests
     [Fact]
     public void Deserialize_InvalidJson_Throws()
     {
-        var act = () => PackageManifest.Deserialize("not valid json");
+        Func<PackageManifest> act = () => PackageManifest.Deserialize("not valid json");
 
         Should.Throw<JsonException>(() => act());
     }
@@ -152,7 +152,7 @@ public class PackageManifestTests
     [Fact]
     public void SemVer_ParsesCorrectly()
     {
-        var manifest = PackageManifest.Deserialize(FullManifestJson);
+        PackageManifest manifest = PackageManifest.Deserialize(FullManifestJson);
 
         manifest.SemVer.ShouldNotBeNull();
         manifest.SemVer!.Major.ShouldBe(4);

@@ -18,22 +18,22 @@ internal static class CleanCommand
     /// <returns>A fully configured <see cref="Command"/> for the clean subcommand.</returns>
     public static Command Build()
     {
-        var forceOption = new Option<bool>("--force", "-f")
+        Option<bool> forceOption = new Option<bool>("--force", "-f")
         {
             Description = "Skip confirmation prompt."
         };
 
-        var ciOnlyOption = new Option<bool>("--ci-only")
+        Option<bool> ciOnlyOption = new Option<bool>("--ci-only")
         {
             Description = "Only remove CI build (pre-release snapshot) packages."
         };
 
-        var olderThanOption = new Option<int?>("--older-than")
+        Option<int?> olderThanOption = new Option<int?>("--older-than")
         {
             Description = "Remove packages not accessed in the last N days."
         };
 
-        var command = new Command("clean", "Clear the local FHIR package cache.")
+        Command command = new Command("clean", "Clear the local FHIR package cache.")
         {
             forceOption,
             ciOnlyOption,
@@ -42,19 +42,19 @@ internal static class CleanCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var force = parseResult.GetValue(forceOption);
-            var ciOnly = parseResult.GetValue(ciOnlyOption);
-            var olderThan = parseResult.GetValue(olderThanOption);
+            bool force = parseResult.GetValue(forceOption);
+            bool ciOnly = parseResult.GetValue(ciOnlyOption);
+            int? olderThan = parseResult.GetValue(olderThanOption);
 
-            var globalOpts = parseResult.GetGlobalOptions();
+            GlobalOptions globalOpts = parseResult.GetGlobalOptions();
 
             try
             {
-                var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
+                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
                 // Build a description of what will be cleaned
-                var description = (ciOnly, olderThan) switch
+                string description = (ciOnly, olderThan) switch
                 {
                     (true, int days) => $"CI build packages older than {days} days",
                     (true, null) => "all CI build packages",
@@ -76,9 +76,9 @@ internal static class CleanCommand
                 if (ciOnly || olderThan is not null)
                 {
                     // Filter-based removal: list first, then remove matching packages
-                    var allPackages = await manager.ListCachedAsync(cancellationToken: ct);
+                    IReadOnlyList<PackageRecord> allPackages = await manager.ListCachedAsync(cancellationToken: ct);
 
-                    var candidates = allPackages.AsEnumerable();
+                    IEnumerable<PackageRecord> candidates = allPackages.AsEnumerable();
 
                     if (ciOnly)
                     {
@@ -90,15 +90,15 @@ internal static class CleanCommand
 
                     if (olderThan is int days)
                     {
-                        var cutoff = DateTimeOffset.UtcNow.AddDays(-days);
+                        DateTimeOffset cutoff = DateTimeOffset.UtcNow.AddDays(-days);
                         candidates = candidates.Where(p =>
                             p.InstalledAt is null || p.InstalledAt < cutoff);
                     }
 
-                    var toRemove = candidates.ToList();
+                    List<PackageRecord> toRemove = candidates.ToList();
                     removed = 0;
 
-                    foreach (var pkg in toRemove)
+                    foreach (PackageRecord pkg in toRemove)
                     {
                         ct.ThrowIfCancellationRequested();
 

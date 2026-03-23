@@ -20,24 +20,24 @@ internal static class PublishCommand
     /// <returns>A fully configured <see cref="Command"/> for the publish subcommand.</returns>
     public static Command Build()
     {
-        var tarballArg = new Argument<string>("tarball")
+        Argument<string> tarballArg = new Argument<string>("tarball")
         {
             Description = "Path to the .tgz package tarball to publish."
         };
 
-        var registryOption = new Option<string>("--registry", "-r")
+        Option<string> registryOption = new Option<string>("--registry", "-r")
         {
             Description = "Registry URL to publish to.",
             Required = true
         };
 
-        var authOption = new Option<string>("--auth")
+        Option<string> authOption = new Option<string>("--auth")
         {
             Description = "Authentication header value (e.g. 'Bearer <token>').",
             Required = true
         };
 
-        var command = new Command("publish", "Publish a FHIR package tarball to a registry.")
+        Command command = new Command("publish", "Publish a FHIR package tarball to a registry.")
         {
             tarballArg,
             registryOption,
@@ -46,11 +46,11 @@ internal static class PublishCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var tarball = parseResult.GetValue(tarballArg);
-            var registry = parseResult.GetValue(registryOption)!;
-            var auth = parseResult.GetValue(authOption)!;
+            string? tarball = parseResult.GetValue(tarballArg);
+            string registry = parseResult.GetValue(registryOption)!;
+            string auth = parseResult.GetValue(authOption)!;
 
-            var globalOpts = parseResult.GetGlobalOptions();
+            GlobalOptions globalOpts = parseResult.GetGlobalOptions();
 
             try
             {
@@ -60,10 +60,10 @@ internal static class PublishCommand
                     return ExitCodes.NotFound;
                 }
 
-                var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
+                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
-                var endpoint = new RegistryEndpoint
+                RegistryEndpoint endpoint = new RegistryEndpoint
                 {
                     Url = registry,
                     Type = RegistryType.FhirNpm,

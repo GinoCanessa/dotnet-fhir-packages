@@ -18,18 +18,18 @@ internal static class RemoveCommand
     /// <returns>A fully configured <see cref="Command"/> for the remove subcommand.</returns>
     public static Command Build()
     {
-        var packagesArg = new Argument<string[]>("packages")
+        Argument<string[]> packagesArg = new Argument<string[]>("packages")
         {
             Description = "One or more package directives to remove (e.g. hl7.fhir.r4.core#4.0.1)",
             Arity = ArgumentArity.OneOrMore
         };
 
-        var forceOption = new Option<bool>("--force", "-f")
+        Option<bool> forceOption = new Option<bool>("--force", "-f")
         {
             Description = "Skip confirmation prompt."
         };
 
-        var command = new Command("remove", "Remove one or more FHIR packages from the local cache.")
+        Command command = new Command("remove", "Remove one or more FHIR packages from the local cache.")
         {
             packagesArg,
             forceOption
@@ -37,16 +37,16 @@ internal static class RemoveCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var packages = parseResult.GetValue(packagesArg)!;
-            var force = parseResult.GetValue(forceOption);
+            string[] packages = parseResult.GetValue(packagesArg)!;
+            bool force = parseResult.GetValue(forceOption);
 
-            var globalOpts = parseResult.GetGlobalOptions();
+            GlobalOptions globalOpts = parseResult.GetGlobalOptions();
 
             try
             {
                 if (!force && !globalOpts.Quiet && !globalOpts.Json)
                 {
-                    var packageList = string.Join(", ", packages);
+                    string packageList = string.Join(", ", packages);
                     if (!AnsiConsole.Confirm($"Remove {packages.Length} package(s): {packageList}?"))
                     {
                         ConsoleOutput.WriteWarning("Aborted.");
@@ -54,17 +54,17 @@ internal static class RemoveCommand
                     }
                 }
 
-                var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
+                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
-                var removedCount = 0;
-                var failedCount = 0;
+                int removedCount = 0;
+                int failedCount = 0;
 
-                foreach (var directive in packages)
+                foreach (string? directive in packages)
                 {
                     ct.ThrowIfCancellationRequested();
 
-                    var removed = await manager.RemoveAsync(directive, ct);
+                    bool removed = await manager.RemoveAsync(directive, ct);
 
                     if (removed)
                     {

@@ -14,9 +14,9 @@ public class CheckSumTests
     public void ComputeSha1_KnownInput_MatchesExpected()
     {
         // SHA-1 of empty string is da39a3ee5e6b4b0d3255bfef95601890afd80709
-        var data = Array.Empty<byte>();
+        byte[] data = Array.Empty<byte>();
 
-        var hash = CheckSum.ComputeSha1(data);
+        string hash = CheckSum.ComputeSha1(data);
 
         hash.ShouldBe("da39a3ee5e6b4b0d3255bfef95601890afd80709");
     }
@@ -24,11 +24,11 @@ public class CheckSumTests
     [Fact]
     public void ComputeSha1_Stream_ProducesConsistentHash()
     {
-        var data = Encoding.UTF8.GetBytes("hello world");
-        using var stream = new MemoryStream(data);
+        byte[] data = Encoding.UTF8.GetBytes("hello world");
+        using MemoryStream stream = new MemoryStream(data);
 
-        var hashFromStream = CheckSum.ComputeSha1(stream);
-        var hashFromBytes = CheckSum.ComputeSha1(data);
+        string hashFromStream = CheckSum.ComputeSha1(stream);
+        string hashFromBytes = CheckSum.ComputeSha1(data);
 
         hashFromStream.ShouldBe(hashFromBytes);
     }
@@ -36,11 +36,11 @@ public class CheckSumTests
     [Fact]
     public void Verify_MatchingHash_ReturnsTrue()
     {
-        var data = Encoding.UTF8.GetBytes("test content");
-        var expectedHash = CheckSum.ComputeSha1(data);
-        using var stream = new MemoryStream(data);
+        byte[] data = Encoding.UTF8.GetBytes("test content");
+        string expectedHash = CheckSum.ComputeSha1(data);
+        using MemoryStream stream = new MemoryStream(data);
 
-        var result = CheckSum.Verify(stream, expectedHash);
+        bool result = CheckSum.Verify(stream, expectedHash);
 
         result.ShouldBeTrue();
     }
@@ -48,10 +48,10 @@ public class CheckSumTests
     [Fact]
     public void Verify_MismatchedHash_ReturnsFalse()
     {
-        var data = Encoding.UTF8.GetBytes("test content");
-        using var stream = new MemoryStream(data);
+        byte[] data = Encoding.UTF8.GetBytes("test content");
+        using MemoryStream stream = new MemoryStream(data);
 
-        var result = CheckSum.Verify(stream, "0000000000000000000000000000000000000000");
+        bool result = CheckSum.Verify(stream, "0000000000000000000000000000000000000000");
 
         result.ShouldBeFalse();
     }
@@ -62,10 +62,10 @@ public class CheckSumTests
     [InlineData("   ")]
     public void Verify_NullOrEmptyExpected_ReturnsTrue(string? expectedHash)
     {
-        var data = Encoding.UTF8.GetBytes("any content");
-        using var stream = new MemoryStream(data);
+        byte[] data = Encoding.UTF8.GetBytes("any content");
+        using MemoryStream stream = new MemoryStream(data);
 
-        var result = CheckSum.Verify(stream, expectedHash);
+        bool result = CheckSum.Verify(stream, expectedHash);
 
         result.ShouldBeTrue();
     }
@@ -73,11 +73,11 @@ public class CheckSumTests
     [Fact]
     public void Verify_CaseInsensitive_ReturnsTrue()
     {
-        var data = Encoding.UTF8.GetBytes("case test");
-        var expectedHash = CheckSum.ComputeSha1(data).ToUpperInvariant();
-        using var stream = new MemoryStream(data);
+        byte[] data = Encoding.UTF8.GetBytes("case test");
+        string expectedHash = CheckSum.ComputeSha1(data).ToUpperInvariant();
+        using MemoryStream stream = new MemoryStream(data);
 
-        var result = CheckSum.Verify(stream, expectedHash);
+        bool result = CheckSum.Verify(stream, expectedHash);
 
         result.ShouldBeTrue();
     }
@@ -85,9 +85,9 @@ public class CheckSumTests
     [Fact]
     public void ComputeSha1_NonEmptyInput_Returns40Chars()
     {
-        var data = Encoding.UTF8.GetBytes("FHIR package");
+        byte[] data = Encoding.UTF8.GetBytes("FHIR package");
 
-        var hash = CheckSum.ComputeSha1(data);
+        string hash = CheckSum.ComputeSha1(data);
 
         hash.Length.ShouldBe(40);
         hash.ShouldMatch("^[0-9a-f]{40}$");
@@ -99,9 +99,9 @@ public class CheckSumTests
     public void ComputeSha256_KnownInput_MatchesExpected()
     {
         // SHA-256 of empty byte array
-        var data = Array.Empty<byte>();
+        byte[] data = Array.Empty<byte>();
 
-        var hash = CheckSum.ComputeSha256(data);
+        string hash = CheckSum.ComputeSha256(data);
 
         hash.ShouldBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     }
@@ -109,11 +109,11 @@ public class CheckSumTests
     [Fact]
     public void ComputeSha256_Stream_ProducesConsistentHash()
     {
-        var data = Encoding.UTF8.GetBytes("hello world");
-        using var stream = new MemoryStream(data);
+        byte[] data = Encoding.UTF8.GetBytes("hello world");
+        using MemoryStream stream = new MemoryStream(data);
 
-        var hashFromStream = CheckSum.ComputeSha256(stream);
-        var hashFromBytes = CheckSum.ComputeSha256(data);
+        string hashFromStream = CheckSum.ComputeSha256(stream);
+        string hashFromBytes = CheckSum.ComputeSha256(data);
 
         hashFromStream.ShouldBe(hashFromBytes);
     }
@@ -121,9 +121,9 @@ public class CheckSumTests
     [Fact]
     public void ComputeSha256_NonEmptyInput_Returns64Chars()
     {
-        var data = Encoding.UTF8.GetBytes("FHIR package");
+        byte[] data = Encoding.UTF8.GetBytes("FHIR package");
 
-        var hash = CheckSum.ComputeSha256(data);
+        string hash = CheckSum.ComputeSha256(data);
 
         hash.Length.ShouldBe(64);
         hash.ShouldMatch("^[0-9a-f]{64}$");
@@ -132,11 +132,11 @@ public class CheckSumTests
     [Fact]
     public void VerifySha256_MatchingHash_ReturnsTrue()
     {
-        var data = Encoding.UTF8.GetBytes("test content");
-        var expectedHash = CheckSum.ComputeSha256(data);
-        using var stream = new MemoryStream(data);
+        byte[] data = Encoding.UTF8.GetBytes("test content");
+        string expectedHash = CheckSum.ComputeSha256(data);
+        using MemoryStream stream = new MemoryStream(data);
 
-        var result = CheckSum.VerifySha256(stream, expectedHash);
+        bool result = CheckSum.VerifySha256(stream, expectedHash);
 
         result.ShouldBeTrue();
     }
@@ -144,10 +144,10 @@ public class CheckSumTests
     [Fact]
     public void VerifySha256_MismatchedHash_ReturnsFalse()
     {
-        var data = Encoding.UTF8.GetBytes("test content");
-        using var stream = new MemoryStream(data);
+        byte[] data = Encoding.UTF8.GetBytes("test content");
+        using MemoryStream stream = new MemoryStream(data);
 
-        var result = CheckSum.VerifySha256(stream, "0000000000000000000000000000000000000000000000000000000000000000");
+        bool result = CheckSum.VerifySha256(stream, "0000000000000000000000000000000000000000000000000000000000000000");
 
         result.ShouldBeFalse();
     }
@@ -158,10 +158,10 @@ public class CheckSumTests
     [InlineData("   ")]
     public void VerifySha256_NullOrEmptyExpected_ReturnsTrue(string? expectedHash)
     {
-        var data = Encoding.UTF8.GetBytes("any content");
-        using var stream = new MemoryStream(data);
+        byte[] data = Encoding.UTF8.GetBytes("any content");
+        using MemoryStream stream = new MemoryStream(data);
 
-        var result = CheckSum.VerifySha256(stream, expectedHash);
+        bool result = CheckSum.VerifySha256(stream, expectedHash);
 
         result.ShouldBeTrue();
     }

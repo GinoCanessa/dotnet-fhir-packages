@@ -18,11 +18,11 @@ public class MemoryResourceCacheTests
     [Fact]
     public void Get_CachedEntry_ReturnsValue()
     {
-        var cache = new MemoryResourceCache(maxEntries: 10);
-        var resource = new TestResource { Value = "hello" };
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 10);
+        TestResource resource = new TestResource { Value = "hello" };
 
         cache.Set("key1", resource);
-        var result = cache.Get<TestResource>("key1");
+        TestResource? result = cache.Get<TestResource>("key1");
 
         result.ShouldNotBeNull();
         result!.Value.ShouldBe("hello");
@@ -31,9 +31,9 @@ public class MemoryResourceCacheTests
     [Fact]
     public void Get_MissingEntry_ReturnsNull()
     {
-        var cache = new MemoryResourceCache(maxEntries: 10);
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 10);
 
-        var result = cache.Get<TestResource>("nonexistent");
+        TestResource? result = cache.Get<TestResource>("nonexistent");
 
         result.ShouldBeNull();
     }
@@ -41,7 +41,7 @@ public class MemoryResourceCacheTests
     [Fact]
     public void Set_ExceedsCapacity_EvictsOldest()
     {
-        var cache = new MemoryResourceCache(maxEntries: 2);
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 2);
 
         cache.Set("key1", new TestResource { Value = "first" });
         cache.Set("key2", new TestResource { Value = "second" });
@@ -56,7 +56,7 @@ public class MemoryResourceCacheTests
     [Fact]
     public void Clear_RemovesAllEntries()
     {
-        var cache = new MemoryResourceCache(maxEntries: 10);
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 10);
         cache.Set("key1", new TestResource { Value = "a" });
         cache.Set("key2", new TestResource { Value = "b" });
 
@@ -70,7 +70,7 @@ public class MemoryResourceCacheTests
     [Fact]
     public void Count_ReflectsEntries()
     {
-        var cache = new MemoryResourceCache(maxEntries: 10);
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 10);
 
         cache.Count.ShouldBe(0);
 
@@ -84,7 +84,7 @@ public class MemoryResourceCacheTests
     [Fact]
     public void Set_SameKey_UpdatesValue()
     {
-        var cache = new MemoryResourceCache(maxEntries: 10);
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 10);
 
         cache.Set("key1", new TestResource { Value = "original" });
         cache.Set("key1", new TestResource { Value = "updated" });
@@ -96,7 +96,7 @@ public class MemoryResourceCacheTests
     [Fact]
     public void Get_PromotesToMostRecentlyUsed()
     {
-        var cache = new MemoryResourceCache(maxEntries: 2);
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 2);
 
         cache.Set("key1", new TestResource { Value = "first" });
         cache.Set("key2", new TestResource { Value = "second" });
@@ -115,7 +115,7 @@ public class MemoryResourceCacheTests
     [Fact]
     public void Constructor_MaxEntriesLessThanOne_Throws()
     {
-        var act = () => new MemoryResourceCache(maxEntries: 0);
+        Func<MemoryResourceCache> act = () => new MemoryResourceCache(maxEntries: 0);
 
         Should.Throw<ArgumentOutOfRangeException>(() => act());
     }
@@ -123,11 +123,11 @@ public class MemoryResourceCacheTests
     [Fact]
     public void Get_TypeMismatch_ReturnsNull()
     {
-        var cache = new MemoryResourceCache(maxEntries: 10);
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 10);
         cache.Set("key1", new TestResource { Value = "hello" });
 
         // Asking for a different type should return null
-        var result = cache.Get<List<string>>("key1");
+        List<string>? result = cache.Get<List<string>>("key1");
 
         result.ShouldBeNull();
     }
@@ -135,14 +135,14 @@ public class MemoryResourceCacheTests
     [Fact]
     public void ConcurrentAccess_NoDataCorruption()
     {
-        var cache = new MemoryResourceCache(maxEntries: 10);
-        var exceptions = new ConcurrentBag<Exception>();
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 10);
+        ConcurrentBag<Exception> exceptions = new ConcurrentBag<Exception>();
 
         Parallel.For(0, 200, i =>
         {
             try
             {
-                var key = $"key{i % 20}";
+                string key = $"key{i % 20}";
                 cache.Set(key, new TestResource { Value = $"value{i}" });
                 cache.Get<TestResource>(key);
 

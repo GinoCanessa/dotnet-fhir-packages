@@ -60,15 +60,15 @@ public static partial class DirectiveParser
     {
         ArgumentNullException.ThrowIfNull(directive);
 
-        var span = directive.AsSpan().Trim();
+        ReadOnlySpan<char> span = directive.AsSpan().Trim();
         if (span.Length == 0)
             throw new ArgumentException("Directive must not be empty.", nameof(directive));
 
         string? alias = null;
-        var input = span;
+        ReadOnlySpan<char> input = span;
 
         // Handle NPM alias syntax: "alias@npm:actual@version"
-        var npmPrefixIndex = input.IndexOf("@npm:".AsSpan(), StringComparison.OrdinalIgnoreCase);
+        int npmPrefixIndex = input.IndexOf("@npm:".AsSpan(), StringComparison.OrdinalIgnoreCase);
         if (npmPrefixIndex > 0)
         {
             alias = new string(input[..npmPrefixIndex]);
@@ -76,20 +76,20 @@ public static partial class DirectiveParser
         }
 
         // Try FHIR separator '#' first
-        var hashIndex = input.IndexOf('#');
+        int hashIndex = input.IndexOf('#');
         if (hashIndex >= 0)
         {
-            var name = new string(input[..hashIndex]);
-            var ver = input[(hashIndex + 1)..];
+            string name = new string(input[..hashIndex]);
+            ReadOnlySpan<char> ver = input[(hashIndex + 1)..];
             return (name, NullIfEmpty(ver), alias);
         }
 
         // Try NPM separator '@' (last occurrence to avoid scope confusion)
-        var atIndex = input.LastIndexOf('@');
+        int atIndex = input.LastIndexOf('@');
         if (atIndex > 0)
         {
-            var name = new string(input[..atIndex]);
-            var ver = input[(atIndex + 1)..];
+            string name = new string(input[..atIndex]);
+            ReadOnlySpan<char> ver = input[(atIndex + 1)..];
             return (name, NullIfEmpty(ver), alias);
         }
 
@@ -110,7 +110,7 @@ public static partial class DirectiveParser
         if (version is null)
             return null;
 
-        var match = CiBranchPattern().Match(version);
+        Match match = CiBranchPattern().Match(version);
         return match.Success ? match.Groups[1].Value : null;
     }
 
@@ -144,7 +144,7 @@ public static partial class DirectiveParser
         ArgumentNullException.ThrowIfNull(partialName);
 
         // Append ".core" temporarily to leverage the existing mapping logic
-        var release = FhirReleaseMapping.FromPackageName(partialName + ".core");
+        FhirRelease? release = FhirReleaseMapping.FromPackageName(partialName + ".core");
         if (release is null)
             return [];
 

@@ -77,12 +77,12 @@ public record CiBuildRecord
         if (string.IsNullOrWhiteSpace(Repo))
             return null;
 
-        var segments = Repo.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        string[] segments = Repo.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length < 3)
             return null;
 
-        var org = segments[0];
-        var repoName = segments[1];
+        string org = segments[0];
+        string repoName = segments[1];
 
         // Format: "Org/Repo/branches/BranchName/qa.json"
         if (segments.Length >= 4 &&

@@ -59,7 +59,7 @@ public class VersionResolver : IVersionResolver
         ArgumentNullException.ThrowIfNull(packageId);
         ArgumentNullException.ThrowIfNull(versionSpecifier);
 
-        var versionType = DirectiveParser.ClassifyVersion(versionSpecifier);
+        VersionType versionType = DirectiveParser.ClassifyVersion(versionSpecifier);
 
         // CI builds are handled externally by the orchestrator
         if (versionType is VersionType.CiBuild or VersionType.CiBuildBranch)
@@ -79,7 +79,7 @@ public class VersionResolver : IVersionResolver
             return null;
         }
 
-        var listing = await _registryClient.GetPackageListingAsync(packageId, cancellationToken)
+        PackageListing? listing = await _registryClient.GetPackageListingAsync(packageId, cancellationToken)
             .ConfigureAwait(false);
 
         if (listing is null)
@@ -100,8 +100,8 @@ public class VersionResolver : IVersionResolver
         ArgumentNullException.ThrowIfNull(versionSpecifier);
         ArgumentNullException.ThrowIfNull(availableVersions);
 
-        var versionType = DirectiveParser.ClassifyVersion(versionSpecifier);
-        var candidates = FilterPreRelease(availableVersions, options);
+        VersionType versionType = DirectiveParser.ClassifyVersion(versionSpecifier);
+        IEnumerable<FhirSemVer> candidates = FilterPreRelease(availableVersions, options);
 
         return versionType switch
         {
@@ -132,13 +132,13 @@ public class VersionResolver : IVersionResolver
 
             case VersionType.Wildcard:
             {
-                var candidates = ParseAndFilterVersionKeys(listing, options);
+                    IEnumerable<FhirSemVer> candidates = ParseAndFilterVersionKeys(listing, options);
                 return ResolveWildcard(versionSpecifier, candidates);
             }
 
             case VersionType.Range:
             {
-                var candidates = ParseAndFilterVersionKeys(listing, options);
+                    IEnumerable<FhirSemVer> candidates = ParseAndFilterVersionKeys(listing, options);
                 return ResolveRange(versionSpecifier, candidates);
             }
 
@@ -156,7 +156,7 @@ public class VersionResolver : IVersionResolver
     {
         if (listing.Versions.ContainsKey(versionSpecifier))
         {
-            var parsed = TryParseSemVer(versionSpecifier);
+            FhirSemVer? parsed = TryParseSemVer(versionSpecifier);
             if (parsed is not null)
             {
                 _logger.LogDebug("Resolved exact version '{Version}' for '{PackageId}'.",
@@ -166,7 +166,7 @@ public class VersionResolver : IVersionResolver
         }
 
         // Try case-insensitive lookup
-        var match = listing.Versions.Keys
+        string? match = listing.Versions.Keys
             .FirstOrDefault(k => k.Equals(versionSpecifier, StringComparison.OrdinalIgnoreCase));
 
         if (match is not null)
@@ -186,14 +186,14 @@ public class VersionResolver : IVersionResolver
     /// </summary>
     private FhirSemVer? ResolveLatestFromListing(PackageListing listing, VersionResolveOptions? options)
     {
-        var latestTag = listing.LatestVersion;
+        string? latestTag = listing.LatestVersion;
         if (latestTag is null)
         {
             _logger.LogWarning("No 'latest' version found for package '{PackageId}'.", listing.PackageId);
             return null;
         }
 
-        var parsed = TryParseSemVer(latestTag);
+        FhirSemVer? parsed = TryParseSemVer(latestTag);
 
         // If the latest tag is a pre-release and pre-releases are not allowed, fall back to
         // the highest non-pre-release version.
@@ -202,7 +202,7 @@ public class VersionResolver : IVersionResolver
             _logger.LogDebug(
                 "Latest tag '{LatestTag}' is a pre-release but pre-releases are not allowed; falling back.",
                 latestTag);
-            var candidates = ParseAndFilterVersionKeys(listing, options);
+            IEnumerable<FhirSemVer> candidates = ParseAndFilterVersionKeys(listing, options);
             return ResolveLatestFromCandidates(candidates);
         }
 
@@ -215,7 +215,7 @@ public class VersionResolver : IVersionResolver
     /// </summary>
     private static FhirSemVer? ResolveExact(string versionSpecifier, IEnumerable<FhirSemVer> candidates)
     {
-        var target = TryParseSemVer(versionSpecifier);
+        FhirSemVer? target = TryParseSemVer(versionSpecifier);
         if (target is null) return null;
 
         return candidates.FirstOrDefault(v =>
@@ -261,7 +261,7 @@ public class VersionResolver : IVersionResolver
     /// </summary>
     private IEnumerable<FhirSemVer> ParseAndFilterVersionKeys(PackageListing listing, VersionResolveOptions? options)
     {
-        var parsed = listing.Versions.Keys
+        IEnumerable<FhirSemVer> parsed = listing.Versions.Keys
             .Select(TryParseSemVer)
             .Where(v => v is not null)
             .Cast<FhirSemVer>();
@@ -292,6 +292,6 @@ public class VersionResolver : IVersionResolver
         if (string.IsNullOrWhiteSpace(version))
             return null;
 
-        return FhirSemVer.TryParse(version, out var result) ? result : null;
+        return FhirSemVer.TryParse(version, out FhirSemVer? result) ? result : null;
     }
 }

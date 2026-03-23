@@ -19,22 +19,22 @@ internal static class InfoCommand
     /// <returns>A fully configured <see cref="Command"/> for the info subcommand.</returns>
     public static Command Build()
     {
-        var packageArg = new Argument<string>("package")
+        Argument<string> packageArg = new Argument<string>("package")
         {
             Description = "Package identifier (e.g. hl7.fhir.r4.core)."
         };
 
-        var versionsOption = new Option<bool>("--versions")
+        Option<bool> versionsOption = new Option<bool>("--versions")
         {
             Description = "Show all available versions."
         };
 
-        var dependenciesOption = new Option<bool>("--dependencies")
+        Option<bool> dependenciesOption = new Option<bool>("--dependencies")
         {
             Description = "Show package dependencies."
         };
 
-        var command = new Command("info", "Display detailed information about a FHIR package.")
+        Command command = new Command("info", "Display detailed information about a FHIR package.")
         {
             packageArg,
             versionsOption,
@@ -43,16 +43,16 @@ internal static class InfoCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var packageId = parseResult.GetValue(packageArg)!;
-            var showVersions = parseResult.GetValue(versionsOption);
-            var showDependencies = parseResult.GetValue(dependenciesOption);
+            string packageId = parseResult.GetValue(packageArg)!;
+            bool showVersions = parseResult.GetValue(versionsOption);
+            bool showDependencies = parseResult.GetValue(dependenciesOption);
 
-            var globalOpts = parseResult.GetGlobalOptions();
+            GlobalOptions globalOpts = parseResult.GetGlobalOptions();
 
             try
             {
-                var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
+                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
                 if (globalOpts.Verbose)
                 {
@@ -125,13 +125,13 @@ internal static class InfoCommand
     private static void WriteDependencies(PackageListing listing)
     {
         // Show dependencies of the latest version if available
-        var latestVersion = listing.LatestVersion;
-        if (latestVersion is null || !listing.Versions.TryGetValue(latestVersion, out var versionInfo))
+        string? latestVersion = listing.LatestVersion;
+        if (latestVersion is null || !listing.Versions.TryGetValue(latestVersion, out PackageVersionInfo? versionInfo))
         {
             return;
         }
 
-        var deps = versionInfo.Dependencies;
+        IReadOnlyDictionary<string, string>? deps = versionInfo.Dependencies;
         if (deps is null or { Count: 0 })
         {
             AnsiConsole.MarkupLine("\n[grey]No dependencies.[/]");
@@ -141,12 +141,12 @@ internal static class InfoCommand
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine($"[bold]Dependencies (v{Markup.Escape(latestVersion)}):[/]");
 
-        var table = new Table()
+        Table table = new Table()
             .Border(TableBorder.Rounded)
             .AddColumn("[bold]Package[/]")
             .AddColumn("[bold]Version[/]");
 
-        foreach (var (name, version) in deps)
+        foreach ((string? name, string? version) in deps)
         {
             table.AddRow(Markup.Escape(name), Markup.Escape(version));
         }

@@ -12,7 +12,7 @@ public class PackageReferenceTests
     [Fact]
     public void Parse_FhirStyle_NameAndVersion()
     {
-        var reference = PackageReference.Parse("hl7.fhir.r4.core#4.0.1");
+        PackageReference reference = PackageReference.Parse("hl7.fhir.r4.core#4.0.1");
 
         reference.Name.ShouldBe("hl7.fhir.r4.core");
         reference.Version.ShouldBe("4.0.1");
@@ -22,7 +22,7 @@ public class PackageReferenceTests
     [Fact]
     public void Parse_NpmStyle_NameAndVersion()
     {
-        var reference = PackageReference.Parse("hl7.fhir.r4.core@4.0.1");
+        PackageReference reference = PackageReference.Parse("hl7.fhir.r4.core@4.0.1");
 
         reference.Name.ShouldBe("hl7.fhir.r4.core");
         reference.Version.ShouldBe("4.0.1");
@@ -32,7 +32,7 @@ public class PackageReferenceTests
     [Fact]
     public void Parse_NameOnly_NoVersion()
     {
-        var reference = PackageReference.Parse("hl7.fhir.us.core");
+        PackageReference reference = PackageReference.Parse("hl7.fhir.us.core");
 
         reference.Name.ShouldBe("hl7.fhir.us.core");
         reference.Version.ShouldBeNull();
@@ -42,7 +42,7 @@ public class PackageReferenceTests
     [Fact]
     public void FhirDirective_IncludesHashSeparator()
     {
-        var reference = new PackageReference("my.package", "1.0.0");
+        PackageReference reference = new PackageReference("my.package", "1.0.0");
 
         reference.FhirDirective.ShouldBe("my.package#1.0.0");
     }
@@ -50,7 +50,7 @@ public class PackageReferenceTests
     [Fact]
     public void FhirDirective_NoVersion_JustName()
     {
-        var reference = new PackageReference("my.package");
+        PackageReference reference = new PackageReference("my.package");
 
         reference.FhirDirective.ShouldBe("my.package");
     }
@@ -58,7 +58,7 @@ public class PackageReferenceTests
     [Fact]
     public void NpmDirective_IncludesAtSeparator()
     {
-        var reference = new PackageReference("my.package", "1.0.0");
+        PackageReference reference = new PackageReference("my.package", "1.0.0");
 
         reference.NpmDirective.ShouldBe("my.package@1.0.0");
     }
@@ -75,7 +75,7 @@ public class PackageReferenceTests
     [Fact]
     public void ImplicitConversion_FromKeyValuePair()
     {
-        var kvp = new KeyValuePair<string, string>("hl7.fhir.r4.core", "4.0.1");
+        KeyValuePair<string, string> kvp = new KeyValuePair<string, string>("hl7.fhir.r4.core", "4.0.1");
 
         PackageReference reference = kvp;
 
@@ -86,8 +86,8 @@ public class PackageReferenceTests
     [Fact]
     public void Equality_SameNameAndVersion_Equal()
     {
-        var a = new PackageReference("hl7.fhir.r4.core", "4.0.1");
-        var b = new PackageReference("hl7.fhir.r4.core", "4.0.1");
+        PackageReference a = new PackageReference("hl7.fhir.r4.core", "4.0.1");
+        PackageReference b = new PackageReference("hl7.fhir.r4.core", "4.0.1");
 
         a.ShouldBe(b);
     }
@@ -95,8 +95,8 @@ public class PackageReferenceTests
     [Fact]
     public void Equality_DifferentVersion_NotEqual()
     {
-        var a = new PackageReference("hl7.fhir.r4.core", "4.0.1");
-        var b = new PackageReference("hl7.fhir.r4.core", "5.0.0");
+        PackageReference a = new PackageReference("hl7.fhir.r4.core", "4.0.1");
+        PackageReference b = new PackageReference("hl7.fhir.r4.core", "5.0.0");
 
         a.ShouldNotBe(b);
     }
@@ -104,7 +104,7 @@ public class PackageReferenceTests
     [Fact]
     public void Parse_EmptyString_Throws()
     {
-        var act = () => PackageReference.Parse("");
+        Func<PackageReference> act = () => PackageReference.Parse("");
 
         Should.Throw<ArgumentException>(() => act());
     }
@@ -112,7 +112,7 @@ public class PackageReferenceTests
     [Fact]
     public void Parse_Null_Throws()
     {
-        var act = () => PackageReference.Parse(null!);
+        Func<PackageReference> act = () => PackageReference.Parse(null!);
 
         Should.Throw<ArgumentNullException>(() => act());
     }
@@ -120,7 +120,7 @@ public class PackageReferenceTests
     [Fact]
     public void ToString_ReturnsFhirDirective()
     {
-        var reference = new PackageReference("my.package", "1.0.0");
+        PackageReference reference = new PackageReference("my.package", "1.0.0");
 
         reference.ToString().ShouldBe("my.package#1.0.0");
     }
@@ -128,7 +128,7 @@ public class PackageReferenceTests
     [Fact]
     public void Parse_NpmScope_HandlesCorrectly()
     {
-        var reference = PackageReference.Parse("@scope/my.package@1.0.0");
+        PackageReference reference = PackageReference.Parse("@scope/my.package@1.0.0");
 
         reference.Name.ShouldBe("@scope/my.package");
         reference.Version.ShouldBe("1.0.0");

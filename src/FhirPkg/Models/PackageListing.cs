@@ -35,12 +35,12 @@ public record PackageListing
     {
         get
         {
-            if (DistTags is not null && DistTags.TryGetValue("latest", out var tagged))
+            if (DistTags is not null && DistTags.TryGetValue("latest", out string? tagged))
                 return tagged;
 
             // Parse version keys and pick the highest using semantic version ordering
             return Versions.Keys
-                .Select(k => FhirSemVer.TryParse(k, out var v) ? v : null)
+                .Select(k => FhirSemVer.TryParse(k, out FhirSemVer? v) ? v : null)
                 .Where(v => v is not null)
                 .Max()
                 ?.ToString();

@@ -128,7 +128,7 @@ public class DirectiveParserTests
     [Fact]
     public void SplitDirective_FhirStyle_SplitsCorrectly()
     {
-        var (packageId, version, alias) = DirectiveParser.SplitDirective("hl7.fhir.r4.core#4.0.1");
+        (string? packageId, string? version, string? alias) = DirectiveParser.SplitDirective("hl7.fhir.r4.core#4.0.1");
 
         packageId.ShouldBe("hl7.fhir.r4.core");
         version.ShouldBe("4.0.1");
@@ -138,7 +138,7 @@ public class DirectiveParserTests
     [Fact]
     public void SplitDirective_NpmStyle_SplitsCorrectly()
     {
-        var (packageId, version, alias) = DirectiveParser.SplitDirective("hl7.fhir.r4.core@4.0.1");
+        (string? packageId, string? version, string? alias) = DirectiveParser.SplitDirective("hl7.fhir.r4.core@4.0.1");
 
         packageId.ShouldBe("hl7.fhir.r4.core");
         version.ShouldBe("4.0.1");
@@ -148,7 +148,7 @@ public class DirectiveParserTests
     [Fact]
     public void SplitDirective_NameOnly_VersionIsNull()
     {
-        var (packageId, version, alias) = DirectiveParser.SplitDirective("hl7.fhir.us.core");
+        (string? packageId, string? version, string? alias) = DirectiveParser.SplitDirective("hl7.fhir.us.core");
 
         packageId.ShouldBe("hl7.fhir.us.core");
         version.ShouldBeNull();
@@ -158,7 +158,7 @@ public class DirectiveParserTests
     [Fact]
     public void SplitDirective_NpmAlias_ExtractsAllParts()
     {
-        var (packageId, version, alias) = DirectiveParser.SplitDirective("v610@npm:hl7.fhir.us.core@6.1.0");
+        (string? packageId, string? version, string? alias) = DirectiveParser.SplitDirective("v610@npm:hl7.fhir.us.core@6.1.0");
 
         packageId.ShouldBe("hl7.fhir.us.core");
         version.ShouldBe("6.1.0");
@@ -168,7 +168,7 @@ public class DirectiveParserTests
     [Fact]
     public void SplitDirective_EmptyString_Throws()
     {
-        var act = () => DirectiveParser.SplitDirective("");
+        Func<(string PackageId, string? Version, string? Alias)> act = () => DirectiveParser.SplitDirective("");
 
         Should.Throw<ArgumentException>(() => act());
     }
@@ -204,7 +204,7 @@ public class DirectiveParserTests
     [Fact]
     public void ExpandPartialCoreName_R4_IncludesCorePackages()
     {
-        var expanded = DirectiveParser.ExpandPartialCoreName("hl7.fhir.r4");
+        IReadOnlyList<string> expanded = DirectiveParser.ExpandPartialCoreName("hl7.fhir.r4");
 
         expanded.ShouldNotBeEmpty();
         expanded.ShouldContain("hl7.fhir.r4.core");
@@ -215,7 +215,7 @@ public class DirectiveParserTests
     [Fact]
     public void ExpandPartialCoreName_Unknown_ReturnsEmpty()
     {
-        var expanded = DirectiveParser.ExpandPartialCoreName("some.unknown.prefix");
+        IReadOnlyList<string> expanded = DirectiveParser.ExpandPartialCoreName("some.unknown.prefix");
 
         expanded.ShouldBeEmpty();
     }

@@ -11,7 +11,7 @@ public class PackageListingTests
     [Fact]
     public void LatestVersion_WithDistTag_ReturnsTaggedVersion()
     {
-        var listing = new PackageListing
+        PackageListing listing = new PackageListing
         {
             PackageId = "test.package",
             DistTags = new Dictionary<string, string> { ["latest"] = "2.0.0" },
@@ -28,7 +28,7 @@ public class PackageListingTests
     [Fact]
     public void LatestVersion_WithoutDistTag_ReturnsHighestSemVer()
     {
-        var listing = new PackageListing
+        PackageListing listing = new PackageListing
         {
             PackageId = "test.package",
             Versions = new Dictionary<string, PackageVersionInfo>
@@ -47,7 +47,7 @@ public class PackageListingTests
     public void LatestVersion_UnorderedKeys_ReturnsHighestSemVer()
     {
         // Explicitly test that dictionary key order doesn't matter
-        var versions = new Dictionary<string, PackageVersionInfo>
+        Dictionary<string, PackageVersionInfo> versions = new Dictionary<string, PackageVersionInfo>
         {
             ["0.1.0"] = new() { Name = "test.package", Version = "0.1.0" },
             ["4.0.1"] = new() { Name = "test.package", Version = "4.0.1" },
@@ -56,7 +56,7 @@ public class PackageListingTests
             ["3.5.2"] = new() { Name = "test.package", Version = "3.5.2" },
         };
 
-        var listing = new PackageListing
+        PackageListing listing = new PackageListing
         {
             PackageId = "test.package",
             Versions = versions
@@ -68,7 +68,7 @@ public class PackageListingTests
     [Fact]
     public void LatestVersion_EmptyVersions_ReturnsNull()
     {
-        var listing = new PackageListing
+        PackageListing listing = new PackageListing
         {
             PackageId = "test.package",
             Versions = new Dictionary<string, PackageVersionInfo>()
@@ -80,7 +80,7 @@ public class PackageListingTests
     [Fact]
     public void LatestVersion_StablePreferredOverPreRelease()
     {
-        var listing = new PackageListing
+        PackageListing listing = new PackageListing
         {
             PackageId = "test.package",
             Versions = new Dictionary<string, PackageVersionInfo>
@@ -93,7 +93,7 @@ public class PackageListingTests
         // FhirSemVer orders stable > pre-release at same major.minor.patch,
         // and 2.0.0-beta1 > 1.0.0 by major version, but it's pre-release.
         // The max should be 2.0.0-beta1 since it has higher major.minor.patch.
-        var result = listing.LatestVersion;
+        string? result = listing.LatestVersion;
         result.ShouldNotBeNull();
     }
 }

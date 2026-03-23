@@ -49,7 +49,7 @@ public static class ServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         // Register and configure options
-        var optionsBuilder = services.AddOptions<FhirPackageManagerOptions>();
+        OptionsBuilder<FhirPackageManagerOptions> optionsBuilder = services.AddOptions<FhirPackageManagerOptions>();
         if (configure is not null)
         {
             optionsBuilder.Configure(configure);
@@ -58,18 +58,18 @@ public static class ServiceCollectionExtensions
         // Register the options instance for direct injection
         services.TryAddSingleton(sp =>
         {
-            var opts = sp.GetRequiredService<IOptions<FhirPackageManagerOptions>>();
+            IOptions<FhirPackageManagerOptions> opts = sp.GetRequiredService<IOptions<FhirPackageManagerOptions>>();
             return opts.Value;
         });
 
         // Register HttpClient via the typed HttpClient factory
         services.AddHttpClient("FhirPackages", (sp, client) =>
         {
-            var options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
             client.Timeout = options.HttpTimeout;
         }).ConfigurePrimaryHttpMessageHandler(sp =>
         {
-            var options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
             return new HttpClientHandler
             {
                 AllowAutoRedirect = true,
@@ -80,20 +80,20 @@ public static class ServiceCollectionExtensions
         // Register IPackageCache as DiskPackageCache
         services.TryAddSingleton<IPackageCache>(sp =>
         {
-            var options = sp.GetRequiredService<FhirPackageManagerOptions>();
-            var logger = sp.GetRequiredService<ILogger<DiskPackageCache>>();
-            var timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
+            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            ILogger<DiskPackageCache> logger = sp.GetRequiredService<ILogger<DiskPackageCache>>();
+            TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
             return new DiskPackageCache(options.CachePath, logger, timeProvider);
         });
 
         // Register IRegistryClient as a composite RedundantRegistryClient
         services.TryAddSingleton<IRegistryClient>(sp =>
         {
-            var options = sp.GetRequiredService<FhirPackageManagerOptions>();
-            var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
-            var httpClient = httpClientFactory.CreateClient("FhirPackages");
-            var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
-            var timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
+            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            IHttpClientFactory httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+            HttpClient httpClient = httpClientFactory.CreateClient("FhirPackages");
+            ILoggerFactory loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+            TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
 
             return RegistryClientFactory.BuildRegistryClient(options, httpClient, loggerFactory, timeProvider);
         });
@@ -101,26 +101,26 @@ public static class ServiceCollectionExtensions
         // Register IVersionResolver as VersionResolver
         services.TryAddSingleton<IVersionResolver>(sp =>
         {
-            var registryClient = sp.GetRequiredService<IRegistryClient>();
-            var logger = sp.GetRequiredService<ILogger<VersionResolver>>();
+            IRegistryClient registryClient = sp.GetRequiredService<IRegistryClient>();
+            ILogger<VersionResolver> logger = sp.GetRequiredService<ILogger<VersionResolver>>();
             return new VersionResolver(registryClient, logger);
         });
 
         // Register IDependencyResolver as DependencyResolver
         services.TryAddSingleton<IDependencyResolver>(sp =>
         {
-            var registryClient = sp.GetRequiredService<IRegistryClient>();
-            var versionResolver = sp.GetRequiredService<IVersionResolver>();
-            var cache = sp.GetRequiredService<IPackageCache>();
-            var logger = sp.GetRequiredService<ILogger<DependencyResolver>>();
-            var timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
+            IRegistryClient registryClient = sp.GetRequiredService<IRegistryClient>();
+            IVersionResolver versionResolver = sp.GetRequiredService<IVersionResolver>();
+            IPackageCache cache = sp.GetRequiredService<IPackageCache>();
+            ILogger<DependencyResolver> logger = sp.GetRequiredService<ILogger<DependencyResolver>>();
+            TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
             return new DependencyResolver(registryClient, versionResolver, cache, logger, timeProvider);
         });
 
         // Register IPackageIndexer as PackageIndexer
         services.TryAddSingleton<IPackageIndexer>(sp =>
         {
-            var logger = sp.GetRequiredService<ILogger<PackageIndexer>>();
+            ILogger<PackageIndexer> logger = sp.GetRequiredService<ILogger<PackageIndexer>>();
             return new PackageIndexer(logger);
         });
 
@@ -130,16 +130,16 @@ public static class ServiceCollectionExtensions
         // Register IFhirPackageManager as FhirPackageManager (DI constructor overload)
         services.TryAddSingleton<IFhirPackageManager>(sp =>
         {
-            var cache = sp.GetRequiredService<IPackageCache>();
-            var registryClient = sp.GetRequiredService<IRegistryClient>();
-            var versionResolver = sp.GetRequiredService<IVersionResolver>();
-            var dependencyResolver = sp.GetRequiredService<IDependencyResolver>();
-            var packageIndexer = sp.GetRequiredService<IPackageIndexer>();
-            var options = sp.GetRequiredService<FhirPackageManagerOptions>();
-            var logger = sp.GetRequiredService<ILogger<FhirPackageManager>>();
+            IPackageCache cache = sp.GetRequiredService<IPackageCache>();
+            IRegistryClient registryClient = sp.GetRequiredService<IRegistryClient>();
+            IVersionResolver versionResolver = sp.GetRequiredService<IVersionResolver>();
+            IDependencyResolver dependencyResolver = sp.GetRequiredService<IDependencyResolver>();
+            IPackageIndexer packageIndexer = sp.GetRequiredService<IPackageIndexer>();
+            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            ILogger<FhirPackageManager> logger = sp.GetRequiredService<ILogger<FhirPackageManager>>();
 
             // Only create in-memory resource cache when configured with a positive cache size
-            var memoryCache = options.ResourceCacheSize > 0
+            MemoryResourceCache? memoryCache = options.ResourceCacheSize > 0
                 ? new MemoryResourceCache(options.ResourceCacheSize, options.ResourceCacheSafeMode)
                 : null;
 

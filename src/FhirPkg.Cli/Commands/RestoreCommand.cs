@@ -19,40 +19,40 @@ internal static class RestoreCommand
     /// <returns>A fully configured <see cref="Command"/> for the restore subcommand.</returns>
     public static Command Build()
     {
-        var projectPathArg = new Argument<string>("project-path")
+        Argument<string> projectPathArg = new Argument<string>("project-path")
         {
             Description = "Path to the project directory containing a package manifest.",
             DefaultValueFactory = _ => "."
         };
 
-        var lockFileOption = new Option<string?>("--lock-file", "-l")
+        Option<string?> lockFileOption = new Option<string?>("--lock-file", "-l")
         {
             Description = "Path to a lock file to use for deterministic restores."
         };
 
-        var noLockOption = new Option<bool>("--no-lock")
+        Option<bool> noLockOption = new Option<bool>("--no-lock")
         {
             Description = "Do not write or update the lock file."
         };
 
-        var conflictStrategyOption = new Option<ConflictResolutionStrategy>("--conflict-strategy")
+        Option<ConflictResolutionStrategy> conflictStrategyOption = new Option<ConflictResolutionStrategy>("--conflict-strategy")
         {
             Description = "Strategy for resolving version conflicts (HighestWins, FirstWins, Error).",
             DefaultValueFactory = _ => ConflictResolutionStrategy.HighestWins
         };
 
-        var maxDepthOption = new Option<int>("--max-depth")
+        Option<int> maxDepthOption = new Option<int>("--max-depth")
         {
             Description = "Maximum recursion depth for dependency resolution.",
             DefaultValueFactory = _ => 20
         };
 
-        var fhirVersionOption = new Option<string?>("--fhir-version", "-f")
+        Option<string?> fhirVersionOption = new Option<string?>("--fhir-version", "-f")
         {
             Description = "Preferred FHIR release (R4, R4B, R5, R6)."
         };
 
-        var command = new Command("restore", "Restore FHIR package dependencies from a project manifest.")
+        Command command = new Command("restore", "Restore FHIR package dependencies from a project manifest.")
         {
             projectPathArg,
             lockFileOption,
@@ -64,28 +64,28 @@ internal static class RestoreCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var projectPath = parseResult.GetValue(projectPathArg)!;
-            var lockFile = parseResult.GetValue(lockFileOption);
-            var noLock = parseResult.GetValue(noLockOption);
-            var conflictStrategy = parseResult.GetValue(conflictStrategyOption);
-            var maxDepth = parseResult.GetValue(maxDepthOption);
-            var fhirVersion = parseResult.GetValue(fhirVersionOption);
+            string projectPath = parseResult.GetValue(projectPathArg)!;
+            string? lockFile = parseResult.GetValue(lockFileOption);
+            bool noLock = parseResult.GetValue(noLockOption);
+            ConflictResolutionStrategy conflictStrategy = parseResult.GetValue(conflictStrategyOption);
+            int maxDepth = parseResult.GetValue(maxDepthOption);
+            string? fhirVersion = parseResult.GetValue(fhirVersionOption);
 
-            var globalOpts = parseResult.GetGlobalOptions();
+            GlobalOptions globalOpts = parseResult.GetGlobalOptions();
 
             try
             {
-                var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
+                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
-                var restoreOptions = new RestoreOptions
+                RestoreOptions restoreOptions = new RestoreOptions
                 {
                     ConflictStrategy = conflictStrategy,
                     WriteLockFile = !noLock,
                     MaxDepth = maxDepth
                 };
 
-                if (fhirVersion is not null && Enum.TryParse<FhirRelease>(fhirVersion, ignoreCase: true, out var release))
+                if (fhirVersion is not null && Enum.TryParse<FhirRelease>(fhirVersion, ignoreCase: true, out FhirRelease release))
                 {
                     restoreOptions.PreferredFhirRelease = release;
                 }

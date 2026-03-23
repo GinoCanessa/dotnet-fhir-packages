@@ -34,14 +34,14 @@ public static class IniParser
     {
         ArgumentNullException.ThrowIfNull(content);
 
-        var sections = new Dictionary<string, Dictionary<string, string>>(5, StringComparer.OrdinalIgnoreCase);
-        var currentSection = new Dictionary<string, string>(50, StringComparer.OrdinalIgnoreCase);
-        var currentSectionName = string.Empty;
+        Dictionary<string, Dictionary<string, string>> sections = new Dictionary<string, Dictionary<string, string>>(5, StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> currentSection = new Dictionary<string, string>(50, StringComparer.OrdinalIgnoreCase);
+        string currentSectionName = string.Empty;
 
-        using var reader = new StringReader(content);
+        using StringReader reader = new StringReader(content);
         while (reader.ReadLine() is { } line)
         {
-            var trimmed = line.Trim();
+            string trimmed = line.Trim();
 
             // Skip empty lines and comments
             if (trimmed.Length == 0 || trimmed[0] is ';' or '#')
@@ -55,18 +55,18 @@ public static class IniParser
                     sections[currentSectionName] = currentSection;
 
                 currentSectionName = trimmed[1..^1].Trim();
-                currentSection = sections.TryGetValue(currentSectionName, out var existing)
+                currentSection = sections.TryGetValue(currentSectionName, out Dictionary<string, string>? existing)
                     ? new Dictionary<string, string>(existing, StringComparer.OrdinalIgnoreCase)
                     : new Dictionary<string, string>(50, StringComparer.OrdinalIgnoreCase);
                 continue;
             }
 
             // Key-value pair
-            var equalsIndex = trimmed.IndexOf('=');
+            int equalsIndex = trimmed.IndexOf('=');
             if (equalsIndex > 0)
             {
-                var key = trimmed[..equalsIndex].Trim();
-                var value = trimmed[(equalsIndex + 1)..].Trim();
+                string key = trimmed[..equalsIndex].Trim();
+                string value = trimmed[(equalsIndex + 1)..].Trim();
                 currentSection[key] = value;
             }
             else
@@ -102,7 +102,7 @@ public static class IniParser
         if (!File.Exists(filePath))
             return new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
 
-        var content = File.ReadAllText(filePath);
+        string content = File.ReadAllText(filePath);
         return Parse(content);
     }
 
@@ -116,16 +116,16 @@ public static class IniParser
     {
         ArgumentNullException.ThrowIfNull(sections);
 
-        var sb = new StringBuilder();
+        StringBuilder sb = new StringBuilder();
 
-        foreach (var (sectionName, entries) in sections)
+        foreach ((string? sectionName, IReadOnlyDictionary<string, string>? entries) in sections)
         {
             if (sectionName.Length > 0)
             {
                 sb.AppendLine($"[{sectionName}]");
             }
 
-            foreach (var (key, value) in entries)
+            foreach ((string? key, string? value) in entries)
             {
                 sb.AppendLine(value.Length > 0 ? $"{key} = {value}" : key);
             }
@@ -150,7 +150,7 @@ public static class IniParser
         ArgumentNullException.ThrowIfNull(filePath);
         ArgumentNullException.ThrowIfNull(sections);
 
-        var directory = Path.GetDirectoryName(filePath);
+        string? directory = Path.GetDirectoryName(filePath);
         if (directory is not null)
             Directory.CreateDirectory(directory);
 
@@ -176,7 +176,7 @@ public static class IniParser
         if (!File.Exists(filePath))
             return new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
 
-        var content = await File.ReadAllTextAsync(filePath, ct).ConfigureAwait(false);
+        string content = await File.ReadAllTextAsync(filePath, ct).ConfigureAwait(false);
         return Parse(content);
     }
 
@@ -196,7 +196,7 @@ public static class IniParser
         ArgumentNullException.ThrowIfNull(filePath);
         ArgumentNullException.ThrowIfNull(sections);
 
-        var directory = Path.GetDirectoryName(filePath);
+        string? directory = Path.GetDirectoryName(filePath);
         if (directory is not null)
             Directory.CreateDirectory(directory);
 

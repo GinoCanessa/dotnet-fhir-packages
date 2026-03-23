@@ -27,20 +27,20 @@ public static class TempDirectory
     /// </exception>
     public static string Create(string prefix, string? fallbackRoot = null)
     {
-        if (TryCreateInSystemTemp(prefix, out var path))
+        if (TryCreateInSystemTemp(prefix, out string? path))
         {
             return path;
         }
 
         if (fallbackRoot is not null)
         {
-            var dir = Path.Combine(fallbackRoot, FallbackSubdirectory, $"{prefix}-{Guid.NewGuid():N}");
+            string dir = Path.Combine(fallbackRoot, FallbackSubdirectory, $"{prefix}-{Guid.NewGuid():N}");
             Directory.CreateDirectory(dir);
             return dir;
         }
 
         // No fallback available — force the system temp path so the original exception propagates.
-        var forcedDir = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid():N}");
+        string forcedDir = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(forcedDir);
         return forcedDir;
     }
@@ -54,7 +54,7 @@ public static class TempDirectory
         path = string.Empty;
         try
         {
-            var tempRoot = Path.GetTempPath();
+            string tempRoot = Path.GetTempPath();
             if (string.IsNullOrEmpty(tempRoot))
             {
                 return false;

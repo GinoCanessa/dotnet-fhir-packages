@@ -19,7 +19,7 @@ public class RedundantRegistryClientTests
 
     private static Mock<IRegistryClient> CreateMockClient()
     {
-        var mock = new Mock<IRegistryClient>();
+        Mock<IRegistryClient> mock = new Mock<IRegistryClient>();
         mock.Setup(c => c.Endpoint).Returns(TestEndpoint);
         mock.Setup(c => c.SupportedNameTypes).Returns(
             Enum.GetValues<PackageNameType>().ToList().AsReadOnly());
@@ -31,25 +31,25 @@ public class RedundantRegistryClientTests
     [Fact]
     public async Task ResolveAsync_FirstClientSucceeds_ReturnsResult()
     {
-        var expected = new ResolvedDirective
+        ResolvedDirective expected = new ResolvedDirective
         {
             Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
             TarballUri = new Uri("https://test.registry.org/package.tgz")
         };
 
-        var client1 = CreateMockClient();
+        Mock<IRegistryClient> client1 = CreateMockClient();
         client1.Setup(c => c.ResolveAsync(
                 It.IsAny<PackageDirective>(),
                 It.IsAny<VersionResolveOptions?>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(expected);
 
-        var client2 = CreateMockClient();
+        Mock<IRegistryClient> client2 = CreateMockClient();
 
-        var sut = new RedundantRegistryClient(client1.Object, client2.Object);
-        var directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
+        RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
+        PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
 
-        var result = await sut.ResolveAsync(directive);
+        ResolvedDirective? result = await sut.ResolveAsync(directive);
 
         result.ShouldBe(expected);
         client2.Verify(c => c.ResolveAsync(
@@ -61,30 +61,30 @@ public class RedundantRegistryClientTests
     [Fact]
     public async Task ResolveAsync_FirstClientFails_FallsBackToSecond()
     {
-        var expected = new ResolvedDirective
+        ResolvedDirective expected = new ResolvedDirective
         {
             Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
             TarballUri = new Uri("https://test2.registry.org/package.tgz")
         };
 
-        var client1 = CreateMockClient();
+        Mock<IRegistryClient> client1 = CreateMockClient();
         client1.Setup(c => c.ResolveAsync(
                 It.IsAny<PackageDirective>(),
                 It.IsAny<VersionResolveOptions?>(),
                 It.IsAny<CancellationToken>()))
             .ThrowsAsync(new HttpRequestException("Connection failed"));
 
-        var client2 = CreateMockClient();
+        Mock<IRegistryClient> client2 = CreateMockClient();
         client2.Setup(c => c.ResolveAsync(
                 It.IsAny<PackageDirective>(),
                 It.IsAny<VersionResolveOptions?>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(expected);
 
-        var sut = new RedundantRegistryClient(client1.Object, client2.Object);
-        var directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
+        RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
+        PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
 
-        var result = await sut.ResolveAsync(directive);
+        ResolvedDirective? result = await sut.ResolveAsync(directive);
 
         result.ShouldBe(expected);
     }
@@ -92,24 +92,24 @@ public class RedundantRegistryClientTests
     [Fact]
     public async Task ResolveAsync_AllClientsFail_ReturnsNull()
     {
-        var client1 = CreateMockClient();
+        Mock<IRegistryClient> client1 = CreateMockClient();
         client1.Setup(c => c.ResolveAsync(
                 It.IsAny<PackageDirective>(),
                 It.IsAny<VersionResolveOptions?>(),
                 It.IsAny<CancellationToken>()))
             .ThrowsAsync(new HttpRequestException("Connection failed"));
 
-        var client2 = CreateMockClient();
+        Mock<IRegistryClient> client2 = CreateMockClient();
         client2.Setup(c => c.ResolveAsync(
                 It.IsAny<PackageDirective>(),
                 It.IsAny<VersionResolveOptions?>(),
                 It.IsAny<CancellationToken>()))
             .ThrowsAsync(new HttpRequestException("Connection failed"));
 
-        var sut = new RedundantRegistryClient(client1.Object, client2.Object);
-        var directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
+        RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
+        PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
 
-        var result = await sut.ResolveAsync(directive);
+        ResolvedDirective? result = await sut.ResolveAsync(directive);
 
         result.ShouldBeNull();
     }
@@ -117,30 +117,30 @@ public class RedundantRegistryClientTests
     [Fact]
     public async Task ResolveAsync_FirstReturnsNull_FallsBackToSecond()
     {
-        var expected = new ResolvedDirective
+        ResolvedDirective expected = new ResolvedDirective
         {
             Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
             TarballUri = new Uri("https://test2.registry.org/package.tgz")
         };
 
-        var client1 = CreateMockClient();
+        Mock<IRegistryClient> client1 = CreateMockClient();
         client1.Setup(c => c.ResolveAsync(
                 It.IsAny<PackageDirective>(),
                 It.IsAny<VersionResolveOptions?>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync((ResolvedDirective?)null);
 
-        var client2 = CreateMockClient();
+        Mock<IRegistryClient> client2 = CreateMockClient();
         client2.Setup(c => c.ResolveAsync(
                 It.IsAny<PackageDirective>(),
                 It.IsAny<VersionResolveOptions?>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(expected);
 
-        var sut = new RedundantRegistryClient(client1.Object, client2.Object);
-        var directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
+        RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
+        PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
 
-        var result = await sut.ResolveAsync(directive);
+        ResolvedDirective? result = await sut.ResolveAsync(directive);
 
         result.ShouldBe(expected);
     }
@@ -148,7 +148,7 @@ public class RedundantRegistryClientTests
     [Fact]
     public void Constructor_EmptyClients_Throws()
     {
-        var act = () => new RedundantRegistryClient(Array.Empty<IRegistryClient>());
+        Func<RedundantRegistryClient> act = () => new RedundantRegistryClient(Array.Empty<IRegistryClient>());
 
         Should.Throw<ArgumentException>(() => act());
     }
@@ -156,7 +156,7 @@ public class RedundantRegistryClientTests
     [Fact]
     public async Task SearchAsync_QueriesAllClients_MergesResults()
     {
-        var client1 = CreateMockClient();
+        Mock<IRegistryClient> client1 = CreateMockClient();
         client1.Setup(c => c.SearchAsync(It.IsAny<PackageSearchCriteria>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<CatalogEntry>
             {
@@ -164,7 +164,7 @@ public class RedundantRegistryClientTests
                 new() { Name = "package.b" }
             }.AsReadOnly());
 
-        var client2 = CreateMockClient();
+        Mock<IRegistryClient> client2 = CreateMockClient();
         client2.Setup(c => c.SearchAsync(It.IsAny<PackageSearchCriteria>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<CatalogEntry>
             {
@@ -172,8 +172,8 @@ public class RedundantRegistryClientTests
                 new() { Name = "package.c" }
             }.AsReadOnly());
 
-        var sut = new RedundantRegistryClient(client1.Object, client2.Object);
-        var results = await sut.SearchAsync(new PackageSearchCriteria { Name = "package" });
+        RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
+        IReadOnlyList<CatalogEntry> results = await sut.SearchAsync(new PackageSearchCriteria { Name = "package" });
 
         results.Count.ShouldBe(3);
         results.Select(r => r.Name).ShouldBe(new[] { "package.a", "package.b", "package.c" }, ignoreOrder: true);

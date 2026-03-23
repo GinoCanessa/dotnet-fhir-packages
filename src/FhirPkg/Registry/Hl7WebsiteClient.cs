@@ -122,7 +122,7 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
             "Resolving {PackageId} via HL7 website fallback", directive.PackageId);
 
         // Determine the FHIR release: explicit option takes priority over inference.
-        var release = options?.FhirRelease ?? InferReleaseFromPackageName(directive.PackageId);
+        FhirRelease? release = options?.FhirRelease ?? InferReleaseFromPackageName(directive.PackageId);
 
         if (release is null)
         {
@@ -132,20 +132,20 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
             return Task.FromResult<ResolvedDirective?>(null);
         }
 
-        if (!ReleasePathMap.TryGetValue(release.Value, out var releasePath))
+        if (!ReleasePathMap.TryGetValue(release.Value, out string? releasePath))
         {
             Logger.LogWarning(
                 "No URL path mapping found for FHIR release {Release}", release.Value);
             return Task.FromResult<ResolvedDirective?>(null);
         }
 
-        var tarballUrl = $"{BaseUrl}/{releasePath}/{Uri.EscapeDataString(directive.PackageId)}.tgz";
+        string tarballUrl = $"{BaseUrl}/{releasePath}/{Uri.EscapeDataString(directive.PackageId)}.tgz";
 
         Logger.LogInformation(
             "Resolved {PackageId} via HL7 website → {TarballUrl}",
             directive.PackageId, tarballUrl);
 
-        var result = new ResolvedDirective
+        ResolvedDirective result = new ResolvedDirective
         {
             Reference = directive.ToReference(),
             TarballUri = new Uri(tarballUrl),
@@ -164,10 +164,10 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
     {
         ArgumentNullException.ThrowIfNull(resolved);
 
-        var url = resolved.TarballUri.ToString();
+        string url = resolved.TarballUri.ToString();
         Logger.LogInformation("Downloading core package from HL7 website: {Url}", url);
 
-        var response = await GetResponseAsync(url, cancellationToken).ConfigureAwait(false);
+        HttpResponseMessage? response = await GetResponseAsync(url, cancellationToken).ConfigureAwait(false);
 
         if (response is null)
         {
@@ -211,11 +211,11 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
     /// </summary>
     private static FhirRelease? InferReleaseFromPackageName(string packageId)
     {
-        var segments = packageId.Split('.');
+        string[] segments = packageId.Split('.');
 
         // Core package names follow the pattern hl7.fhir.{release}.{type}
         if (segments.Length >= 3 &&
-            PackageSegmentToRelease.TryGetValue(segments[2], out var release))
+            PackageSegmentToRelease.TryGetValue(segments[2], out FhirRelease release))
         {
             return release;
         }

@@ -19,26 +19,26 @@ internal static class ResolveCommand
     /// <returns>A fully configured <see cref="Command"/> for the resolve subcommand.</returns>
     public static Command Build()
     {
-        var directiveArg = new Argument<string>("directive")
+        Argument<string> directiveArg = new Argument<string>("directive")
         {
             Description = "Package directive to resolve (e.g. hl7.fhir.r4.core#4.0.1 or hl7.fhir.r4.core#latest)."
         };
 
-        var command = new Command("resolve", "Resolve a package directive to a concrete version and download URL.")
+        Command command = new Command("resolve", "Resolve a package directive to a concrete version and download URL.")
         {
             directiveArg
         };
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var directive = parseResult.GetValue(directiveArg)!;
+            string directive = parseResult.GetValue(directiveArg)!;
 
-            var globalOpts = parseResult.GetGlobalOptions();
+            GlobalOptions globalOpts = parseResult.GetGlobalOptions();
 
             try
             {
-                var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
+                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
                 if (globalOpts.Verbose)
                 {

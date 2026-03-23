@@ -10,6 +10,7 @@ using Shouldly;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Xunit;
+using System.Collections.ObjectModel;
 
 namespace FhirPkg.Tests;
 
@@ -36,7 +37,7 @@ public class FhirPackageManagerTests
     [Fact]
     public async Task InstallAsync_CachedPackage_ReturnsWithoutDownload()
     {
-        var expectedRecord = new PackageRecord
+        PackageRecord expectedRecord = new PackageRecord
         {
             Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
             DirectoryPath = "/cache/hl7.fhir.r4.core#4.0.1",
@@ -54,9 +55,9 @@ public class FhirPackageManagerTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(expectedRecord);
 
-        using var manager = CreateManager();
+        using FhirPackageManager manager = CreateManager();
 
-        var result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+        PackageRecord? result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 
         result.ShouldNotBeNull();
         result!.Reference.Name.ShouldBe("hl7.fhir.r4.core");
@@ -74,9 +75,9 @@ public class FhirPackageManagerTests
     [InlineData("   ")]
     public async Task InstallAsync_InvalidDirective_Throws(string? directive)
     {
-        using var manager = CreateManager();
+        using FhirPackageManager manager = CreateManager();
 
-        var act = () => manager.InstallAsync(directive!);
+        Func<Task<PackageRecord?>> act = () => manager.InstallAsync(directive!);
 
         await Should.ThrowAsync<ArgumentException>(act);
     }
@@ -84,7 +85,7 @@ public class FhirPackageManagerTests
     [Fact]
     public async Task ListCachedAsync_DelegatesToCache()
     {
-        var expectedRecords = new List<PackageRecord>
+        ReadOnlyCollection<PackageRecord> expectedRecords = new List<PackageRecord>
         {
             new()
             {
@@ -101,9 +102,9 @@ public class FhirPackageManagerTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(expectedRecords);
 
-        using var manager = CreateManager();
+        using FhirPackageManager manager = CreateManager();
 
-        var result = await manager.ListCachedAsync("hl7");
+        IReadOnlyList<PackageRecord> result = await manager.ListCachedAsync("hl7");
 
         result.Count.ShouldBe(1);
         result[0].Reference.Name.ShouldBe("hl7.fhir.r4.core");
@@ -112,19 +113,19 @@ public class FhirPackageManagerTests
     [Fact]
     public async Task InstallAsync_NotCached_ResolvesAndDownloads()
     {
-        var resolvedDirective = new ResolvedDirective
+        ResolvedDirective resolvedDirective = new ResolvedDirective
         {
             Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
             TarballUri = new Uri("https://packages.fhir.org/hl7.fhir.r4.core/4.0.1")
         };
 
-        var downloadResult = new PackageDownloadResult
+        PackageDownloadResult downloadResult = new PackageDownloadResult
         {
             Content = new MemoryStream([1, 2, 3]),
             ContentType = "application/gzip"
         };
 
-        var installedRecord = new PackageRecord
+        PackageRecord installedRecord = new PackageRecord
         {
             Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
             DirectoryPath = "/cache/hl7.fhir.r4.core#4.0.1",
@@ -153,9 +154,9 @@ public class FhirPackageManagerTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(installedRecord);
 
-        using var manager = CreateManager();
+        using FhirPackageManager manager = CreateManager();
 
-        var result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+        PackageRecord? result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 
         result.ShouldNotBeNull();
         result!.Reference.Version.ShouldBe("4.0.1");
@@ -173,9 +174,9 @@ public class FhirPackageManagerTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync((ResolvedDirective?)null);
 
-        using var manager = CreateManager();
+        using FhirPackageManager manager = CreateManager();
 
-        var result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+        PackageRecord? result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 
         result.ShouldBeNull();
     }
@@ -183,14 +184,14 @@ public class FhirPackageManagerTests
     [Fact]
     public async Task InstallAsync_ChecksumMismatch_ThrowsInvalidOperation()
     {
-        var resolvedDirective = new ResolvedDirective
+        ResolvedDirective resolvedDirective = new ResolvedDirective
         {
             Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
             TarballUri = new Uri("https://packages.fhir.org/hl7.fhir.r4.core/4.0.1"),
             Sha256Sum = "0000000000000000000000000000000000000000000000000000000000000000"
         };
 
-        var downloadResult = new PackageDownloadResult
+        PackageDownloadResult downloadResult = new PackageDownloadResult
         {
             Content = new MemoryStream([1, 2, 3]),
             ContentType = "application/gzip"
@@ -210,9 +211,9 @@ public class FhirPackageManagerTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(downloadResult);
 
-        using var manager = CreateManager();
+        using FhirPackageManager manager = CreateManager();
 
-        var act = () => manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+        Func<Task<PackageRecord?>> act = () => manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 
         await Should.ThrowAsync<InvalidOperationException>(act);
     }
@@ -220,19 +221,19 @@ public class FhirPackageManagerTests
     [Fact]
     public async Task InstallAsync_OverwriteExisting_Succeeds()
     {
-        var resolvedDirective = new ResolvedDirective
+        ResolvedDirective resolvedDirective = new ResolvedDirective
         {
             Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
             TarballUri = new Uri("https://packages.fhir.org/hl7.fhir.r4.core/4.0.1")
         };
 
-        var downloadResult = new PackageDownloadResult
+        PackageDownloadResult downloadResult = new PackageDownloadResult
         {
             Content = new MemoryStream([1, 2, 3]),
             ContentType = "application/gzip"
         };
 
-        var installedRecord = new PackageRecord
+        PackageRecord installedRecord = new PackageRecord
         {
             Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
             DirectoryPath = "/cache/hl7.fhir.r4.core#4.0.1",
@@ -261,9 +262,9 @@ public class FhirPackageManagerTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(installedRecord);
 
-        using var manager = CreateManager();
+        using FhirPackageManager manager = CreateManager();
 
-        var result = await manager.InstallAsync(
+        PackageRecord? result = await manager.InstallAsync(
             "hl7.fhir.r4.core#4.0.1",
             new InstallOptions { OverwriteExisting = true });
 
@@ -279,10 +280,10 @@ public class FhirPackageManagerTests
     [Fact]
     public async Task RestoreAsync_MissingManifest_ThrowsFileNotFound()
     {
-        using var manager = CreateManager();
-        var nonexistentPath = Path.Combine(Path.GetTempPath(), $"nonexistent-{Guid.NewGuid():N}");
+        using FhirPackageManager manager = CreateManager();
+        string nonexistentPath = Path.Combine(Path.GetTempPath(), $"nonexistent-{Guid.NewGuid():N}");
 
-        var act = () => manager.RestoreAsync(nonexistentPath);
+        Func<Task<PackageClosure>> act = () => manager.RestoreAsync(nonexistentPath);
 
         await Should.ThrowAsync<FileNotFoundException>(act);
     }

@@ -76,11 +76,11 @@ public class DependencyResolver : IDependencyResolver
 
         options ??= new DependencyResolveOptions();
 
-        var resolved = new Dictionary<string, PackageReference>(StringComparer.OrdinalIgnoreCase);
-        var missing = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, PackageReference> resolved = new Dictionary<string, PackageReference>(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> missing = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        var dependencies = rootManifest.Dependencies ?? new Dictionary<string, string>();
+        IReadOnlyDictionary<string, string> dependencies = rootManifest.Dependencies ?? new Dictionary<string, string>();
 
         _logger.LogInformation(
             "Resolving dependencies for '{PackageName}@{PackageVersion}' ({DependencyCount} direct dependencies).",
@@ -114,21 +114,21 @@ public class DependencyResolver : IDependencyResolver
     {
         ArgumentNullException.ThrowIfNull(lockFile);
 
-        var resolved = new Dictionary<string, PackageReference>(StringComparer.OrdinalIgnoreCase);
-        var missing = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, PackageReference> resolved = new Dictionary<string, PackageReference>(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> missing = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         _logger.LogInformation(
             "Restoring {Count} locked dependencies from lock file (updated {Updated:O}).",
             lockFile.Dependencies.Count, lockFile.Updated);
 
-        foreach (var (packageId, version) in lockFile.Dependencies)
+        foreach ((string? packageId, string? version) in lockFile.Dependencies)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var reference = new PackageReference(packageId, version);
+            PackageReference reference = new PackageReference(packageId, version);
 
             // Check if the package is already in the local cache
-            var isCached = await _cache.IsInstalledAsync(reference, cancellationToken).ConfigureAwait(false);
+            bool isCached = await _cache.IsInstalledAsync(reference, cancellationToken).ConfigureAwait(false);
             if (isCached)
             {
                 _logger.LogDebug("Package '{PackageId}@{Version}' found in cache.", packageId, version);
@@ -137,12 +137,12 @@ public class DependencyResolver : IDependencyResolver
             }
 
             // Not cached — try to resolve and mark for download by the orchestrator
-            var resolvedVersion = await _versionResolver.ResolveVersionAsync(
+            FhirSemVer? resolvedVersion = await _versionResolver.ResolveVersionAsync(
                 packageId, version, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (resolvedVersion is not null)
             {
-                var resolvedRef = new PackageReference(packageId, resolvedVersion.ToString());
+                PackageReference resolvedRef = new PackageReference(packageId, resolvedVersion.ToString());
                 resolved[packageId] = resolvedRef;
 
                 _logger.LogDebug(
@@ -161,7 +161,7 @@ public class DependencyResolver : IDependencyResolver
         // Also include any packages that were missing in the original lock file
         if (lockFile.Missing is not null)
         {
-            foreach (var (packageId, versionConstraint) in lockFile.Missing)
+            foreach ((string? packageId, string? versionConstraint) in lockFile.Missing)
             {
                 if (!resolved.ContainsKey(packageId) && !missing.ContainsKey(packageId))
                 {
@@ -202,17 +202,17 @@ public class DependencyResolver : IDependencyResolver
             return;
         }
 
-        foreach (var (rawPackageId, rawVersionSpec) in dependencies)
+        foreach ((string? rawPackageId, string? rawVersionSpec) in dependencies)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             // Apply known fixups (e.g. hl7.fhir.r4.core@4.0.0 → 4.0.1)
-            var fixedRef = PackageFixups.Apply(new PackageReference(rawPackageId, rawVersionSpec));
-            var packageId = fixedRef.Name;
-            var versionSpec = fixedRef.Version ?? "latest";
+            PackageReference fixedRef = PackageFixups.Apply(new PackageReference(rawPackageId, rawVersionSpec));
+            string packageId = fixedRef.Name;
+            string versionSpec = fixedRef.Version ?? "latest";
 
             // Circular dependency detection
-            var visitKey = $"{packageId}@{versionSpec}";
+            string visitKey = $"{packageId}@{versionSpec}";
             if (!visited.Add(visitKey))
             {
                 _logger.LogDebug("Skipping already-visited dependency '{VisitKey}'.", visitKey);
@@ -220,13 +220,13 @@ public class DependencyResolver : IDependencyResolver
             }
 
             // Resolve the version specifier
-            var versionResolveOptions = new VersionResolveOptions
+            VersionResolveOptions versionResolveOptions = new VersionResolveOptions
             {
                 AllowPreRelease = options.AllowPreRelease,
                 FhirRelease = options.PreferredFhirRelease,
             };
 
-            var resolvedVersion = await _versionResolver.ResolveVersionAsync(
+            FhirSemVer? resolvedVersion = await _versionResolver.ResolveVersionAsync(
                 packageId, versionSpec, versionResolveOptions, cancellationToken).ConfigureAwait(false);
 
             if (resolvedVersion is null)
@@ -242,12 +242,12 @@ public class DependencyResolver : IDependencyResolver
                 continue;
             }
 
-            var resolvedRef = new PackageReference(packageId, resolvedVersion.ToString());
+            PackageReference resolvedRef = new PackageReference(packageId, resolvedVersion.ToString());
 
             // Handle version conflicts
-            if (resolved.TryGetValue(packageId, out var existingRef))
+            if (resolved.TryGetValue(packageId, out PackageReference existingRef))
             {
-                var winner = ResolveConflict(existingRef, resolvedRef, options.ConflictStrategy);
+                PackageReference? winner = ResolveConflict(existingRef, resolvedRef, options.ConflictStrategy);
                 if (winner is null)
                 {
                     // Error strategy — record conflict as missing
@@ -282,7 +282,7 @@ public class DependencyResolver : IDependencyResolver
             }
 
             // Recurse into this package's own dependencies
-            var transitiveDeps = await GetTransitiveDependenciesAsync(
+            IReadOnlyDictionary<string, string>? transitiveDeps = await GetTransitiveDependenciesAsync(
                 resolvedRef, cancellationToken).ConfigureAwait(false);
 
             if (transitiveDeps is not null && transitiveDeps.Count > 0)
@@ -326,13 +326,13 @@ public class DependencyResolver : IDependencyResolver
     /// </summary>
     private static PackageReference PickHighestVersion(PackageReference a, PackageReference b)
     {
-        var verA = TryParseSemVer(a.Version);
-        var verB = TryParseSemVer(b.Version);
+        FhirSemVer? verA = TryParseSemVer(a.Version);
+        FhirSemVer? verB = TryParseSemVer(b.Version);
 
         if (verA is null) return b;
         if (verB is null) return a;
 
-        var cmp = verA.CompareTo(verB);
+        int cmp = verA.CompareTo(verB);
         return cmp >= 0 ? a : b;
     }
 
@@ -345,17 +345,17 @@ public class DependencyResolver : IDependencyResolver
         CancellationToken cancellationToken)
     {
         // First try reading from cache
-        var manifest = await _cache.ReadManifestAsync(reference, cancellationToken).ConfigureAwait(false);
+        PackageManifest? manifest = await _cache.ReadManifestAsync(reference, cancellationToken).ConfigureAwait(false);
         if (manifest?.Dependencies is not null)
             return manifest.Dependencies;
 
         // Fall back to registry metadata
-        var listing = await _registryClient.GetPackageListingAsync(reference.Name, cancellationToken)
+        PackageListing? listing = await _registryClient.GetPackageListingAsync(reference.Name, cancellationToken)
             .ConfigureAwait(false);
 
         if (listing is not null &&
             reference.Version is not null &&
-            listing.Versions.TryGetValue(reference.Version, out var versionInfo))
+            listing.Versions.TryGetValue(reference.Version, out PackageVersionInfo? versionInfo))
         {
             return versionInfo.Dependencies;
         }
@@ -372,6 +372,6 @@ public class DependencyResolver : IDependencyResolver
         if (string.IsNullOrWhiteSpace(version))
             return null;
 
-        return FhirSemVer.TryParse(version, out var result) ? result : null;
+        return FhirSemVer.TryParse(version, out FhirSemVer? result) ? result : null;
     }
 }

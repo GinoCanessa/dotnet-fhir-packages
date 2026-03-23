@@ -19,38 +19,38 @@ internal static class SearchCommand
     /// <returns>A fully configured <see cref="Command"/> for the search subcommand.</returns>
     public static Command Build()
     {
-        var nameOption = new Option<string?>("--name", "-n")
+        Option<string?> nameOption = new Option<string?>("--name", "-n")
         {
             Description = "Package name prefix to search for."
         };
 
-        var canonicalOption = new Option<string?>("--canonical")
+        Option<string?> canonicalOption = new Option<string?>("--canonical")
         {
             Description = "Filter by implementation guide canonical URL."
         };
 
-        var fhirVersionOption = new Option<string?>("--fhir-version", "-f")
+        Option<string?> fhirVersionOption = new Option<string?>("--fhir-version", "-f")
         {
             Description = "Filter by FHIR version (R4, R4B, R5, R6)."
         };
 
-        var sortOption = new Option<string?>("--sort", "-s")
+        Option<string?> sortOption = new Option<string?>("--sort", "-s")
         {
             Description = "Sort results by: name, date, version."
         };
 
-        var limitOption = new Option<int>("--limit")
+        Option<int> limitOption = new Option<int>("--limit")
         {
             Description = "Maximum number of results to return.",
             DefaultValueFactory = _ => 50
         };
 
-        var registryOption = new Option<string?>("--registry", "-r")
+        Option<string?> registryOption = new Option<string?>("--registry", "-r")
         {
             Description = "Custom registry URL to search."
         };
 
-        var command = new Command("search", "Search FHIR package registries.")
+        Command command = new Command("search", "Search FHIR package registries.")
         {
             nameOption,
             canonicalOption,
@@ -62,18 +62,18 @@ internal static class SearchCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var name = parseResult.GetValue(nameOption);
-            var canonical = parseResult.GetValue(canonicalOption);
-            var fhirVersion = parseResult.GetValue(fhirVersionOption);
-            var sort = parseResult.GetValue(sortOption);
-            var limit = parseResult.GetValue(limitOption);
-            var registry = parseResult.GetValue(registryOption);
+            string? name = parseResult.GetValue(nameOption);
+            string? canonical = parseResult.GetValue(canonicalOption);
+            string? fhirVersion = parseResult.GetValue(fhirVersionOption);
+            string? sort = parseResult.GetValue(sortOption);
+            int limit = parseResult.GetValue(limitOption);
+            string? registry = parseResult.GetValue(registryOption);
 
-            var globalOpts = parseResult.GetGlobalOptions();
+            GlobalOptions globalOpts = parseResult.GetGlobalOptions();
 
             try
             {
-                var mgrOptions = globalOpts.BuildManagerOptions();
+                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
 
                 if (registry is not null)
                 {
@@ -84,9 +84,9 @@ internal static class SearchCommand
                     });
                 }
 
-                var manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
-                var criteria = new PackageSearchCriteria
+                PackageSearchCriteria criteria = new PackageSearchCriteria
                 {
                     Name = name,
                     Canonical = canonical,

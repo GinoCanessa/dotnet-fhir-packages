@@ -13,9 +13,9 @@ public class PackageFixupsTests
     [Fact]
     public void Apply_R4Core400_UpgradesTo401()
     {
-        var reference = new PackageReference("hl7.fhir.r4.core", "4.0.0");
+        PackageReference reference = new PackageReference("hl7.fhir.r4.core", "4.0.0");
 
-        var result = PackageFixups.Apply(reference);
+        PackageReference result = PackageFixups.Apply(reference);
 
         result.Name.ShouldBe("hl7.fhir.r4.core");
         result.Version.ShouldBe("4.0.1");
@@ -24,9 +24,9 @@ public class PackageFixupsTests
     [Fact]
     public void Apply_R4bSnapshot_UpgradesTo430()
     {
-        var reference = new PackageReference("hl7.fhir.r4b.core", "4.3.0-snapshot1");
+        PackageReference reference = new PackageReference("hl7.fhir.r4b.core", "4.3.0-snapshot1");
 
-        var result = PackageFixups.Apply(reference);
+        PackageReference result = PackageFixups.Apply(reference);
 
         result.Name.ShouldBe("hl7.fhir.r4b.core");
         result.Version.ShouldBe("4.3.0");
@@ -35,9 +35,9 @@ public class PackageFixupsTests
     [Fact]
     public void Apply_UnknownPackage_NoChange()
     {
-        var reference = new PackageReference("some.random.package", "1.0.0");
+        PackageReference reference = new PackageReference("some.random.package", "1.0.0");
 
-        var result = PackageFixups.Apply(reference);
+        PackageReference result = PackageFixups.Apply(reference);
 
         result.Name.ShouldBe("some.random.package");
         result.Version.ShouldBe("1.0.0");
@@ -46,9 +46,9 @@ public class PackageFixupsTests
     [Fact]
     public void Apply_CiBuildSuffix_Stripped()
     {
-        var reference = new PackageReference("hl7.fhir.us.core", "6.1.0-cibuild");
+        PackageReference reference = new PackageReference("hl7.fhir.us.core", "6.1.0-cibuild");
 
-        var result = PackageFixups.Apply(reference);
+        PackageReference result = PackageFixups.Apply(reference);
 
         result.Version.ShouldBe("6.1.0");
     }
@@ -56,9 +56,9 @@ public class PackageFixupsTests
     [Fact]
     public void Apply_NoVersion_NoChange()
     {
-        var reference = new PackageReference("hl7.fhir.r4.core");
+        PackageReference reference = new PackageReference("hl7.fhir.r4.core");
 
-        var result = PackageFixups.Apply(reference);
+        PackageReference result = PackageFixups.Apply(reference);
 
         result.Version.ShouldBeNull();
     }
@@ -66,9 +66,9 @@ public class PackageFixupsTests
     [Fact]
     public void Apply_UvExtensionsR4_RemapsName()
     {
-        var reference = new PackageReference("hl7.fhir.uv.extensions", "1.0.0");
+        PackageReference reference = new PackageReference("hl7.fhir.uv.extensions", "1.0.0");
 
-        var result = PackageFixups.Apply(reference);
+        PackageReference result = PackageFixups.Apply(reference);
 
         result.Name.ShouldBe("hl7.fhir.uv.extensions.r4");
     }
@@ -76,9 +76,9 @@ public class PackageFixupsTests
     [Fact]
     public void Apply_UvExtensionsR5_RemapsName()
     {
-        var reference = new PackageReference("hl7.fhir.uv.extensions", "5.1.0");
+        PackageReference reference = new PackageReference("hl7.fhir.uv.extensions", "5.1.0");
 
-        var result = PackageFixups.Apply(reference);
+        PackageReference result = PackageFixups.Apply(reference);
 
         result.Name.ShouldBe("hl7.fhir.uv.extensions.r5");
     }
@@ -86,9 +86,9 @@ public class PackageFixupsTests
     [Fact]
     public void Apply_AlreadyCorrectVersion_SameReference()
     {
-        var reference = new PackageReference("hl7.fhir.r4.core", "4.0.1");
+        PackageReference reference = new PackageReference("hl7.fhir.r4.core", "4.0.1");
 
-        var result = PackageFixups.Apply(reference);
+        PackageReference result = PackageFixups.Apply(reference);
 
         // Since nothing changed, should return the same struct
         result.ShouldBe(reference);

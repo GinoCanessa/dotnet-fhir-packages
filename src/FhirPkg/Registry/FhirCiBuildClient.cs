@@ -135,10 +135,10 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     {
         ArgumentNullException.ThrowIfNull(resolved);
 
-        var url = resolved.TarballUri.ToString();
+        string url = resolved.TarballUri.ToString();
         Logger.LogInformation("Downloading CI build tarball from {Url}", url);
 
-        var response = await GetResponseAsync(url, cancellationToken).ConfigureAwait(false);
+        HttpResponseMessage? response = await GetResponseAsync(url, cancellationToken).ConfigureAwait(false);
 
         if (response is null)
         {
@@ -207,23 +207,23 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     private async Task<ResolvedDirective?> ResolveIgPackageAsync(
         PackageDirective directive, CancellationToken cancellationToken)
     {
-        var records = await GetQasRecordsAsync(cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<CiBuildRecord> records = await GetQasRecordsAsync(cancellationToken).ConfigureAwait(false);
 
-        var matching = records.Where(r =>
+        IEnumerable<CiBuildRecord> matching = records.Where(r =>
             string.Equals(r.PackageId, directive.PackageId, StringComparison.OrdinalIgnoreCase));
 
         if (directive.VersionType is VersionType.CiBuildBranch && directive.CiBranch is not null)
         {
             matching = matching.Where(r =>
             {
-                var parsed = r.ParseRepo();
+                (string Org, string RepoName, string Branch)? parsed = r.ParseRepo();
                 if (parsed is null) return false;
-                var (_, _, branch) = parsed.Value;
+                (string _, string _, string? branch) = parsed.Value;
                 return string.Equals(branch, directive.CiBranch, StringComparison.OrdinalIgnoreCase);
             });
         }
 
-        var newest = matching
+        CiBuildRecord? newest = matching
             .OrderByDescending(r => r.DateISO8601 ?? r.Date)
             .FirstOrDefault();
 
@@ -233,14 +233,14 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
             return null;
         }
 
-        var repoParsed = newest.ParseRepo();
+        (string Org, string RepoName, string Branch)? repoParsed = newest.ParseRepo();
         if (repoParsed is null)
         {
             Logger.LogWarning("Unable to parse repo field for CI build record of {PackageId}", directive.PackageId);
             return null;
         }
 
-        var (org, repo, _) = repoParsed.Value;
+        (string? org, string? repo, string _) = repoParsed.Value;
         string tarballUrl;
 
         if (directive.VersionType is VersionType.CiBuildBranch && directive.CiBranch is not null)
@@ -286,8 +286,8 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
 
             Logger.LogInformation("Downloading qas.json from {BaseUrl}", BaseUrl);
 
-            var url = $"{BaseUrl}/ig/qas.json";
-            var records = await GetJsonAsync<List<CiBuildRecord>>(url, cancellationToken)
+            string url = $"{BaseUrl}/ig/qas.json";
+            List<CiBuildRecord>? records = await GetJsonAsync<List<CiBuildRecord>>(url, cancellationToken)
                 .ConfigureAwait(false);
 
             _qasCache = records?.AsReadOnly() ?? (IReadOnlyList<CiBuildRecord>)[];
@@ -312,7 +312,7 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
             return null;
 
         return DateTime.TryParse(dateString, System.Globalization.CultureInfo.InvariantCulture,
-            System.Globalization.DateTimeStyles.RoundtripKind, out var result)
+            System.Globalization.DateTimeStyles.RoundtripKind, out DateTime result)
             ? result
             : null;
     }

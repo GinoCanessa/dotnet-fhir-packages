@@ -2,6 +2,7 @@
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
 using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
 using System.Text.Json;
 
 using Microsoft.Extensions.Logging;
@@ -82,7 +83,7 @@ public class PackageIndexer : IPackageIndexer
         // Try reading existing .index.json unless force reindex is requested
         if (!options.ForceReindex)
         {
-            var existingIndex = await TryReadExistingIndexAsync(packageContentPath, cancellationToken)
+            PackageIndex? existingIndex = await TryReadExistingIndexAsync(packageContentPath, cancellationToken)
                 .ConfigureAwait(false);
             if (existingIndex is not null)
             {
@@ -94,7 +95,7 @@ public class PackageIndexer : IPackageIndexer
 
         // Build a new index by scanning all .json files in the directory
         _logger.LogInformation("Generating index for package at '{Path}'.", packageContentPath);
-        var index = await BuildIndexAsync(packageContentPath, cancellationToken).ConfigureAwait(false);
+        PackageIndex index = await BuildIndexAsync(packageContentPath, cancellationToken).ConfigureAwait(false);
 
         RegisterIndex(packageContentPath, index);
 
@@ -117,7 +118,7 @@ public class PackageIndexer : IPackageIndexer
         // Key filter: match by canonical URL or resource type
         if (!string.IsNullOrEmpty(criteria.Key))
         {
-            var key = criteria.Key;
+            string key = criteria.Key;
             results = results.Where(r =>
                 string.Equals(r.Url, key, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(r.ResourceType, key, StringComparison.OrdinalIgnoreCase));
@@ -126,14 +127,14 @@ public class PackageIndexer : IPackageIndexer
         // Resource type filter
         if (criteria.ResourceTypes is { Count: > 0 })
         {
-            var types = new HashSet<string>(criteria.ResourceTypes, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> types = new HashSet<string>(criteria.ResourceTypes, StringComparer.OrdinalIgnoreCase);
             results = results.Where(r => types.Contains(r.ResourceType));
         }
 
         // SD flavor filter
         if (criteria.SdFlavors is { Count: > 0 })
         {
-            var flavors = new HashSet<string>(criteria.SdFlavors, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> flavors = new HashSet<string>(criteria.SdFlavors, StringComparer.OrdinalIgnoreCase);
             results = results.Where(r => r.SdFlavor is not null && flavors.Contains(r.SdFlavor));
         }
 
@@ -183,14 +184,14 @@ public class PackageIndexer : IPackageIndexer
         string packageContentPath,
         CancellationToken cancellationToken)
     {
-        var indexPath = Path.Combine(packageContentPath, IndexFileName);
+        string indexPath = Path.Combine(packageContentPath, IndexFileName);
         if (!File.Exists(indexPath))
             return null;
 
         try
         {
-            await using var stream = File.OpenRead(indexPath);
-            var index = await JsonSerializer.DeserializeAsync<PackageIndex>(stream, s_readOptions, cancellationToken)
+            await using FileStream stream = File.OpenRead(indexPath);
+            PackageIndex? index = await JsonSerializer.DeserializeAsync<PackageIndex>(stream, s_readOptions, cancellationToken)
                 .ConfigureAwait(false);
             return index;
         }
@@ -209,14 +210,14 @@ public class PackageIndexer : IPackageIndexer
         string packageContentPath,
         CancellationToken cancellationToken)
     {
-        var entries = new List<ResourceIndexEntry>();
-        var jsonFiles = Directory.GetFiles(packageContentPath, "*.json", SearchOption.TopDirectoryOnly);
+        List<ResourceIndexEntry> entries = new List<ResourceIndexEntry>();
+        string[] jsonFiles = Directory.GetFiles(packageContentPath, "*.json", SearchOption.TopDirectoryOnly);
 
-        foreach (var filePath in jsonFiles)
+        foreach (string filePath in jsonFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var fileName = Path.GetFileName(filePath);
+            string fileName = Path.GetFileName(filePath);
 
             // Skip the index file itself, package.json, and hidden files
             if (fileName.StartsWith('.') ||
@@ -225,7 +226,7 @@ public class PackageIndexer : IPackageIndexer
                 continue;
             }
 
-            var entry = await TryIndexFileAsync(filePath, fileName, cancellationToken).ConfigureAwait(false);
+            ResourceIndexEntry? entry = await TryIndexFileAsync(filePath, fileName, cancellationToken).ConfigureAwait(false);
             if (entry is not null)
             {
                 entries.Add(entry);
@@ -253,24 +254,24 @@ public class PackageIndexer : IPackageIndexer
     {
         try
         {
-            await using var stream = File.OpenRead(filePath);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken)
+            await using FileStream stream = File.OpenRead(filePath);
+            using JsonDocument doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
 
-            var root = doc.RootElement;
+            JsonElement root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 return null;
 
-            var resourceType = GetStringProperty(root, "resourceType");
+            string? resourceType = GetStringProperty(root, "resourceType");
             if (string.IsNullOrEmpty(resourceType))
                 return null;
 
-            var id = GetStringProperty(root, "id");
-            var url = GetStringProperty(root, "url");
-            var version = GetStringProperty(root, "version");
-            var name = GetStringProperty(root, "name");
-            var title = GetStringProperty(root, "title");
-            var description = GetStringProperty(root, "description");
+            string? id = GetStringProperty(root, "id");
+            string? url = GetStringProperty(root, "url");
+            string? version = GetStringProperty(root, "version");
+            string? name = GetStringProperty(root, "name");
+            string? title = GetStringProperty(root, "title");
+            string? description = GetStringProperty(root, "description");
 
             // StructureDefinition-specific fields
             string? sdKind = null;
@@ -383,10 +384,10 @@ public class PackageIndexer : IPackageIndexer
     /// </summary>
     private void RegisterIndex(string packageContentPath, PackageIndex index)
     {
-        var (packageName, packageVersion) = ExtractPackageIdentity(packageContentPath);
-        var key = packageVersion is not null ? $"{packageName}#{packageVersion}" : packageContentPath;
+        (string? packageName, string? packageVersion) = ExtractPackageIdentity(packageContentPath);
+        string key = packageVersion is not null ? $"{packageName}#{packageVersion}" : packageContentPath;
 
-        var resources = index.Files.Select(entry => new ResourceInfo
+        ReadOnlyCollection<ResourceInfo> resources = index.Files.Select(entry => new ResourceInfo
         {
             ResourceType = entry.ResourceType,
             Id = entry.Id,
@@ -411,11 +412,11 @@ public class PackageIndexer : IPackageIndexer
     private static (string? PackageName, string? PackageVersion) ExtractPackageIdentity(string contentPath)
     {
         // Walk up from the package/ directory to the parent (name#version)
-        var directoryName = Path.GetFileName(Path.GetDirectoryName(contentPath));
+        string? directoryName = Path.GetFileName(Path.GetDirectoryName(contentPath));
         if (string.IsNullOrEmpty(directoryName))
             return (null, null);
 
-        var hashIndex = directoryName.IndexOf('#');
+        int hashIndex = directoryName.IndexOf('#');
         if (hashIndex <= 0)
             return (directoryName, null);
 
@@ -429,11 +430,11 @@ public class PackageIndexer : IPackageIndexer
     private static IEnumerable<ResourceInfo> ApplyPackageScopeFilter(
         IEnumerable<ResourceInfo> results, string packageScope)
     {
-        var hashIndex = packageScope.IndexOf('#');
+        int hashIndex = packageScope.IndexOf('#');
         if (hashIndex > 0)
         {
-            var name = packageScope[..hashIndex];
-            var version = packageScope[(hashIndex + 1)..];
+            string name = packageScope[..hashIndex];
+            string version = packageScope[(hashIndex + 1)..];
             return results.Where(r =>
                 string.Equals(r.PackageName, name, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(r.PackageVersion, version, StringComparison.OrdinalIgnoreCase));
@@ -449,7 +450,7 @@ public class PackageIndexer : IPackageIndexer
     /// </summary>
     private static string? GetStringProperty(JsonElement element, string propertyName)
     {
-        return element.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String
+        return element.TryGetProperty(propertyName, out JsonElement prop) && prop.ValueKind == JsonValueKind.String
             ? prop.GetString()
             : null;
     }
@@ -460,7 +461,7 @@ public class PackageIndexer : IPackageIndexer
     /// </summary>
     private static bool? GetBoolProperty(JsonElement element, string propertyName)
     {
-        if (element.TryGetProperty(propertyName, out var prop))
+        if (element.TryGetProperty(propertyName, out JsonElement prop))
         {
             if (prop.ValueKind == JsonValueKind.True) return true;
             if (prop.ValueKind == JsonValueKind.False) return false;

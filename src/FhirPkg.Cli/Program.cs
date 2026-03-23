@@ -22,8 +22,8 @@ internal static class Program
     /// <returns>Process exit code.</returns>
     public static async Task<int> Main(string[] args)
     {
-        var rootCommand = BuildRootCommand();
-        var parseResult = rootCommand.Parse(args);
+        RootCommand rootCommand = BuildRootCommand();
+        ParseResult parseResult = rootCommand.Parse(args);
         return await parseResult.InvokeAsync(new InvocationConfiguration(), CancellationToken.None);
     }
 
@@ -33,41 +33,41 @@ internal static class Program
     /// <returns>A fully configured <see cref="RootCommand"/>.</returns>
     internal static RootCommand BuildRootCommand()
     {
-        var rootCommand = new RootCommand(
+        RootCommand rootCommand = new RootCommand(
             "fhir-pkg — CLI tool for managing FHIR packages: install, restore, list, search, and cache management.");
 
         // Global options (Recursive = true makes them available to all subcommands)
-        var cachePathOption = new Option<string?>("--package-cache-folder")
+        Option<string?> cachePathOption = new Option<string?>("--package-cache-folder")
         {
             Description = "Path to the local FHIR package cache directory.",
             DefaultValueFactory = _ => Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER"),
             Recursive = true
         };
 
-        var verboseOption = new Option<bool>("--verbose", "-v")
+        Option<bool> verboseOption = new Option<bool>("--verbose", "-v")
         {
             Description = "Enable verbose output.",
-            DefaultValueFactory = _ => IsTruthy(Environment.GetEnvironmentVariable("FHIR_PKG_VERBOSE")),
+            DefaultValueFactory = _ => isTruthy(Environment.GetEnvironmentVariable("FHIR_PKG_VERBOSE")),
             Recursive = true
         };
 
-        var quietOption = new Option<bool>("--quiet", "-q")
+        Option<bool> quietOption = new Option<bool>("--quiet", "-q")
         {
             Description = "Suppress all non-essential output.",
             Recursive = true
         };
 
-        var noColorOption = new Option<bool>("--no-color")
+        Option<bool> noColorOption = new Option<bool>("--no-color")
         {
             Description = "Disable colored output.",
-            DefaultValueFactory = _ => IsTruthy(Environment.GetEnvironmentVariable("NO_COLOR")),
+            DefaultValueFactory = _ => isTruthy(Environment.GetEnvironmentVariable("NO_COLOR")),
             Recursive = true
         };
 
-        var jsonOption = new Option<bool>("--json")
+        Option<bool> jsonOption = new Option<bool>("--json")
         {
             Description = "Output results as JSON for machine consumption.",
-            DefaultValueFactory = _ => IsTruthy(Environment.GetEnvironmentVariable("FHIR_PKG_JSON")),
+            DefaultValueFactory = _ => isTruthy(Environment.GetEnvironmentVariable("FHIR_PKG_JSON")),
             Recursive = true
         };
 
@@ -98,7 +98,7 @@ internal static class Program
         return rootCommand;
     }
 
-    private static bool IsTruthy(string? value) =>
+    private static bool isTruthy(string? value) =>
         value is "1" ||
         string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
@@ -168,13 +168,13 @@ internal sealed record GlobalOptions
     /// <returns>A configured <see cref="FhirPackageManagerOptions"/> instance.</returns>
     public FhirPackageManagerOptions BuildManagerOptions()
     {
-        var options = new FhirPackageManagerOptions();
+        FhirPackageManagerOptions options = new FhirPackageManagerOptions();
 
         // Load optional config file (current directory first, then home directory)
-        var configFromFile = LoadConfigFile();
+        ConfigFile? configFromFile = loadConfigFile();
         if (configFromFile is not null)
         {
-            MergeConfig(options, configFromFile);
+            mergeConfig(options, configFromFile);
         }
 
         // CLI flags take precedence over config file
@@ -186,27 +186,29 @@ internal sealed record GlobalOptions
         return options;
     }
 
-    private static ConfigFile? LoadConfigFile()
+    private static ConfigFile? loadConfigFile()
     {
-        var candidates = new[]
-        {
+        string[] candidates =
+        [
             Path.Combine(Directory.GetCurrentDirectory(), ".fhir-pkg.json"),
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".fhir-pkg.json")
+        ];
+
+        JsonSerializerOptions jso = new()
+        {
+            PropertyNameCaseInsensitive = true
         };
 
-        foreach (var path in candidates)
+        foreach (string? path in candidates)
         {
             if (!File.Exists(path)) continue;
 
             try
             {
-                var json = File.ReadAllText(path);
-                return JsonSerializer.Deserialize<ConfigFile>(json, new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                });
+                string json = File.ReadAllText(path);
+                return JsonSerializer.Deserialize<ConfigFile>(json, jso);
             }
             catch (Exception ex)
             {
@@ -218,7 +220,7 @@ internal sealed record GlobalOptions
         return null;
     }
 
-    private static void MergeConfig(FhirPackageManagerOptions target, ConfigFile config)
+    private static void mergeConfig(FhirPackageManagerOptions target, ConfigFile config)
     {
         if (config.CachePath is not null)
         {
@@ -243,11 +245,11 @@ internal sealed record GlobalOptions
         if (config.Registries is { Count: > 0 })
         {
             target.Registries.Clear();
-            foreach (var reg in config.Registries)
+            foreach (ConfigRegistry reg in config.Registries)
             {
                 if (reg.Url is null) continue;
 
-                _ = Enum.TryParse<RegistryType>(reg.Type, ignoreCase: true, out var regType);
+                _ = Enum.TryParse<RegistryType>(reg.Type, ignoreCase: true, out RegistryType regType);
                 target.Registries.Add(new RegistryEndpoint
                 {
                     Url = reg.Url,
@@ -356,7 +358,7 @@ internal static class ParseResultExtensions
     /// <returns>A populated <see cref="GlobalOptions"/> record.</returns>
     public static GlobalOptions GetGlobalOptions(this ParseResult parseResult)
     {
-        var noColor = parseResult.GetValue(GlobalOptionsBinder.NoColorOption);
+        bool noColor = parseResult.GetValue(GlobalOptionsBinder.NoColorOption);
         if (noColor)
         {
             // Disable Spectre.Console ANSI formatting

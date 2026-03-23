@@ -81,26 +81,26 @@ public class DiskPackageCache : IPackageCache, IDisposable
     public Task<bool> IsInstalledAsync(PackageReference reference, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
-        var contentPath = GetContentPath(reference);
+        string contentPath = GetContentPath(reference);
         return Task.FromResult(Directory.Exists(contentPath));
     }
 
     /// <inheritdoc />
     public async Task<PackageRecord?> GetPackageAsync(PackageReference reference, CancellationToken ct = default)
     {
-        var contentPath = GetContentPath(reference);
+        string contentPath = GetContentPath(reference);
         if (!Directory.Exists(contentPath))
             return null;
 
-        var manifest = await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false);
+        PackageManifest? manifest = await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false);
         if (manifest is null)
             return null;
 
-        var directoryPath = GetPackageDirectoryPath(reference);
-        var metadata = await GetMetadataAsync(ct).ConfigureAwait(false);
-        var directive = reference.FhirDirective;
+        string directoryPath = GetPackageDirectoryPath(reference);
+        CacheMetadata metadata = await GetMetadataAsync(ct).ConfigureAwait(false);
+        string directive = reference.FhirDirective;
 
-        metadata.Packages.TryGetValue(directive, out var entry);
+        metadata.Packages.TryGetValue(directive, out CacheMetadataEntry? entry);
 
         return new PackageRecord
         {
@@ -125,21 +125,21 @@ public class DiskPackageCache : IPackageCache, IDisposable
             return [];
 
         // Read metadata once for all packages instead of per-directory
-        var metadata = await GetMetadataAsync(ct).ConfigureAwait(false);
-        var results = new List<PackageRecord>();
+        CacheMetadata metadata = await GetMetadataAsync(ct).ConfigureAwait(false);
+        List<PackageRecord> results = new List<PackageRecord>();
 
         // Find all directories matching the name#version pattern
-        foreach (var dir in Directory.GetDirectories(CacheDirectory, $"*{DirectorySeparator}*"))
+        foreach (string dir in Directory.GetDirectories(CacheDirectory, $"*{DirectorySeparator}*"))
         {
             ct.ThrowIfCancellationRequested();
 
-            var dirName = Path.GetFileName(dir);
-            var separatorIndex = dirName.IndexOf(DirectorySeparator, StringComparison.Ordinal);
+            string dirName = Path.GetFileName(dir);
+            int separatorIndex = dirName.IndexOf(DirectorySeparator, StringComparison.Ordinal);
             if (separatorIndex <= 0)
                 continue;
 
-            var name = dirName[..separatorIndex];
-            var version = dirName[(separatorIndex + 1)..];
+            string name = dirName[..separatorIndex];
+            string version = dirName[(separatorIndex + 1)..];
 
             // Apply filters
             if (packageIdFilter is not null
@@ -150,17 +150,17 @@ public class DiskPackageCache : IPackageCache, IDisposable
                 && !string.Equals(version, versionFilter, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            var reference = new PackageReference(name, version);
-            var contentPath = GetContentPath(reference);
+            PackageReference reference = new PackageReference(name, version);
+            string contentPath = GetContentPath(reference);
             if (!Directory.Exists(contentPath))
                 continue;
 
-            var manifest = await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false);
+            PackageManifest? manifest = await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false);
             if (manifest is null)
                 continue;
 
-            var directive = reference.FhirDirective;
-            metadata.Packages.TryGetValue(directive, out var entry);
+            string directive = reference.FhirDirective;
+            metadata.Packages.TryGetValue(directive, out CacheMetadataEntry? entry);
 
             results.Add(new PackageRecord
             {
@@ -214,7 +214,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
             // Verify now resets position by default when the stream supports seeking
         }
 
-        var targetDirectory = GetPackageDirectoryPath(reference);
+        string targetDirectory = GetPackageDirectoryPath(reference);
 
         await _installLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -234,7 +234,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
             }
 
             // Extract to a temporary directory (prefer system temp, fall back to cache)
-            var tempDir = TempDirectory.Create("fhir-pkg", CacheDirectory);
+            string tempDir = TempDirectory.Create("fhir-pkg", CacheDirectory);
             try
             {
                 await TarballExtractor.ExtractAsync(tarballStream, tempDir, ct).ConfigureAwait(false);
@@ -256,9 +256,9 @@ public class DiskPackageCache : IPackageCache, IDisposable
             }
 
             // Update metadata
-            var contentPath = GetContentPath(reference);
-            var sizeBytes = CalculateDirectorySize(contentPath);
-            var entry = new CacheMetadataEntry
+            string contentPath = GetContentPath(reference);
+            long sizeBytes = CalculateDirectorySize(contentPath);
+            CacheMetadataEntry entry = new CacheMetadataEntry
             {
                 DownloadDateTime = _timeProvider.GetUtcNow().UtcDateTime,
                 SizeBytes = sizeBytes
@@ -266,7 +266,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
             await UpdateMetadataAsync(reference, entry, ct).ConfigureAwait(false);
 
             // Read the installed manifest and build the record
-            var manifest = await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false)
+            PackageManifest manifest = await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false)
                 ?? throw new InvalidOperationException(
                     $"Installed package {reference.FhirDirective} is missing package.json manifest.");
 
@@ -289,7 +289,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
     /// <inheritdoc />
     public async Task<bool> RemoveAsync(PackageReference reference, CancellationToken ct = default)
     {
-        var directoryPath = GetPackageDirectoryPath(reference);
+        string directoryPath = GetPackageDirectoryPath(reference);
         if (!Directory.Exists(directoryPath))
             return false;
 
@@ -321,9 +321,9 @@ public class DiskPackageCache : IPackageCache, IDisposable
             if (!Directory.Exists(CacheDirectory))
                 return 0;
 
-            var count = 0;
+            int count = 0;
 
-            foreach (var dir in Directory.GetDirectories(CacheDirectory, $"*{DirectorySeparator}*"))
+            foreach (string dir in Directory.GetDirectories(CacheDirectory, $"*{DirectorySeparator}*"))
             {
                 ct.ThrowIfCancellationRequested();
                 try
@@ -338,7 +338,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
             }
 
             // Clear metadata file
-            var metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
+            string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
             if (File.Exists(metadataPath))
                 File.Delete(metadataPath);
 
@@ -353,7 +353,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
     /// <inheritdoc />
     public async Task<PackageManifest?> ReadManifestAsync(PackageReference reference, CancellationToken ct = default)
     {
-        var contentPath = GetContentPath(reference);
+        string contentPath = GetContentPath(reference);
         if (!Directory.Exists(contentPath))
             return null;
 
@@ -363,15 +363,15 @@ public class DiskPackageCache : IPackageCache, IDisposable
     /// <inheritdoc />
     public async Task<PackageIndex?> GetIndexAsync(PackageReference reference, CancellationToken ct = default)
     {
-        var contentPath = GetContentPath(reference);
+        string contentPath = GetContentPath(reference);
         if (!Directory.Exists(contentPath))
             return null;
 
-        var indexPath = Path.Combine(contentPath, IndexFileName);
+        string indexPath = Path.Combine(contentPath, IndexFileName);
         if (!File.Exists(indexPath))
             return null;
 
-        await using var stream = File.OpenRead(indexPath);
+        await using FileStream stream = File.OpenRead(indexPath);
         return await JsonSerializer.DeserializeAsync<PackageIndex>(stream, s_jsonOptions, ct).ConfigureAwait(false);
     }
 
@@ -383,11 +383,11 @@ public class DiskPackageCache : IPackageCache, IDisposable
     {
         ArgumentNullException.ThrowIfNull(relativePath);
 
-        var contentPath = GetContentPath(reference);
+        string contentPath = GetContentPath(reference);
         if (!Directory.Exists(contentPath))
             return null;
 
-        var filePath = Path.GetFullPath(Path.Combine(contentPath, relativePath));
+        string filePath = Path.GetFullPath(Path.Combine(contentPath, relativePath));
 
         // Path traversal protection
         if (!filePath.StartsWith(Path.GetFullPath(contentPath), StringComparison.OrdinalIgnoreCase))
@@ -402,7 +402,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
     /// <inheritdoc />
     public string? GetPackageContentPath(PackageReference reference)
     {
-        var contentPath = GetContentPath(reference);
+        string contentPath = GetContentPath(reference);
         return Directory.Exists(contentPath) ? contentPath : null;
     }
 
@@ -411,37 +411,37 @@ public class DiskPackageCache : IPackageCache, IDisposable
     {
         ct.ThrowIfCancellationRequested();
 
-        var metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
-        var ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
+        string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
 
-        var cacheVersion = 3;
-        if (ini.TryGetValue("cache", out var cacheSection)
-            && cacheSection.TryGetValue("version", out var versionStr)
-            && int.TryParse(versionStr, out var parsed))
+        int cacheVersion = 3;
+        if (ini.TryGetValue("cache", out IReadOnlyDictionary<string, string>? cacheSection)
+            && cacheSection.TryGetValue("version", out string? versionStr)
+            && int.TryParse(versionStr, out int parsed))
         {
             cacheVersion = parsed;
         }
 
-        var packages = new Dictionary<string, CacheMetadataEntry>(StringComparer.Ordinal);
+        Dictionary<string, CacheMetadataEntry> packages = new Dictionary<string, CacheMetadataEntry>(StringComparer.Ordinal);
 
-        if (ini.TryGetValue("packages", out var packagesSection))
+        if (ini.TryGetValue("packages", out IReadOnlyDictionary<string, string>? packagesSection))
         {
             // Also try to get sizes
-            ini.TryGetValue("package-sizes", out var sizesSection);
+            ini.TryGetValue("package-sizes", out IReadOnlyDictionary<string, string>? sizesSection);
 
-            foreach (var (directive, dateStr) in packagesSection)
+            foreach ((string? directive, string? dateStr) in packagesSection)
             {
                 DateTime? downloadDate = null;
                 if (DateTime.TryParseExact(dateStr, MetadataDateFormat,
-                    CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var dt))
+                    CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTime dt))
                 {
                     downloadDate = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
                 }
 
                 long? sizeBytes = null;
                 if (sizesSection is not null
-                    && sizesSection.TryGetValue(directive, out var sizeStr)
-                    && long.TryParse(sizeStr, out var size))
+                    && sizesSection.TryGetValue(directive, out string? sizeStr)
+                    && long.TryParse(sizeStr, out long size))
                 {
                     sizeBytes = size;
                 }
@@ -466,12 +466,12 @@ public class DiskPackageCache : IPackageCache, IDisposable
     {
         ct.ThrowIfCancellationRequested();
 
-        var metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
-        var ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
+        string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
 
         // Build mutable copy of the INI structure
-        var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (key, value) in ini)
+        Dictionary<string, Dictionary<string, string>> sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        foreach ((string? key, IReadOnlyDictionary<string, string>? value) in ini)
         {
             sections[key] = new Dictionary<string, string>(value, StringComparer.OrdinalIgnoreCase);
         }
@@ -483,8 +483,8 @@ public class DiskPackageCache : IPackageCache, IDisposable
         EnsureSection(sections, "packages");
         EnsureSection(sections, "package-sizes");
 
-        var directive = reference.FhirDirective;
-        var dateStr = entry.DownloadDateTime.ToString(MetadataDateFormat, CultureInfo.InvariantCulture);
+        string directive = reference.FhirDirective;
+        string dateStr = entry.DownloadDateTime.ToString(MetadataDateFormat, CultureInfo.InvariantCulture);
 
         // Update the packages section
         sections["packages"][directive] = dateStr;
@@ -508,23 +508,23 @@ public class DiskPackageCache : IPackageCache, IDisposable
     {
         ct.ThrowIfCancellationRequested();
 
-        var metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
+        string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
         if (!File.Exists(metadataPath))
             return;
 
-        var ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
-        var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (key, value) in ini)
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
+        Dictionary<string, Dictionary<string, string>> sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        foreach ((string? key, IReadOnlyDictionary<string, string>? value) in ini)
         {
             sections[key] = new Dictionary<string, string>(value, StringComparer.OrdinalIgnoreCase);
         }
 
-        var directive = reference.FhirDirective;
+        string directive = reference.FhirDirective;
 
-        if (sections.TryGetValue("packages", out var pkgSection))
+        if (sections.TryGetValue("packages", out Dictionary<string, string>? pkgSection))
             pkgSection.Remove(directive);
 
-        if (sections.TryGetValue("package-sizes", out var sizeSection))
+        if (sections.TryGetValue("package-sizes", out Dictionary<string, string>? sizeSection))
             sizeSection.Remove(directive);
 
         await IniParser.WriteFileAsync(metadataPath, sections.ToDictionary(
@@ -538,11 +538,11 @@ public class DiskPackageCache : IPackageCache, IDisposable
     /// </summary>
     private static async Task<PackageManifest?> ReadManifestFromPathAsync(string contentPath, CancellationToken ct)
     {
-        var manifestPath = Path.Combine(contentPath, ManifestFileName);
+        string manifestPath = Path.Combine(contentPath, ManifestFileName);
         if (!File.Exists(manifestPath))
             return null;
 
-        await using var stream = File.OpenRead(manifestPath);
+        await using FileStream stream = File.OpenRead(manifestPath);
         return await JsonSerializer.DeserializeAsync<PackageManifest>(stream, s_jsonOptions, ct).ConfigureAwait(false);
     }
 
@@ -552,7 +552,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
     /// </summary>
     private static void AtomicMoveToCache(string sourceDir, string targetDir)
     {
-        var targetParent = Path.GetDirectoryName(targetDir);
+        string? targetParent = Path.GetDirectoryName(targetDir);
         if (targetParent is not null)
             Directory.CreateDirectory(targetParent);
 
@@ -575,15 +575,15 @@ public class DiskPackageCache : IPackageCache, IDisposable
     {
         Directory.CreateDirectory(targetDir);
 
-        foreach (var file in Directory.GetFiles(sourceDir))
+        foreach (string file in Directory.GetFiles(sourceDir))
         {
-            var destFile = Path.Combine(targetDir, Path.GetFileName(file));
+            string destFile = Path.Combine(targetDir, Path.GetFileName(file));
             File.Copy(file, destFile, overwrite: true);
         }
 
-        foreach (var dir in Directory.GetDirectories(sourceDir))
+        foreach (string dir in Directory.GetDirectories(sourceDir))
         {
-            var destDir = Path.Combine(targetDir, Path.GetFileName(dir));
+            string destDir = Path.Combine(targetDir, Path.GetFileName(dir));
             CopyDirectoryRecursive(dir, destDir);
         }
     }

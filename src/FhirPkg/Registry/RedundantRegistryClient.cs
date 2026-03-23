@@ -98,19 +98,19 @@ public sealed class RedundantRegistryClient : IRegistryClient
     public async Task<IReadOnlyList<CatalogEntry>> SearchAsync(
         PackageSearchCriteria criteria, CancellationToken cancellationToken = default)
     {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var merged = new List<CatalogEntry>();
+        HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        List<CatalogEntry> merged = new List<CatalogEntry>();
 
-        foreach (var client in _clients)
+        foreach (IRegistryClient client in _clients)
         {
             try
             {
                 _logger.LogDebug("Searching {Endpoint} for packages", client.Endpoint.Url);
 
-                var results = await client.SearchAsync(criteria, cancellationToken)
+                IReadOnlyList<CatalogEntry> results = await client.SearchAsync(criteria, cancellationToken)
                     .ConfigureAwait(false);
 
-                foreach (var entry in results)
+                foreach (CatalogEntry entry in results)
                 {
                     if (seen.Add(entry.Name))
                     {
@@ -145,7 +145,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
     {
         Exception? lastException = null;
 
-        foreach (var client in _clients)
+        foreach (IRegistryClient client in _clients)
         {
             try
             {
@@ -153,7 +153,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
                     "Fetching listing for {PackageId} from {Endpoint}",
                     packageId, client.Endpoint.Url);
 
-                var listing = await client.GetPackageListingAsync(packageId, cancellationToken)
+                PackageListing? listing = await client.GetPackageListingAsync(packageId, cancellationToken)
                     .ConfigureAwait(false);
 
                 if (listing is not null)
@@ -202,7 +202,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
         ArgumentNullException.ThrowIfNull(directive);
         Exception? lastException = null;
 
-        foreach (var client in _clients)
+        foreach (IRegistryClient client in _clients)
         {
             // Skip clients that don't support this version type.
             if (!client.SupportedVersionTypes.Contains(directive.VersionType))
@@ -228,7 +228,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
                     "Resolving {PackageId} on {Endpoint}",
                     directive.PackageId, client.Endpoint.Url);
 
-                var resolved = await client.ResolveAsync(directive, options, cancellationToken)
+                ResolvedDirective? resolved = await client.ResolveAsync(directive, options, cancellationToken)
                     .ConfigureAwait(false);
 
                 if (resolved is not null)
@@ -273,7 +273,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
         ArgumentNullException.ThrowIfNull(resolved);
         Exception? lastException = null;
 
-        foreach (var client in _clients)
+        foreach (IRegistryClient client in _clients)
         {
             try
             {
@@ -281,7 +281,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
                     "Downloading {PackageId} from {Endpoint}",
                     resolved.Reference.Name, client.Endpoint.Url);
 
-                var result = await client.DownloadAsync(resolved, cancellationToken)
+                PackageDownloadResult? result = await client.DownloadAsync(resolved, cancellationToken)
                     .ConfigureAwait(false);
 
                 if (result is not null)
@@ -337,7 +337,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
         Exception? lastException = null;
         PublishResult? lastResult = null;
 
-        foreach (var client in _clients)
+        foreach (IRegistryClient client in _clients)
         {
             try
             {
@@ -348,7 +348,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
                     "Publishing {PackageId}@{Version} to {Endpoint}",
                     reference.Name, reference.Version, client.Endpoint.Url);
 
-                var result = await client.PublishAsync(reference, tarballStream, cancellationToken)
+                PublishResult result = await client.PublishAsync(reference, tarballStream, cancellationToken)
                     .ConfigureAwait(false);
 
                 if (result.Success)

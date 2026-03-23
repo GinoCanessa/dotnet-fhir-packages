@@ -43,7 +43,7 @@ public class DiskPackageCacheTests : IDisposable
     [Fact]
     public void Constructor_ExplicitPath_UsesExplicitPath()
     {
-        var cache = new DiskPackageCache(_tempDir);
+        DiskPackageCache cache = new DiskPackageCache(_tempDir);
 
         cache.CacheDirectory.ShouldBe(_tempDir);
         Directory.Exists(_tempDir).ShouldBeTrue();
@@ -52,10 +52,10 @@ public class DiskPackageCacheTests : IDisposable
     [Fact]
     public void Constructor_EnvVarSet_UsesEnvVar()
     {
-        var envDir = Path.Combine(_tempDir, "from-env");
+        string envDir = Path.Combine(_tempDir, "from-env");
         Environment.SetEnvironmentVariable("PACKAGE_CACHE_FOLDER", envDir);
 
-        var cache = new DiskPackageCache();
+        DiskPackageCache cache = new DiskPackageCache();
 
         cache.CacheDirectory.ShouldBe(envDir);
         Directory.Exists(envDir).ShouldBeTrue();
@@ -64,11 +64,11 @@ public class DiskPackageCacheTests : IDisposable
     [Fact]
     public void Constructor_ExplicitPath_TakesPriorityOverEnvVar()
     {
-        var envDir = Path.Combine(_tempDir, "from-env");
-        var explicitDir = Path.Combine(_tempDir, "explicit");
+        string envDir = Path.Combine(_tempDir, "from-env");
+        string explicitDir = Path.Combine(_tempDir, "explicit");
         Environment.SetEnvironmentVariable("PACKAGE_CACHE_FOLDER", envDir);
 
-        var cache = new DiskPackageCache(explicitDir);
+        DiskPackageCache cache = new DiskPackageCache(explicitDir);
 
         cache.CacheDirectory.ShouldBe(explicitDir);
         Directory.Exists(explicitDir).ShouldBeTrue();
@@ -78,7 +78,7 @@ public class DiskPackageCacheTests : IDisposable
     [Fact]
     public void Dispose_DisposesInstallLock()
     {
-        var cache = new DiskPackageCache(_tempDir);
+        DiskPackageCache cache = new DiskPackageCache(_tempDir);
 
         cache.Dispose();
 
@@ -91,9 +91,9 @@ public class DiskPackageCacheTests : IDisposable
     {
         Environment.SetEnvironmentVariable("PACKAGE_CACHE_FOLDER", null);
 
-        var cache = new DiskPackageCache();
+        DiskPackageCache cache = new DiskPackageCache();
 
-        var expected = Path.Combine(
+        string expected = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".fhir",
             "packages");
@@ -103,29 +103,29 @@ public class DiskPackageCacheTests : IDisposable
     [Fact]
     public async Task InstallAsync_AtomicMove_ProducesValidPackage()
     {
-        using var cache = new DiskPackageCache(_tempDir);
-        var reference = new PackageReference("test.package", "1.0.0");
+        using DiskPackageCache cache = new DiskPackageCache(_tempDir);
+        PackageReference reference = new PackageReference("test.package", "1.0.0");
 
-        using var tarball = CreateTestTarball("""{"name":"test.package","version":"1.0.0"}""");
+        using MemoryStream tarball = CreateTestTarball("""{"name":"test.package","version":"1.0.0"}""");
 
-        var record = await cache.InstallAsync(reference, tarball, new InstallCacheOptions { VerifyChecksum = false });
+        PackageRecord record = await cache.InstallAsync(reference, tarball, new InstallCacheOptions { VerifyChecksum = false });
 
         record.ShouldNotBeNull();
         record.Reference.Name.ShouldBe("test.package");
         record.Reference.Version.ShouldBe("1.0.0");
         Directory.Exists(record.DirectoryPath).ShouldBeTrue();
 
-        var manifestPath = Path.Combine(record.ContentPath, "package.json");
+        string manifestPath = Path.Combine(record.ContentPath, "package.json");
         File.Exists(manifestPath).ShouldBeTrue();
     }
 
     private static MemoryStream CreateTestTarball(string packageJsonContent)
     {
-        var memStream = new MemoryStream();
-        using (var gzipStream = new GZipStream(memStream, CompressionMode.Compress, leaveOpen: true))
-        using (var tarWriter = new TarWriter(gzipStream, leaveOpen: true))
+        MemoryStream memStream = new MemoryStream();
+        using (GZipStream gzipStream = new GZipStream(memStream, CompressionMode.Compress, leaveOpen: true))
+        using (TarWriter tarWriter = new TarWriter(gzipStream, leaveOpen: true))
         {
-            var entry = new PaxTarEntry(TarEntryType.RegularFile, "package/package.json")
+            PaxTarEntry entry = new PaxTarEntry(TarEntryType.RegularFile, "package/package.json")
             {
                 DataStream = new MemoryStream(Encoding.UTF8.GetBytes(packageJsonContent))
             };

@@ -49,7 +49,7 @@ public record PackageLockFile
         if (!File.Exists(path))
             throw new FileNotFoundException($"Lock file not found: {path}", path);
 
-        using var stream = File.OpenRead(path);
+        using FileStream stream = File.OpenRead(path);
         return JsonSerializer.Deserialize<PackageLockFile>(stream, s_serializerOptions)
             ?? throw new JsonException("Deserialization of lock file returned null.");
     }
@@ -62,11 +62,11 @@ public record PackageLockFile
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        var directory = Path.GetDirectoryName(path);
+        string? directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
 
-        var json = JsonSerializer.Serialize(this, s_serializerOptions);
+        string json = JsonSerializer.Serialize(this, s_serializerOptions);
         File.WriteAllText(path, json);
     }
 }

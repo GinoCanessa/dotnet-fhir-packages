@@ -132,7 +132,7 @@ internal static class JsonOutput
     /// <param name="cached">Optional list of locally cached records.</param>
     public static void WritePackageInfo(PackageListing listing, IReadOnlyList<PackageRecord>? cached)
     {
-        var cachedVersions = cached?
+        HashSet<string?> cachedVersions = cached?
             .Where(c => string.Equals(c.Reference.Name, listing.PackageId, StringComparison.OrdinalIgnoreCase))
             .Select(c => c.Reference.Version)
             .ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];

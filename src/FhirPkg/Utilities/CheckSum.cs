@@ -116,8 +116,8 @@ public static class CheckSum
         if (string.IsNullOrWhiteSpace(expectedHash))
             return true;
 
-        var originalPosition = stream.CanSeek ? stream.Position : -1;
-        var actualHash = ComputeSha1(stream);
+        long originalPosition = stream.CanSeek ? stream.Position : -1;
+        string actualHash = ComputeSha1(stream);
 
         if (resetPosition && stream.CanSeek)
             stream.Position = originalPosition;
@@ -145,8 +145,8 @@ public static class CheckSum
         if (string.IsNullOrWhiteSpace(expectedHash))
             return true;
 
-        var originalPosition = stream.CanSeek ? stream.Position : -1;
-        var actualHash = ComputeSha256(stream);
+        long originalPosition = stream.CanSeek ? stream.Position : -1;
+        string actualHash = ComputeSha256(stream);
 
         if (resetPosition && stream.CanSeek)
             stream.Position = originalPosition;

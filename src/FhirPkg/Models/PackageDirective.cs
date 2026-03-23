@@ -67,16 +67,16 @@ public partial record PackageDirective
     {
         ArgumentNullException.ThrowIfNull(directive);
 
-        var trimmed = directive.Trim();
+        string trimmed = directive.Trim();
         if (trimmed.Length == 0)
             throw new ArgumentException("Package directive must not be empty.", nameof(directive));
 
-        var raw = trimmed;
+        string raw = trimmed;
         string? alias = null;
         ReadOnlySpan<char> input = trimmed.AsSpan();
 
         // Step 1: Strip NPM alias syntax "alias@npm:actual@version"
-        var npmPrefixIndex = input.IndexOf("@npm:".AsSpan(), StringComparison.OrdinalIgnoreCase);
+        int npmPrefixIndex = input.IndexOf("@npm:".AsSpan(), StringComparison.OrdinalIgnoreCase);
         if (npmPrefixIndex > 0)
         {
             alias = new string(input[..npmPrefixIndex]);
@@ -87,21 +87,21 @@ public partial record PackageDirective
         string name;
         string? version;
 
-        var hashIndex = input.IndexOf('#');
+        int hashIndex = input.IndexOf('#');
         if (hashIndex >= 0)
         {
             name = new string(input[..hashIndex]);
-            var versionSpan = input[(hashIndex + 1)..];
+            ReadOnlySpan<char> versionSpan = input[(hashIndex + 1)..];
             version = versionSpan.IsEmpty || versionSpan.IsWhiteSpace() ? null : new string(versionSpan);
         }
         else
         {
             // For '@', find the last '@' to avoid confusing with scope
-            var atIndex = input.LastIndexOf('@');
+            int atIndex = input.LastIndexOf('@');
             if (atIndex > 0)
             {
                 name = new string(input[..atIndex]);
-                var versionSpan = input[(atIndex + 1)..];
+                ReadOnlySpan<char> versionSpan = input[(atIndex + 1)..];
                 version = versionSpan.IsEmpty || versionSpan.IsWhiteSpace() ? null : new string(versionSpan);
             }
             else
@@ -112,10 +112,10 @@ public partial record PackageDirective
         }
 
         // Step 3: Classify name type
-        var nameType = ClassifyName(name);
+        PackageNameType nameType = ClassifyName(name);
 
         // Step 4: Classify version type
-        var versionType = ClassifyVersion(version);
+        VersionType versionType = ClassifyVersion(version);
 
         // Step 5: Extract CI branch if CiBuildBranch
         string? ciBranch = null;
@@ -128,7 +128,7 @@ public partial record PackageDirective
         IReadOnlyList<string>? expandedIds = null;
         if (nameType == PackageNameType.CorePartial)
         {
-            var release = FhirReleaseMapping.FromPackageName(name + ".core");
+            FhirRelease? release = FhirReleaseMapping.FromPackageName(name + ".core");
             if (release is not null)
             {
                 expandedIds = FhirReleaseMapping.GetCorePackageNames(release.Value);
@@ -166,15 +166,15 @@ public partial record PackageDirective
     {
         ArgumentNullException.ThrowIfNull(packageId);
 
-        var lower = packageId.ToLowerInvariant();
+        string lower = packageId.ToLowerInvariant();
 
         // Check for hl7.fhir.r* prefix (core packages)
         if (lower.StartsWith("hl7.fhir.r", StringComparison.Ordinal))
         {
-            var segments = lower.Split('.');
+            string[] segments = lower.Split('.');
             if (segments.Length >= 4)
             {
-                var typeSuffix = segments[3];
+                string typeSuffix = segments[3];
                 if (FhirReleaseMapping.KnownCoreTypes.Contains(typeSuffix))
                     return PackageNameType.CoreFull;
             }
@@ -216,8 +216,8 @@ public partial record PackageDirective
             return VersionType.LocalBuild;
 
         // Wildcard: contains 'x', 'X', or '*' as a version segment
-        var segments = version.Split('.');
-        foreach (var seg in segments)
+        string[] segments = version.Split('.');
+        foreach (string seg in segments)
         {
             if (seg is "x" or "X" or "*")
                 return VersionType.Wildcard;

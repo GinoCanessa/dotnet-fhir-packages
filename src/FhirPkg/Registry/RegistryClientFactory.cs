@@ -26,11 +26,11 @@ public static class RegistryClientFactory
         ILoggerFactory loggerFactory,
         TimeProvider? timeProvider = null)
     {
-        var clients = new List<IRegistryClient>();
+        List<IRegistryClient> clients = new List<IRegistryClient>();
 
         if (options.Registries.Count > 0)
         {
-            foreach (var endpoint in options.Registries)
+            foreach (RegistryEndpoint endpoint in options.Registries)
             {
                 clients.Add(CreateClientForEndpoint(endpoint, httpClient, loggerFactory, timeProvider));
             }
