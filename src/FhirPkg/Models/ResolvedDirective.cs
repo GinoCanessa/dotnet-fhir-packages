@@ -18,6 +18,12 @@ public record ResolvedDirective
     /// <summary>The SHA-1 hash of the tarball for integrity verification.</summary>
     public string? ShaSum { get; init; }
 
+    /// <summary>
+    /// The SHA-256 hash of the package tarball, if provided by the registry.
+    /// When available, this is preferred over <see cref="ShaSum"/> for integrity verification.
+    /// </summary>
+    public string? Sha256Sum { get; init; }
+
     /// <summary>The registry endpoint that resolved this package.</summary>
     public RegistryEndpoint? SourceRegistry { get; init; }
 

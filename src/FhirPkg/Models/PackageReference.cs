@@ -49,20 +49,20 @@ public readonly record struct PackageReference(string Name, string? Version = nu
     {
         ArgumentNullException.ThrowIfNull(directive);
 
-        var trimmed = directive.Trim();
-        if (trimmed.Length == 0)
+        var span = directive.AsSpan().Trim();
+        if (span.Length == 0)
             throw new ArgumentException("Package directive must not be empty.", nameof(directive));
 
         string? scope = null;
-        var input = trimmed;
+        var input = span;
 
         // Handle NPM scope: @scope/name@version or @scope/name#version
-        if (input.StartsWith('@'))
+        if (input[0] == '@')
         {
             var slashIndex = input.IndexOf('/');
             if (slashIndex > 0)
             {
-                scope = input[..slashIndex]; // includes the '@'
+                scope = new string(input[..slashIndex]); // includes the '@'
                 input = input[(slashIndex + 1)..];
             }
         }
@@ -71,24 +71,26 @@ public readonly record struct PackageReference(string Name, string? Version = nu
         var hashIndex = input.IndexOf('#');
         if (hashIndex >= 0)
         {
-            var name = input[..hashIndex];
-            var version = input[(hashIndex + 1)..];
-            var fullName = scope is not null ? $"{scope}/{name}" : name;
-            return new PackageReference(fullName, string.IsNullOrEmpty(version) ? null : version, scope);
+            var nameSpan = input[..hashIndex];
+            var versionSpan = input[(hashIndex + 1)..];
+            var fullName = scope is not null ? $"{scope}/{nameSpan}" : new string(nameSpan);
+            var version = versionSpan.Length == 0 ? null : new string(versionSpan);
+            return new PackageReference(fullName, version, scope);
         }
 
         // Try NPM separator — find the last '@' that is not the scope prefix
         var atIndex = input.LastIndexOf('@');
         if (atIndex > 0)
         {
-            var name = input[..atIndex];
-            var version = input[(atIndex + 1)..];
-            var fullName = scope is not null ? $"{scope}/{name}" : name;
-            return new PackageReference(fullName, string.IsNullOrEmpty(version) ? null : version, scope);
+            var nameSpan = input[..atIndex];
+            var versionSpan = input[(atIndex + 1)..];
+            var fullName = scope is not null ? $"{scope}/{nameSpan}" : new string(nameSpan);
+            var version = versionSpan.Length == 0 ? null : new string(versionSpan);
+            return new PackageReference(fullName, version, scope);
         }
 
         // No separator — just a package name
-        var justName = scope is not null ? $"{scope}/{input}" : input;
+        var justName = scope is not null ? $"{scope}/{input}" : new string(input);
         return new PackageReference(justName, null, scope);
     }
 

@@ -161,4 +161,42 @@ public class PackageDirectiveTests
 
         directive.NameType.ShouldBe(PackageNameType.NonHl7Guide);
     }
+
+    [Fact]
+    public void Parse_ScopeSlashNameAtVersion_ParsesCorrectly()
+    {
+        var directive = PackageDirective.Parse("@scope/name@1.0.0");
+
+        directive.PackageId.ShouldBe("@scope/name");
+        directive.RequestedVersion.ShouldBe("1.0.0");
+    }
+
+    [Fact]
+    public void Parse_AliasNpmSyntax_ParsesCorrectly()
+    {
+        var directive = PackageDirective.Parse("myalias@npm:hl7.fhir.r4.core@4.0.1");
+
+        directive.Alias.ShouldBe("myalias");
+        directive.PackageId.ShouldBe("hl7.fhir.r4.core");
+        directive.RequestedVersion.ShouldBe("4.0.1");
+    }
+
+    [Fact]
+    public void Parse_EmptyVersionAfterHash_HasNullVersion()
+    {
+        var directive = PackageDirective.Parse("hl7.fhir.us.core#");
+
+        directive.PackageId.ShouldBe("hl7.fhir.us.core");
+        directive.RequestedVersion.ShouldBeNull();
+        directive.VersionType.ShouldBe(VersionType.Latest);
+    }
+
+    [Fact]
+    public void Parse_DoubleAtSign_HandledGracefully()
+    {
+        var directive = PackageDirective.Parse("name@@");
+
+        directive.PackageId.ShouldBe("name@");
+        directive.RequestedVersion.ShouldBeNull();
+    }
 }

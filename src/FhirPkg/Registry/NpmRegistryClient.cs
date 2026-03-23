@@ -60,7 +60,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     /// Calls the standard NPM search endpoint: <c>GET {baseUrl}/-/v1/search?text={name}</c>
     /// and converts the results to <see cref="CatalogEntry"/> instances.
     /// </remarks>
-    public async Task<IReadOnlyList<CatalogEntry>> SearchAsync(
+    public override async Task<IReadOnlyList<CatalogEntry>> SearchAsync(
         PackageSearchCriteria criteria, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(criteria);
@@ -103,7 +103,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     /// <remarks>
     /// Calls <c>GET {baseUrl}/{packageId}</c> using the standard NPM package document format.
     /// </remarks>
-    public async Task<PackageListing?> GetPackageListingAsync(
+    public override async Task<PackageListing?> GetPackageListingAsync(
         string packageId, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
@@ -133,7 +133,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     /// exact lookup, dist-tags for latest, <see cref="FhirSemVer.MaxSatisfying"/> for
     /// wildcards, and <see cref="FhirSemVer.SatisfyingRange"/> for ranges.
     /// </remarks>
-    public async Task<ResolvedDirective?> ResolveAsync(
+    public override async Task<ResolvedDirective?> ResolveAsync(
         PackageDirective directive,
         VersionResolveOptions? options = null,
         CancellationToken cancellationToken = default)
@@ -194,7 +194,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     /// Downloads the tarball from the URI in the resolved directive.
     /// The caller must dispose the returned <see cref="PackageDownloadResult"/>.
     /// </remarks>
-    public async Task<PackageDownloadResult?> DownloadAsync(
+    public override async Task<PackageDownloadResult?> DownloadAsync(
         ResolvedDirective resolved, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(resolved);
@@ -226,7 +226,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     /// Sends <c>PUT {baseUrl}/{name}</c> with the tarball stream.
     /// Requires authentication to be configured on the endpoint.
     /// </remarks>
-    public async Task<PublishResult> PublishAsync(
+    public override async Task<PublishResult> PublishAsync(
         PackageReference reference, Stream tarballStream, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(tarballStream);
@@ -266,44 +266,6 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
                 Message = ex.Message,
             };
         }
-    }
-
-    // ── Private version resolution helpers ──────────────────────────────
-
-    private static string? ResolveVersion(
-        PackageDirective directive, PackageListing listing, VersionResolveOptions? options)
-    {
-        return directive.VersionType switch
-        {
-            VersionType.Exact => listing.Versions!.ContainsKey(directive.RequestedVersion!)
-                ? directive.RequestedVersion
-                : null,
-            VersionType.Latest => listing.LatestVersion,
-            VersionType.Wildcard => ResolveWildcard(listing, directive.RequestedVersion!, options),
-            VersionType.Range => ResolveRange(listing, directive.RequestedVersion!, options),
-            _ => null,
-        };
-    }
-
-    private static string? ResolveWildcard(
-        PackageListing listing, string specifier, VersionResolveOptions? options)
-    {
-        var versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
-        var includePreRelease = options?.AllowPreRelease ?? true;
-
-        return FhirSemVer.MaxSatisfying(versions, specifier, includePreRelease)?.ToString();
-    }
-
-    private static string? ResolveRange(
-        PackageListing listing, string rangeExpression, VersionResolveOptions? options)
-    {
-        var versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
-        var satisfying = FhirSemVer.SatisfyingRange(versions, rangeExpression);
-
-        if (options?.AllowPreRelease is false)
-            satisfying = satisfying.Where(v => !v.IsPreRelease);
-
-        return satisfying.OrderByDescending(v => v).FirstOrDefault()?.ToString();
     }
 
     // ── Internal DTOs for NPM search response ───────────────────────────

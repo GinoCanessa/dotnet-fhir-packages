@@ -55,6 +55,10 @@ public sealed class RedundantRegistryClient : IRegistryClient
             throw new ArgumentException("At least one registry client is required.", nameof(clients));
 
         _logger = logger ?? NullLogger<RedundantRegistryClient>.Instance;
+
+        // Cache computed properties (the client list is immutable)
+        _supportedNameTypes = _clients.SelectMany(c => c.SupportedNameTypes).Distinct().ToList().AsReadOnly();
+        _supportedVersionTypes = _clients.SelectMany(c => c.SupportedVersionTypes).Distinct().ToList().AsReadOnly();
     }
 
     /// <summary>
@@ -66,6 +70,9 @@ public sealed class RedundantRegistryClient : IRegistryClient
     {
     }
 
+    private readonly IReadOnlyList<PackageNameType> _supportedNameTypes;
+    private readonly IReadOnlyList<VersionType> _supportedVersionTypes;
+
     // ── IRegistryClient properties ──────────────────────────────────────
 
     /// <inheritdoc />
@@ -74,13 +81,11 @@ public sealed class RedundantRegistryClient : IRegistryClient
 
     /// <inheritdoc />
     /// <remarks>Returns the union of all clients' supported name types, deduplicated.</remarks>
-    public IReadOnlyList<PackageNameType> SupportedNameTypes =>
-        _clients.SelectMany(c => c.SupportedNameTypes).Distinct().ToList().AsReadOnly();
+    public IReadOnlyList<PackageNameType> SupportedNameTypes => _supportedNameTypes;
 
     /// <inheritdoc />
     /// <remarks>Returns the union of all clients' supported version types, deduplicated.</remarks>
-    public IReadOnlyList<VersionType> SupportedVersionTypes =>
-        _clients.SelectMany(c => c.SupportedVersionTypes).Distinct().ToList().AsReadOnly();
+    public IReadOnlyList<VersionType> SupportedVersionTypes => _supportedVersionTypes;
 
     // ── IRegistryClient methods ─────────────────────────────────────────
 

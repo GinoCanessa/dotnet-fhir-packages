@@ -87,7 +87,7 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
     /// <remarks>
     /// The HL7 website does not support catalog search. Returns an empty list.
     /// </remarks>
-    public Task<IReadOnlyList<CatalogEntry>> SearchAsync(
+    public override Task<IReadOnlyList<CatalogEntry>> SearchAsync(
         PackageSearchCriteria criteria, CancellationToken cancellationToken = default)
     {
         Logger.LogDebug("SearchAsync is not supported for the HL7 website; returning empty list");
@@ -98,7 +98,7 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
     /// <remarks>
     /// The HL7 website does not support package listings. Returns <see langword="null"/>.
     /// </remarks>
-    public Task<PackageListing?> GetPackageListingAsync(
+    public override Task<PackageListing?> GetPackageListingAsync(
         string packageId, CancellationToken cancellationToken = default)
     {
         Logger.LogDebug("GetPackageListingAsync is not supported for the HL7 website; returning null");
@@ -111,7 +111,7 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
     /// (or provided via <see cref="VersionResolveOptions.FhirRelease"/>).
     /// The URL pattern is <c>{baseUrl}/{release}/{packageName}.tgz</c>.
     /// </remarks>
-    public Task<ResolvedDirective?> ResolveAsync(
+    public override Task<ResolvedDirective?> ResolveAsync(
         PackageDirective directive,
         VersionResolveOptions? options = null,
         CancellationToken cancellationToken = default)
@@ -159,7 +159,7 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
     /// <remarks>
     /// Performs a simple HTTP GET on the tarball URL. The caller must dispose the result.
     /// </remarks>
-    public async Task<PackageDownloadResult?> DownloadAsync(
+    public override async Task<PackageDownloadResult?> DownloadAsync(
         ResolvedDirective resolved, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(resolved);
@@ -190,7 +190,7 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
     /// <remarks>
     /// Publishing to the HL7 website is not supported. Always returns a failure result.
     /// </remarks>
-    public Task<PublishResult> PublishAsync(
+    public override Task<PublishResult> PublishAsync(
         PackageReference reference, Stream tarballStream, CancellationToken cancellationToken = default)
     {
         Logger.LogWarning("Publishing to the HL7 website is not supported");

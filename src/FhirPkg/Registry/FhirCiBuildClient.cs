@@ -28,6 +28,7 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     private static readonly TimeSpan QasCacheDuration = TimeSpan.FromMinutes(5);
 
     private readonly SemaphoreSlim _qasCacheLock = new(1, 1);
+    private readonly TimeProvider _timeProvider;
     private IReadOnlyList<CiBuildRecord>? _qasCache;
     private DateTimeOffset _qasCacheExpiry = DateTimeOffset.MinValue;
 
@@ -37,12 +38,15 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     /// <param name="httpClient">The HTTP client to use for requests.</param>
     /// <param name="endpoint">The CI build endpoint (typically <see cref="RegistryEndpoint.FhirCiBuild"/>).</param>
     /// <param name="logger">The logger instance.</param>
+    /// <param name="timeProvider">Optional time provider; defaults to <see cref="TimeProvider.System"/>.</param>
     public FhirCiBuildClient(
         HttpClient httpClient,
         RegistryEndpoint endpoint,
-        ILogger<FhirCiBuildClient> logger)
+        ILogger<FhirCiBuildClient> logger,
+        TimeProvider? timeProvider = null)
         : base(httpClient, endpoint, logger)
     {
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     // ── IRegistryClient properties ──────────────────────────────────────
@@ -70,7 +74,7 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     /// <remarks>
     /// CI build registries do not support catalog search. Returns an empty list.
     /// </remarks>
-    public Task<IReadOnlyList<CatalogEntry>> SearchAsync(
+    public override Task<IReadOnlyList<CatalogEntry>> SearchAsync(
         PackageSearchCriteria criteria, CancellationToken cancellationToken = default)
     {
         Logger.LogDebug("SearchAsync is not supported for CI builds; returning empty list");
@@ -81,7 +85,7 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     /// <remarks>
     /// CI build registries do not support package listings. Returns <see langword="null"/>.
     /// </remarks>
-    public Task<PackageListing?> GetPackageListingAsync(
+    public override Task<PackageListing?> GetPackageListingAsync(
         string packageId, CancellationToken cancellationToken = default)
     {
         Logger.LogDebug("GetPackageListingAsync is not supported for CI builds; returning null");
@@ -100,7 +104,7 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     /// <see cref="PackageDirective.CiBranch"/> value selects a specific branch build.
     /// </para>
     /// </remarks>
-    public async Task<ResolvedDirective?> ResolveAsync(
+    public override async Task<ResolvedDirective?> ResolveAsync(
         PackageDirective directive,
         VersionResolveOptions? options = null,
         CancellationToken cancellationToken = default)
@@ -126,7 +130,7 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     /// Downloads the tarball from the URI specified in <see cref="ResolvedDirective.TarballUri"/>.
     /// The caller must dispose the returned <see cref="PackageDownloadResult"/>.
     /// </remarks>
-    public async Task<PackageDownloadResult?> DownloadAsync(
+    public override async Task<PackageDownloadResult?> DownloadAsync(
         ResolvedDirective resolved, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(resolved);
@@ -157,7 +161,7 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     /// <remarks>
     /// Publishing is not supported for CI build registries. Always returns a failure result.
     /// </remarks>
-    public Task<PublishResult> PublishAsync(
+    public override Task<PublishResult> PublishAsync(
         PackageReference reference, Stream tarballStream, CancellationToken cancellationToken = default)
     {
         Logger.LogWarning("Publishing to CI build registries is not supported");
@@ -272,15 +276,12 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
     private async Task<IReadOnlyList<CiBuildRecord>> GetQasRecordsAsync(
         CancellationToken cancellationToken)
     {
-        if (_qasCache is not null && DateTimeOffset.UtcNow < _qasCacheExpiry)
-            return _qasCache;
-
         await _qasCacheLock.WaitAsync(cancellationToken).ConfigureAwait(false);
 
         try
         {
-            // Double-check after acquiring the lock.
-            if (_qasCache is not null && DateTimeOffset.UtcNow < _qasCacheExpiry)
+            // Check under lock to prevent torn reads
+            if (_qasCache is not null && _timeProvider.GetUtcNow() < _qasCacheExpiry)
                 return _qasCache;
 
             Logger.LogInformation("Downloading qas.json from {BaseUrl}", BaseUrl);
@@ -290,7 +291,7 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
                 .ConfigureAwait(false);
 
             _qasCache = records?.AsReadOnly() ?? (IReadOnlyList<CiBuildRecord>)[];
-            _qasCacheExpiry = DateTimeOffset.UtcNow.Add(QasCacheDuration);
+            _qasCacheExpiry = _timeProvider.GetUtcNow().Add(QasCacheDuration);
 
             Logger.LogDebug("Cached {Count} QA records (expires at {Expiry})",
                 _qasCache.Count, _qasCacheExpiry);

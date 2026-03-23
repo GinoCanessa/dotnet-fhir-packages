@@ -106,14 +106,33 @@ public static class FhirReleaseMapping
         if (!packageName.StartsWith("hl7.fhir.r", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        // Extract the prefix (first 3 segments): "hl7.fhir.r4" or "hl7.fhir.r4b"
-        var segments = packageName.Split('.');
-        if (segments.Length < 3)
-            return null;
+        // Extract the prefix (first 3 segments) using span-based indexing to avoid allocations
+        var span = packageName.AsSpan();
+        var firstDot = span.IndexOf('.');
+        if (firstDot < 0) return null;
 
-        var prefix = $"{segments[0]}.{segments[1]}.{segments[2]}";
+        var secondDot = span[(firstDot + 1)..].IndexOf('.');
+        if (secondDot < 0) return null;
+        secondDot += firstDot + 1;
 
-        return PrefixToRelease.GetValueOrDefault(prefix.ToLowerInvariant());
+        var thirdDot = span[(secondDot + 1)..].IndexOf('.');
+        ReadOnlySpan<char> prefixSpan;
+        if (thirdDot >= 0)
+        {
+            thirdDot += secondDot + 1;
+            prefixSpan = span[..thirdDot];
+        }
+        else
+        {
+            prefixSpan = span;
+        }
+
+        // Build the lowercase prefix for lookup — use stackalloc for small strings
+        Span<char> lowerBuf = stackalloc char[prefixSpan.Length];
+        prefixSpan.ToLowerInvariant(lowerBuf);
+        var prefix = new string(lowerBuf);
+
+        return PrefixToRelease.GetValueOrDefault(prefix);
     }
 
     /// <summary>

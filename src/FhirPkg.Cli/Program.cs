@@ -208,9 +208,10 @@ internal sealed record GlobalOptions
                     PropertyNameCaseInsensitive = true
                 });
             }
-            catch
+            catch (Exception ex)
             {
-                // Silently ignore malformed config files
+                // Log warning for malformed config files when verbose output is available
+                Console.Error.WriteLine($"Warning: Failed to parse config file '{path}': {ex.Message}");
             }
         }
 
@@ -295,24 +296,52 @@ internal sealed class ConfigRegistry
 }
 
 /// <summary>
-/// Static holder for global option references, enabling retrieval from <see cref="ParseResult"/>.
+/// Holds the global option instances created during root command construction.
+/// Initialized once by <see cref="Program.BuildRootCommand"/> and used by
+/// <see cref="ParseResultExtensions.GetGlobalOptions"/> to extract values from parse results.
 /// </summary>
 internal static class GlobalOptionsBinder
 {
+    private static Option<string?>? _cachePathOption;
+    private static Option<bool>? _verboseOption;
+    private static Option<bool>? _quietOption;
+    private static Option<bool>? _noColorOption;
+    private static Option<bool>? _jsonOption;
+
     /// <summary>The --package-cache-folder option.</summary>
-    public static Option<string?> CachePathOption { get; set; } = null!;
+    public static Option<string?> CachePathOption
+    {
+        get => _cachePathOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _cachePathOption = value;
+    }
 
     /// <summary>The --verbose / -v option.</summary>
-    public static Option<bool> VerboseOption { get; set; } = null!;
+    public static Option<bool> VerboseOption
+    {
+        get => _verboseOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _verboseOption = value;
+    }
 
     /// <summary>The --quiet / -q option.</summary>
-    public static Option<bool> QuietOption { get; set; } = null!;
+    public static Option<bool> QuietOption
+    {
+        get => _quietOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _quietOption = value;
+    }
 
     /// <summary>The --no-color option.</summary>
-    public static Option<bool> NoColorOption { get; set; } = null!;
+    public static Option<bool> NoColorOption
+    {
+        get => _noColorOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _noColorOption = value;
+    }
 
     /// <summary>The --json option.</summary>
-    public static Option<bool> JsonOption { get; set; } = null!;
+    public static Option<bool> JsonOption
+    {
+        get => _jsonOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _jsonOption = value;
+    }
 }
 
 /// <summary>

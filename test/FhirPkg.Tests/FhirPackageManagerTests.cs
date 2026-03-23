@@ -179,4 +179,111 @@ public class FhirPackageManagerTests
 
         result.ShouldBeNull();
     }
+
+    [Fact]
+    public async Task InstallAsync_ChecksumMismatch_ThrowsInvalidOperation()
+    {
+        var resolvedDirective = new ResolvedDirective
+        {
+            Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
+            TarballUri = new Uri("https://packages.fhir.org/hl7.fhir.r4.core/4.0.1"),
+            Sha256Sum = "0000000000000000000000000000000000000000000000000000000000000000"
+        };
+
+        var downloadResult = new PackageDownloadResult
+        {
+            Content = new MemoryStream([1, 2, 3]),
+            ContentType = "application/gzip"
+        };
+
+        _cacheMock.Setup(c => c.IsInstalledAsync(It.IsAny<PackageReference>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        _registryMock.Setup(r => r.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(resolvedDirective);
+
+        _registryMock.Setup(r => r.DownloadAsync(
+                It.IsAny<ResolvedDirective>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(downloadResult);
+
+        using var manager = CreateManager();
+
+        var act = () => manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+
+        await Should.ThrowAsync<InvalidOperationException>(act);
+    }
+
+    [Fact]
+    public async Task InstallAsync_OverwriteExisting_Succeeds()
+    {
+        var resolvedDirective = new ResolvedDirective
+        {
+            Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
+            TarballUri = new Uri("https://packages.fhir.org/hl7.fhir.r4.core/4.0.1")
+        };
+
+        var downloadResult = new PackageDownloadResult
+        {
+            Content = new MemoryStream([1, 2, 3]),
+            ContentType = "application/gzip"
+        };
+
+        var installedRecord = new PackageRecord
+        {
+            Reference = new PackageReference("hl7.fhir.r4.core", "4.0.1"),
+            DirectoryPath = "/cache/hl7.fhir.r4.core#4.0.1",
+            ContentPath = "/cache/hl7.fhir.r4.core#4.0.1/package",
+            Manifest = new PackageManifest { Name = "hl7.fhir.r4.core", Version = "4.0.1" }
+        };
+
+        _cacheMock.Setup(c => c.IsInstalledAsync(It.IsAny<PackageReference>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+
+        _registryMock.Setup(r => r.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(resolvedDirective);
+
+        _registryMock.Setup(r => r.DownloadAsync(
+                It.IsAny<ResolvedDirective>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(downloadResult);
+
+        _cacheMock.Setup(c => c.InstallAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(installedRecord);
+
+        using var manager = CreateManager();
+
+        var result = await manager.InstallAsync(
+            "hl7.fhir.r4.core#4.0.1",
+            new InstallOptions { OverwriteExisting = true });
+
+        result.ShouldNotBeNull();
+        result!.Reference.Version.ShouldBe("4.0.1");
+
+        // Verify download was attempted despite being already installed
+        _registryMock.Verify(r => r.DownloadAsync(
+            It.IsAny<ResolvedDirective>(),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task RestoreAsync_MissingManifest_ThrowsFileNotFound()
+    {
+        using var manager = CreateManager();
+        var nonexistentPath = Path.Combine(Path.GetTempPath(), $"nonexistent-{Guid.NewGuid():N}");
+
+        var act = () => manager.RestoreAsync(nonexistentPath);
+
+        await Should.ThrowAsync<FileNotFoundException>(act);
+    }
 }

@@ -10,7 +10,7 @@ namespace FhirPkg.Models;
 /// their classifications, and any derived information such as expanded core package identifiers
 /// or CI build branch names.
 /// </summary>
-public record PackageDirective
+public partial record PackageDirective
 {
     /// <summary>The original, unparsed directive string.</summary>
     public required string RawDirective { get; init; }
@@ -53,16 +53,6 @@ public record PackageDirective
 
     // ── Parsing ─────────────────────────────────────────────────────────
 
-    // Matches HL7-style scope prefixes: hl7.fhir.*, hl7.cda.*, ihe.*, who.*, etc.
-    private static readonly Regex s_hl7ScopePattern = new(
-        @"^(hl7\.fhir\.|hl7\.cda\.|hl7\.v2\.|hl7\.other\.|ihe\.|who\.)",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    // Matches a FHIR version suffix at the end of a package name: .r2, .r3, .r4, .r4b, .r5, .r6
-    private static readonly Regex s_fhirSuffixPattern = new(
-        @"\.r\d+b?$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
     /// <summary>
     /// Parses a FHIR package directive string into a fully classified <see cref="PackageDirective"/>.
     /// </summary>
@@ -83,13 +73,13 @@ public record PackageDirective
 
         var raw = trimmed;
         string? alias = null;
-        var input = trimmed;
+        ReadOnlySpan<char> input = trimmed.AsSpan();
 
         // Step 1: Strip NPM alias syntax "alias@npm:actual@version"
-        var npmPrefixIndex = input.IndexOf("@npm:", StringComparison.OrdinalIgnoreCase);
+        var npmPrefixIndex = input.IndexOf("@npm:".AsSpan(), StringComparison.OrdinalIgnoreCase);
         if (npmPrefixIndex > 0)
         {
-            alias = input[..npmPrefixIndex];
+            alias = new string(input[..npmPrefixIndex]);
             input = input[(npmPrefixIndex + 5)..]; // skip "@npm:"
         }
 
@@ -100,8 +90,9 @@ public record PackageDirective
         var hashIndex = input.IndexOf('#');
         if (hashIndex >= 0)
         {
-            name = input[..hashIndex];
-            version = input[(hashIndex + 1)..];
+            name = new string(input[..hashIndex]);
+            var versionSpan = input[(hashIndex + 1)..];
+            version = versionSpan.IsEmpty || versionSpan.IsWhiteSpace() ? null : new string(versionSpan);
         }
         else
         {
@@ -109,24 +100,22 @@ public record PackageDirective
             var atIndex = input.LastIndexOf('@');
             if (atIndex > 0)
             {
-                name = input[..atIndex];
-                version = input[(atIndex + 1)..];
+                name = new string(input[..atIndex]);
+                var versionSpan = input[(atIndex + 1)..];
+                version = versionSpan.IsEmpty || versionSpan.IsWhiteSpace() ? null : new string(versionSpan);
             }
             else
             {
-                name = input;
+                name = new string(input);
                 version = null;
             }
         }
 
-        if (string.IsNullOrWhiteSpace(version))
-            version = null;
-
         // Step 3: Classify name type
-        var nameType = Resolution.DirectiveParser.ClassifyName(name);
+        var nameType = ClassifyName(name);
 
         // Step 4: Classify version type
-        var versionType = Resolution.DirectiveParser.ClassifyVersion(version);
+        var versionType = ClassifyVersion(version);
 
         // Step 5: Extract CI branch if CiBuildBranch
         string? ciBranch = null;
@@ -157,5 +146,87 @@ public record PackageDirective
             CiBranch = ciBranch,
             ExpandedPackageIds = expandedIds,
         };
+    }
+
+    // ── Classification ──────────────────────────────────────────────────
+
+    [GeneratedRegex(@"^(hl7\.fhir\.|hl7\.cda\.|hl7\.v2\.|hl7\.other\.|ihe\.|who\.)", RegexOptions.IgnoreCase)]
+    private static partial Regex Hl7ScopePattern();
+
+    [GeneratedRegex(@"\.r(\d+b?)$", RegexOptions.IgnoreCase)]
+    private static partial Regex FhirVersionSuffix();
+
+    /// <summary>
+    /// Classifies a package identifier into a <see cref="PackageNameType"/>.
+    /// </summary>
+    /// <param name="packageId">The package identifier (e.g. "hl7.fhir.r4.core", "hl7.fhir.us.core").</param>
+    /// <returns>The classification of the package name.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="packageId"/> is <c>null</c>.</exception>
+    public static PackageNameType ClassifyName(string packageId)
+    {
+        ArgumentNullException.ThrowIfNull(packageId);
+
+        var lower = packageId.ToLowerInvariant();
+
+        // Check for hl7.fhir.r* prefix (core packages)
+        if (lower.StartsWith("hl7.fhir.r", StringComparison.Ordinal))
+        {
+            var segments = lower.Split('.');
+            if (segments.Length >= 4)
+            {
+                var typeSuffix = segments[3];
+                if (FhirReleaseMapping.KnownCoreTypes.Contains(typeSuffix))
+                    return PackageNameType.CoreFull;
+            }
+            else if (segments.Length == 3)
+            {
+                return PackageNameType.CorePartial;
+            }
+        }
+
+        // Check for HL7-scope pattern
+        if (Hl7ScopePattern().IsMatch(lower))
+        {
+            return FhirVersionSuffix().IsMatch(lower)
+                ? PackageNameType.GuideWithFhirSuffix
+                : PackageNameType.GuideWithoutSuffix;
+        }
+
+        return PackageNameType.NonHl7Guide;
+    }
+
+    /// <summary>
+    /// Classifies a version string into a <see cref="VersionType"/>.
+    /// </summary>
+    /// <param name="version">The version string (e.g. "4.0.1", "latest", "current", "4.0.x", "^4.0.0").</param>
+    /// <returns>The classification of the version specifier.</returns>
+    public static VersionType ClassifyVersion(string? version)
+    {
+        if (string.IsNullOrEmpty(version) ||
+            version.Equals("latest", StringComparison.OrdinalIgnoreCase))
+            return VersionType.Latest;
+
+        if (version.Equals("current", StringComparison.OrdinalIgnoreCase))
+            return VersionType.CiBuild;
+
+        if (version.StartsWith("current$", StringComparison.OrdinalIgnoreCase))
+            return VersionType.CiBuildBranch;
+
+        if (version.Equals("dev", StringComparison.OrdinalIgnoreCase))
+            return VersionType.LocalBuild;
+
+        // Wildcard: contains 'x', 'X', or '*' as a version segment
+        var segments = version.Split('.');
+        foreach (var seg in segments)
+        {
+            if (seg is "x" or "X" or "*")
+                return VersionType.Wildcard;
+        }
+
+        // Range operators: ^, ~, or pipe
+        if (version.StartsWith('^') || version.StartsWith('~') || version.Contains('|'))
+            return VersionType.Range;
+
+        return VersionType.Exact;
     }
 }

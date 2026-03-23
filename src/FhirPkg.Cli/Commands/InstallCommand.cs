@@ -96,7 +96,7 @@ internal static class InstallCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var packages = parseResult.GetValue(packagesArg);
+            var packages = parseResult.GetValue(packagesArg)!;
             var withDeps = parseResult.GetValue(withDependenciesOption);
             var overwrite = parseResult.GetValue(overwriteOption);
             var fhirVersion = parseResult.GetValue(fhirVersionOption);

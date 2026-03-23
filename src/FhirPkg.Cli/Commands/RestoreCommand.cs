@@ -64,7 +64,7 @@ internal static class RestoreCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var projectPath = parseResult.GetValue(projectPathArg);
+            var projectPath = parseResult.GetValue(projectPathArg)!;
             var lockFile = parseResult.GetValue(lockFileOption);
             var noLock = parseResult.GetValue(noLockOption);
             var conflictStrategy = parseResult.GetValue(conflictStrategyOption);

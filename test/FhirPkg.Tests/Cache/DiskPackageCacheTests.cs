@@ -1,6 +1,10 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Formats.Tar;
+using System.IO.Compression;
+using System.Text;
 using FhirPkg.Cache;
+using FhirPkg.Models;
 using Shouldly;
 using Xunit;
 
@@ -94,5 +98,41 @@ public class DiskPackageCacheTests : IDisposable
             ".fhir",
             "packages");
         cache.CacheDirectory.ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task InstallAsync_AtomicMove_ProducesValidPackage()
+    {
+        using var cache = new DiskPackageCache(_tempDir);
+        var reference = new PackageReference("test.package", "1.0.0");
+
+        using var tarball = CreateTestTarball("""{"name":"test.package","version":"1.0.0"}""");
+
+        var record = await cache.InstallAsync(reference, tarball, new InstallCacheOptions { VerifyChecksum = false });
+
+        record.ShouldNotBeNull();
+        record.Reference.Name.ShouldBe("test.package");
+        record.Reference.Version.ShouldBe("1.0.0");
+        Directory.Exists(record.DirectoryPath).ShouldBeTrue();
+
+        var manifestPath = Path.Combine(record.ContentPath, "package.json");
+        File.Exists(manifestPath).ShouldBeTrue();
+    }
+
+    private static MemoryStream CreateTestTarball(string packageJsonContent)
+    {
+        var memStream = new MemoryStream();
+        using (var gzipStream = new GZipStream(memStream, CompressionMode.Compress, leaveOpen: true))
+        using (var tarWriter = new TarWriter(gzipStream, leaveOpen: true))
+        {
+            var entry = new PaxTarEntry(TarEntryType.RegularFile, "package/package.json")
+            {
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes(packageJsonContent))
+            };
+            tarWriter.WriteEntry(entry);
+        }
+
+        memStream.Position = 0;
+        return memStream;
     }
 }

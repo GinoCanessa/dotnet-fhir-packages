@@ -173,11 +173,14 @@ public class MemoryResourceCache
     }
 
     /// <summary>
-    /// Creates a deep clone of an object via JSON serialization round-trip.
-    /// This ensures complete isolation between the cached copy and the returned copy.
+    /// Creates a deep clone of an object. Uses <see cref="ICloneable"/> when available,
+    /// falling back to JSON serialization round-trip for types that don't implement it.
     /// </summary>
     private static T DeepClone<T>(T value) where T : class
     {
+        if (value is ICloneable cloneable)
+            return (T)cloneable.Clone();
+
         var json = JsonSerializer.SerializeToUtf8Bytes(value, value.GetType(), s_jsonOptions);
         return (T)JsonSerializer.Deserialize(json, value.GetType(), s_jsonOptions)!;
     }

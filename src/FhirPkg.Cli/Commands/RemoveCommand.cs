@@ -37,7 +37,7 @@ internal static class RemoveCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var packages = parseResult.GetValue(packagesArg);
+            var packages = parseResult.GetValue(packagesArg)!;
             var force = parseResult.GetValue(forceOption);
 
             var globalOpts = parseResult.GetGlobalOptions();

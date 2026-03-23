@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. All rights reserved.
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
+using System.Collections.Concurrent;
 using FhirPkg.Cache;
 using Shouldly;
 using Xunit;
@@ -129,5 +130,35 @@ public class MemoryResourceCacheTests
         var result = cache.Get<List<string>>("key1");
 
         result.ShouldBeNull();
+    }
+
+    [Fact]
+    public void ConcurrentAccess_NoDataCorruption()
+    {
+        var cache = new MemoryResourceCache(maxEntries: 10);
+        var exceptions = new ConcurrentBag<Exception>();
+
+        Parallel.For(0, 200, i =>
+        {
+            try
+            {
+                var key = $"key{i % 20}";
+                cache.Set(key, new TestResource { Value = $"value{i}" });
+                cache.Get<TestResource>(key);
+
+                if (i % 7 == 0)
+                {
+                    cache.Clear();
+                }
+            }
+            catch (Exception ex)
+            {
+                exceptions.Add(ex);
+            }
+        });
+
+        exceptions.ShouldBeEmpty();
+        cache.Count.ShouldBeGreaterThanOrEqualTo(0);
+        cache.Count.ShouldBeLessThanOrEqualTo(10);
     }
 }

@@ -5,6 +5,8 @@ using System.Text.Json;
 using FhirPkg.Indexing;
 using FhirPkg.Models;
 using FhirPkg.Utilities;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FhirPkg.Cache;
 
@@ -45,6 +47,8 @@ public class DiskPackageCache : IPackageCache, IDisposable
     };
 
     private readonly SemaphoreSlim _installLock = new(1, 1);
+    private readonly ILogger _logger;
+    private readonly TimeProvider _timeProvider;
 
     /// <inheritdoc />
     public string CacheDirectory { get; }
@@ -57,8 +61,12 @@ public class DiskPackageCache : IPackageCache, IDisposable
     /// environment variable is used when set; otherwise defaults to
     /// <c>~/.fhir/packages</c> (or <c>%USERPROFILE%\.fhir\packages</c> on Windows).
     /// </param>
-    public DiskPackageCache(string? cacheDirectory = null)
+    /// <param name="logger">Optional logger for diagnostics.</param>
+    /// <param name="timeProvider">Optional time provider; defaults to <see cref="TimeProvider.System"/>.</param>
+    public DiskPackageCache(string? cacheDirectory = null, ILogger<DiskPackageCache>? logger = null, TimeProvider? timeProvider = null)
     {
+        _logger = logger ?? NullLogger<DiskPackageCache>.Instance;
+        _timeProvider = timeProvider ?? TimeProvider.System;
         CacheDirectory = cacheDirectory
             ?? Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER")
             ?? Path.Combine(
@@ -116,6 +124,8 @@ public class DiskPackageCache : IPackageCache, IDisposable
         if (!Directory.Exists(CacheDirectory))
             return [];
 
+        // Read metadata once for all packages instead of per-directory
+        var metadata = await GetMetadataAsync(ct).ConfigureAwait(false);
         var results = new List<PackageRecord>();
 
         // Find all directories matching the name#version pattern
@@ -141,9 +151,26 @@ public class DiskPackageCache : IPackageCache, IDisposable
                 continue;
 
             var reference = new PackageReference(name, version);
-            var record = await GetPackageAsync(reference, ct).ConfigureAwait(false);
-            if (record is not null)
-                results.Add(record);
+            var contentPath = GetContentPath(reference);
+            if (!Directory.Exists(contentPath))
+                continue;
+
+            var manifest = await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false);
+            if (manifest is null)
+                continue;
+
+            var directive = reference.FhirDirective;
+            metadata.Packages.TryGetValue(directive, out var entry);
+
+            results.Add(new PackageRecord
+            {
+                Reference = reference,
+                DirectoryPath = GetPackageDirectoryPath(reference),
+                ContentPath = contentPath,
+                Manifest = manifest,
+                InstalledAt = entry?.DownloadDateTime,
+                SizeBytes = entry?.SizeBytes
+            });
         }
 
         return results;
@@ -164,18 +191,27 @@ public class DiskPackageCache : IPackageCache, IDisposable
         options ??= new InstallCacheOptions();
 
         // Verify checksum if requested
-        if (options.VerifyChecksum && options.ExpectedShaSum is not null)
+        if (options.VerifyChecksum)
         {
-            if (!CheckSum.Verify(tarballStream, options.ExpectedShaSum))
+            if (options.ExpectedSha256Sum is not null)
             {
-                throw new InvalidOperationException(
-                    $"SHA-1 checksum mismatch for package {reference.FhirDirective}. " +
-                    $"Expected: {options.ExpectedShaSum}");
+                if (!CheckSum.VerifySha256(tarballStream, options.ExpectedSha256Sum))
+                {
+                    throw new InvalidOperationException(
+                        $"SHA-256 checksum mismatch for package {reference.FhirDirective}. " +
+                        $"Expected: {options.ExpectedSha256Sum}");
+                }
             }
-
-            // Reset stream after checksum verification
-            if (tarballStream.CanSeek)
-                tarballStream.Position = 0;
+            else if (options.ExpectedShaSum is not null)
+            {
+                if (!CheckSum.Verify(tarballStream, options.ExpectedShaSum))
+                {
+                    throw new InvalidOperationException(
+                        $"SHA-1 checksum mismatch for package {reference.FhirDirective}. " +
+                        $"Expected: {options.ExpectedShaSum}");
+                }
+            }
+            // Verify now resets position by default when the stream supports seeking
         }
 
         var targetDirectory = GetPackageDirectoryPath(reference);
@@ -215,7 +251,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
                 if (Directory.Exists(tempDir))
                 {
                     try { Directory.Delete(tempDir, recursive: true); }
-                    catch { /* Best-effort cleanup */ }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to clean up temp directory '{TempDir}'", tempDir); }
                 }
             }
 
@@ -224,7 +260,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
             var sizeBytes = CalculateDirectorySize(contentPath);
             var entry = new CacheMetadataEntry
             {
-                DownloadDateTime = DateTime.UtcNow,
+                DownloadDateTime = _timeProvider.GetUtcNow().UtcDateTime,
                 SizeBytes = sizeBytes
             };
             await UpdateMetadataAsync(reference, entry, ct).ConfigureAwait(false);
@@ -371,12 +407,12 @@ public class DiskPackageCache : IPackageCache, IDisposable
     }
 
     /// <inheritdoc />
-    public Task<CacheMetadata> GetMetadataAsync(CancellationToken ct = default)
+    public async Task<CacheMetadata> GetMetadataAsync(CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 
         var metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
-        var ini = IniParser.ParseFile(metadataPath);
+        var ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
 
         var cacheVersion = 3;
         if (ini.TryGetValue("cache", out var cacheSection)
@@ -418,20 +454,20 @@ public class DiskPackageCache : IPackageCache, IDisposable
             }
         }
 
-        return Task.FromResult(new CacheMetadata
+        return new CacheMetadata
         {
             CacheVersion = cacheVersion,
             Packages = packages
-        });
+        };
     }
 
     /// <inheritdoc />
-    public Task UpdateMetadataAsync(PackageReference reference, CacheMetadataEntry entry, CancellationToken ct = default)
+    public async Task UpdateMetadataAsync(PackageReference reference, CacheMetadataEntry entry, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
 
         var metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
-        var ini = IniParser.ParseFile(metadataPath);
+        var ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
 
         // Build mutable copy of the INI structure
         var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
@@ -459,25 +495,24 @@ public class DiskPackageCache : IPackageCache, IDisposable
             sections["package-sizes"][directive] = entry.SizeBytes.Value.ToString(CultureInfo.InvariantCulture);
         }
 
-        IniParser.WriteFile(metadataPath, sections.ToDictionary(
+        await IniParser.WriteFileAsync(metadataPath, sections.ToDictionary(
             kvp => kvp.Key,
             kvp => (IReadOnlyDictionary<string, string>)kvp.Value,
-            StringComparer.OrdinalIgnoreCase));
-        return Task.CompletedTask;
+            StringComparer.OrdinalIgnoreCase), ct).ConfigureAwait(false);
     }
 
     /// <summary>
     /// Removes a package entry from the cache metadata file.
     /// </summary>
-    private Task RemoveFromMetadataAsync(PackageReference reference, CancellationToken ct)
+    private async Task RemoveFromMetadataAsync(PackageReference reference, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
 
         var metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
         if (!File.Exists(metadataPath))
-            return Task.CompletedTask;
+            return;
 
-        var ini = IniParser.ParseFile(metadataPath);
+        var ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
         var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var (key, value) in ini)
         {
@@ -492,11 +527,10 @@ public class DiskPackageCache : IPackageCache, IDisposable
         if (sections.TryGetValue("package-sizes", out var sizeSection))
             sizeSection.Remove(directive);
 
-        IniParser.WriteFile(metadataPath, sections.ToDictionary(
+        await IniParser.WriteFileAsync(metadataPath, sections.ToDictionary(
             kvp => kvp.Key,
             kvp => (IReadOnlyDictionary<string, string>)kvp.Value,
-            StringComparer.OrdinalIgnoreCase));
-        return Task.CompletedTask;
+            StringComparer.OrdinalIgnoreCase), ct).ConfigureAwait(false);
     }
 
     /// <summary>

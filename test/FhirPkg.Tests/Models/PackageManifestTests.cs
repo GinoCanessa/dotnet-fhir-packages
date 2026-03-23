@@ -48,10 +48,10 @@ public class PackageManifestTests
         manifest.Author.ShouldBe("HL7 International");
         manifest.Homepage.ShouldBe("https://hl7.org/fhir/R4/");
         manifest.Canonical.ShouldBe("http://hl7.org/fhir");
-        manifest.FhirVersions.ShouldContain("4.0.1");
+        manifest.FhirVersions!.ShouldContain("4.0.1");
         manifest.Type.ShouldBe("fhir.core");
         manifest.Title.ShouldBe("FHIR R4");
-        manifest.Keywords.ShouldContain("fhir");
+        manifest.Keywords!.ShouldContain("fhir");
     }
 
     [Fact]

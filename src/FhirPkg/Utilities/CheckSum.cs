@@ -103,16 +103,25 @@ public static class CheckSum
     /// </summary>
     /// <param name="stream">The stream to verify. Must be readable.</param>
     /// <param name="expectedHash">The expected SHA-1 hash (hex string), or <c>null</c> to skip verification.</param>
+    /// <param name="resetPosition">
+    /// When <c>true</c> (default) and the stream supports seeking, the stream position is reset
+    /// to its original position after computing the hash.
+    /// </param>
     /// <returns><c>true</c> if the hash matches or verification was skipped; <c>false</c> otherwise.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="stream"/> is <c>null</c>.</exception>
-    public static bool Verify(Stream stream, string? expectedHash)
+    public static bool Verify(Stream stream, string? expectedHash, bool resetPosition = true)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
         if (string.IsNullOrWhiteSpace(expectedHash))
             return true;
 
+        var originalPosition = stream.CanSeek ? stream.Position : -1;
         var actualHash = ComputeSha1(stream);
+
+        if (resetPosition && stream.CanSeek)
+            stream.Position = originalPosition;
+
         return string.Equals(actualHash, expectedHash.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
@@ -123,16 +132,25 @@ public static class CheckSum
     /// </summary>
     /// <param name="stream">The stream to verify. Must be readable.</param>
     /// <param name="expectedHash">The expected SHA-256 hash (hex string), or <c>null</c> to skip verification.</param>
+    /// <param name="resetPosition">
+    /// When <c>true</c> (default) and the stream supports seeking, the stream position is reset
+    /// to its original position after computing the hash.
+    /// </param>
     /// <returns><c>true</c> if the hash matches or verification was skipped; <c>false</c> otherwise.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="stream"/> is <c>null</c>.</exception>
-    public static bool VerifySha256(Stream stream, string? expectedHash)
+    public static bool VerifySha256(Stream stream, string? expectedHash, bool resetPosition = true)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
         if (string.IsNullOrWhiteSpace(expectedHash))
             return true;
 
+        var originalPosition = stream.CanSeek ? stream.Position : -1;
         var actualHash = ComputeSha256(stream);
+
+        if (resetPosition && stream.CanSeek)
+            stream.Position = originalPosition;
+
         return string.Equals(actualHash, expectedHash.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 }

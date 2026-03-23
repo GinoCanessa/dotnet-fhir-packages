@@ -160,7 +160,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         if (string.IsNullOrWhiteSpace(versionString))
             return false;
 
-        var input = versionString.Trim();
+        var input = versionString.AsSpan().Trim();
 
         // Pure wildcard: "*", "x", "X"
         if (input is "*" or "x" or "X")
@@ -174,9 +174,10 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         var plusIndex = input.IndexOf('+');
         if (plusIndex >= 0)
         {
-            buildMetadata = input[(plusIndex + 1)..];
-            if (buildMetadata.Length == 0 || !IsValidIdentifier(buildMetadata))
+            var bm = input[(plusIndex + 1)..];
+            if (bm.Length == 0 || !IsValidIdentifier(bm))
                 return false;
+            buildMetadata = new string(bm);
             input = input[..plusIndex];
         }
 
@@ -185,69 +186,75 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         var dashIndex = input.IndexOf('-');
         if (dashIndex >= 0)
         {
-            preRelease = input[(dashIndex + 1)..];
-            if (preRelease.Length == 0 || !IsValidIdentifier(preRelease))
+            var pr = input[(dashIndex + 1)..];
+            if (pr.Length == 0 || !IsValidIdentifier(pr))
                 return false;
+            preRelease = new string(pr);
             input = input[..dashIndex];
         }
 
-        // Split the version core by '.'
-        var parts = input.Split('.');
+        // Parse the version core segments using span indexing (avoids Split allocation)
+        var firstDot = input.IndexOf('.');
+        if (firstDot < 0)
+            return false;
 
-        switch (parts.Length)
+        var afterFirst = input[(firstDot + 1)..];
+        var secondDot = afterFirst.IndexOf('.');
+
+        if (secondDot < 0)
         {
-            case 2:
-            {
-                // "4.x", "4.*", "4.X", or "4.0" (two-segment → wildcard patch)
-                if (!TryParseSegment(parts[0], out var major))
-                    return false;
+            // Two segments: "4.x", "4.*", "4.X", or "4.0"
+            if (!TryParseSegment(input[..firstDot], out var major))
+                return false;
 
-                // Wildcards cannot carry pre-release or build metadata
+            if (preRelease is not null || buildMetadata is not null)
+                return false;
+
+            if (IsWildcardSegment(afterFirst))
+            {
+                result = new FhirSemVer(major, 0, 0, null, null, WildcardLevel.Minor);
+                return true;
+            }
+
+            if (TryParseSegment(afterFirst, out var minor))
+            {
+                result = new FhirSemVer(major, minor, 0, null, null, WildcardLevel.Patch);
+                return true;
+            }
+
+            return false;
+        }
+        else
+        {
+            // Three segments
+            var seg0 = input[..firstDot];
+            var seg1 = afterFirst[..secondDot];
+            var seg2 = afterFirst[(secondDot + 1)..];
+
+            // Reject 4+ segments
+            if (seg2.IndexOf('.') >= 0)
+                return false;
+
+            if (!TryParseSegment(seg0, out var major))
+                return false;
+            if (!TryParseSegment(seg1, out var minor))
+                return false;
+
+            if (IsWildcardSegment(seg2))
+            {
                 if (preRelease is not null || buildMetadata is not null)
                     return false;
-
-                if (IsWildcardSegment(parts[1]))
-                {
-                    result = new FhirSemVer(major, 0, 0, null, null, WildcardLevel.Minor);
-                    return true;
-                }
-
-                if (TryParseSegment(parts[1], out var minor))
-                {
-                    // Two-segment: "4.0" → treated as "4.0.x"
-                    result = new FhirSemVer(major, minor, 0, null, null, WildcardLevel.Patch);
-                    return true;
-                }
-
-                return false;
+                result = new FhirSemVer(major, minor, 0, null, null, WildcardLevel.Patch);
+                return true;
             }
 
-            case 3:
+            if (TryParseSegment(seg2, out var patch))
             {
-                if (!TryParseSegment(parts[0], out var major))
-                    return false;
-                if (!TryParseSegment(parts[1], out var minor))
-                    return false;
-
-                if (IsWildcardSegment(parts[2]))
-                {
-                    if (preRelease is not null || buildMetadata is not null)
-                        return false;
-                    result = new FhirSemVer(major, minor, 0, null, null, WildcardLevel.Patch);
-                    return true;
-                }
-
-                if (TryParseSegment(parts[2], out var patch))
-                {
-                    result = new FhirSemVer(major, minor, patch, preRelease, buildMetadata, WildcardLevel.None);
-                    return true;
-                }
-
-                return false;
+                result = new FhirSemVer(major, minor, patch, preRelease, buildMetadata, WildcardLevel.None);
+                return true;
             }
 
-            default:
-                return false;
+            return false;
         }
     }
 
@@ -255,7 +262,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     /// Parses a single non-negative integer version segment, rejecting leading zeros
     /// per the SemVer 2.0 specification (e.g., <c>"01"</c> is invalid).
     /// </summary>
-    private static bool TryParseSegment(string segment, out int value)
+    private static bool TryParseSegment(ReadOnlySpan<char> segment, out int value)
     {
         value = 0;
         if (segment.Length == 0)
@@ -268,14 +275,14 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         return int.TryParse(segment, NumberStyles.None, CultureInfo.InvariantCulture, out value);
     }
 
-    private static bool IsWildcardSegment(string segment) =>
+    private static bool IsWildcardSegment(ReadOnlySpan<char> segment) =>
         segment is "x" or "X" or "*";
 
     /// <summary>
     /// Validates that a pre-release or build metadata string contains only
     /// alphanumeric characters, hyphens, and dots (per SemVer 2.0).
     /// </summary>
-    private static bool IsValidIdentifier(string value)
+    private static bool IsValidIdentifier(ReadOnlySpan<char> value)
     {
         foreach (var ch in value)
         {

@@ -86,7 +86,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         };
 
         // Build registry client chain
-        _registryClient = BuildRegistryClient(options, _ownedHttpClient, factory);
+        _registryClient = RegistryClientFactory.BuildRegistryClient(options, _ownedHttpClient, factory);
 
         // Build resolvers
         _versionResolver = new VersionResolver(_registryClient, _logger);
@@ -224,26 +224,42 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         MemoryStream? checksumBuffer = null;
         try
         {
-            if (_options.VerifyChecksums && resolved.ShaSum is not null)
+            if (_options.VerifyChecksums && (resolved.Sha256Sum is not null || resolved.ShaSum is not null))
             {
-                // Buffer the stream so we can compute the hash and then seek back for extraction
                 checksumBuffer = new MemoryStream();
                 await contentStream.CopyToAsync(checksumBuffer, cancellationToken).ConfigureAwait(false);
                 checksumBuffer.Position = 0;
 
-                if (!CheckSum.Verify(checksumBuffer, resolved.ShaSum))
+                bool checksumValid;
+                string algorithm;
+                string expectedHash;
+
+                if (resolved.Sha256Sum is not null)
+                {
+                    checksumValid = CheckSum.VerifySha256(checksumBuffer, resolved.Sha256Sum);
+                    algorithm = "SHA-256";
+                    expectedHash = resolved.Sha256Sum;
+                }
+                else
+                {
+                    checksumValid = CheckSum.Verify(checksumBuffer, resolved.ShaSum);
+                    algorithm = "SHA-1";
+                    expectedHash = resolved.ShaSum!;
+                }
+
+                if (!checksumValid)
                 {
                     _logger.LogError(
-                        "SHA-1 checksum verification failed for {Name}#{Version}. Expected: {Expected}.",
-                        resolved.Reference.Name, resolved.Reference.Version, resolved.ShaSum);
+                        "{Algorithm} checksum verification failed for {Name}#{Version}. Expected: {Expected}.",
+                        algorithm, resolved.Reference.Name, resolved.Reference.Version, expectedHash);
                     ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Failed);
                     throw new InvalidOperationException(
-                        $"SHA-1 checksum verification failed for {resolved.Reference.FhirDirective}.");
+                        $"{algorithm} checksum verification failed for {resolved.Reference.FhirDirective}.");
                 }
 
                 checksumBuffer.Position = 0;
                 contentStream = checksumBuffer;
-                _logger.LogDebug("SHA-1 checksum verified for {Name}#{Version}.", resolved.Reference.Name, resolved.Reference.Version);
+                _logger.LogDebug("{Algorithm} checksum verified for {Name}#{Version}.", algorithm, resolved.Reference.Name, resolved.Reference.Version);
             }
 
             // Step 7: Install to cache
@@ -546,8 +562,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         _logger.LogInformation("Publishing tarball '{TarballPath}' to registry '{RegistryUrl}'.",
             tarballPath, registry.Url);
 
-        // Read the tarball and extract the manifest to determine the package reference
-        await using var tarballStream = File.OpenRead(tarballPath);
+        // Extract the manifest to determine the package reference
         var reference = await ExtractReferenceFromTarballAsync(tarballPath, cancellationToken).ConfigureAwait(false);
 
         _logger.LogDebug("Publishing as {Name}#{Version}.", reference.Name, reference.Version);
@@ -555,8 +570,8 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         // Find the appropriate registry client for the target endpoint
         var targetClient = FindRegistryClient(registry);
 
-        // Seek back to start for the actual publish
-        tarballStream.Position = 0;
+        // Open a fresh stream for the actual publish
+        await using var tarballStream = File.OpenRead(tarballPath);
         var result = await targetClient.PublishAsync(reference, tarballStream, cancellationToken).ConfigureAwait(false);
 
         if (result.Success)
@@ -583,69 +598,12 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         _disposed = true;
 
         _ownedHttpClient?.Dispose();
-        _logger.LogDebug("FhirPackageManager disposed.");
+
+        try { _logger.LogDebug("FhirPackageManager disposed."); }
+        catch { /* Logger may already be disposed during DI container teardown */ }
     }
 
     #region Private helpers
-
-    /// <summary>
-    /// Builds the composite registry client chain from the provided options.
-    /// </summary>
-    private static IRegistryClient BuildRegistryClient(
-        FhirPackageManagerOptions options,
-        HttpClient httpClient,
-        ILoggerFactory loggerFactory)
-    {
-        var clients = new List<IRegistryClient>();
-
-        if (options.Registries.Count > 0)
-        {
-            // Use explicitly configured registries
-            foreach (var endpoint in options.Registries)
-            {
-                clients.Add(CreateClientForEndpoint(endpoint, httpClient, loggerFactory));
-            }
-        }
-        else
-        {
-            // Build default registry chain
-            clients.Add(new FhirNpmRegistryClient(httpClient, RegistryEndpoint.FhirPrimary, loggerFactory.CreateLogger<FhirNpmRegistryClient>()));
-            clients.Add(new FhirNpmRegistryClient(httpClient, RegistryEndpoint.FhirSecondary, loggerFactory.CreateLogger<FhirNpmRegistryClient>()));
-        }
-
-        // Add CI build client if configured
-        if (options.IncludeCiBuilds)
-        {
-            clients.Add(new FhirCiBuildClient(httpClient, RegistryEndpoint.FhirCiBuild, loggerFactory.CreateLogger<FhirCiBuildClient>()));
-        }
-
-        // Add HL7 website fallback if configured
-        if (options.IncludeHl7WebsiteFallback)
-        {
-            clients.Add(new Hl7WebsiteClient(httpClient, RegistryEndpoint.Hl7Website, loggerFactory.CreateLogger<Hl7WebsiteClient>()));
-        }
-
-        return new RedundantRegistryClient(clients, loggerFactory.CreateLogger<RedundantRegistryClient>());
-    }
-
-    /// <summary>
-    /// Creates the appropriate registry client implementation for a given endpoint type.
-    /// </summary>
-    private static IRegistryClient CreateClientForEndpoint(
-        RegistryEndpoint endpoint,
-        HttpClient httpClient,
-        ILoggerFactory loggerFactory)
-    {
-        return endpoint.Type switch
-        {
-            RegistryType.FhirNpm => new FhirNpmRegistryClient(httpClient, endpoint, loggerFactory.CreateLogger<FhirNpmRegistryClient>()),
-            RegistryType.FhirCiBuild => new FhirCiBuildClient(httpClient, endpoint, loggerFactory.CreateLogger<FhirCiBuildClient>()),
-            RegistryType.FhirHttp => new Hl7WebsiteClient(httpClient, endpoint, loggerFactory.CreateLogger<Hl7WebsiteClient>()),
-            RegistryType.Npm => new NpmRegistryClient(httpClient, endpoint, loggerFactory.CreateLogger<NpmRegistryClient>()),
-            _ => throw new ArgumentOutOfRangeException(
-                nameof(endpoint), endpoint.Type, $"Unsupported registry type: {endpoint.Type}.")
-        };
-    }
 
     /// <summary>
     /// Recursively installs dependencies of a cached package.
@@ -723,14 +681,43 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         if (manifest.Dependencies is null || manifest.Dependencies.Count == 0)
             return true;
 
-        // The lock file is stale if any manifest dependency is not present in it
-        foreach (var (name, _) in manifest.Dependencies)
+        // The lock file is stale if any manifest dependency is missing or has a changed version specifier
+        foreach (var (name, versionSpecifier) in manifest.Dependencies)
         {
-            if (!lockFile.Dependencies.ContainsKey(name))
+            if (!lockFile.Dependencies.TryGetValue(name, out var lockedVersion))
+                return false;
+
+            // If the version specifier changed (e.g., "4.0.x" → "5.0.x"), the lock file is stale
+            if (!string.Equals(versionSpecifier, lockedVersion, StringComparison.Ordinal)
+                && !IsVersionSatisfiedBy(versionSpecifier, lockedVersion))
                 return false;
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Checks whether a locked exact version could plausibly satisfy the given version specifier.
+    /// This is a heuristic: exact versions satisfy themselves, and wildcard/range specifiers
+    /// are checked via <see cref="FhirSemVer.Satisfies"/>.
+    /// </summary>
+    private static bool IsVersionSatisfiedBy(string specifier, string lockedVersion)
+    {
+        // If the specifier IS the locked version, it's satisfied
+        if (string.Equals(specifier, lockedVersion, StringComparison.Ordinal))
+            return true;
+
+        // Try to parse both and check satisfaction
+        if (FhirSemVer.TryParse(lockedVersion, out var lockedSemVer)
+            && FhirSemVer.TryParse(specifier, out var specifierSemVer))
+        {
+            // If the specifier is a wildcard or range, check if the locked version satisfies it
+            if (specifierSemVer.IsWildcard)
+                return lockedSemVer.Satisfies(specifier);
+        }
+
+        // For "latest", "current", range expressions (^, ~), assume the lock file may be stale
+        return false;
     }
 
     /// <summary>
@@ -803,7 +790,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         {
             // Clean up temp directory
             try { Directory.Delete(tempDir, recursive: true); }
-            catch { /* best-effort cleanup */ }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to clean up temp directory '{TempDir}'", tempDir); }
         }
     }
 
@@ -820,7 +807,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         // Create an ephemeral client. The caller owns the HTTP client lifetime externally.
         if (_ownedHttpClient is not null)
         {
-            return CreateClientForEndpoint(registry, _ownedHttpClient, _loggerFactory);
+            return RegistryClientFactory.CreateClientForEndpoint(registry, _ownedHttpClient, _loggerFactory);
         }
 
         // If we're in DI mode, fall back to the registered client

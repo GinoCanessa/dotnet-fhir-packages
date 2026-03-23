@@ -43,7 +43,7 @@ internal static class InfoCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var packageId = parseResult.GetValue(packageArg);
+            var packageId = parseResult.GetValue(packageArg)!;
             var showVersions = parseResult.GetValue(versionsOption);
             var showDependencies = parseResult.GetValue(dependenciesOption);
 

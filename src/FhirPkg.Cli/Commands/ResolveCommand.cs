@@ -31,7 +31,7 @@ internal static class ResolveCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            var directive = parseResult.GetValue(directiveArg);
+            var directive = parseResult.GetValue(directiveArg)!;
 
             var globalOpts = parseResult.GetGlobalOptions();
 

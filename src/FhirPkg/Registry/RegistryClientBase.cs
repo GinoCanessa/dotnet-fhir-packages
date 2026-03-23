@@ -436,4 +436,49 @@ public abstract class RegistryClientBase : IRegistryClient
         PackageReference reference, Stream tarballStream,
         CancellationToken cancellationToken = default) =>
         throw new NotSupportedException($"Publishing is not supported by {GetType().Name}.");
+
+    // ── Version resolution helpers ──────────────────────────────────────
+
+    /// <summary>Resolves the best matching version from a <see cref="PackageListing"/>.</summary>
+    protected static string? ResolveVersion(
+        PackageDirective directive, PackageListing listing, VersionResolveOptions? options)
+    {
+        return directive.VersionType switch
+        {
+            VersionType.Exact => ResolveExact(listing, directive.RequestedVersion!),
+            VersionType.Latest => listing.LatestVersion,
+            VersionType.Wildcard => ResolveWildcard(listing, directive.RequestedVersion!, options),
+            VersionType.Range => ResolveRange(listing, directive.RequestedVersion!, options),
+            _ => null,
+        };
+    }
+
+    /// <summary>Returns <paramref name="requestedVersion"/> if it exists in the listing, otherwise <see langword="null"/>.</summary>
+    protected static string? ResolveExact(PackageListing listing, string requestedVersion)
+    {
+        return listing.Versions!.ContainsKey(requestedVersion) ? requestedVersion : null;
+    }
+
+    /// <summary>Returns the highest version satisfying a wildcard specifier.</summary>
+    protected static string? ResolveWildcard(
+        PackageListing listing, string specifier, VersionResolveOptions? options)
+    {
+        var versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
+        var includePreRelease = options?.AllowPreRelease ?? true;
+
+        return FhirSemVer.MaxSatisfying(versions, specifier, includePreRelease)?.ToString();
+    }
+
+    /// <summary>Returns the highest version satisfying a semver range expression.</summary>
+    protected static string? ResolveRange(
+        PackageListing listing, string rangeExpression, VersionResolveOptions? options)
+    {
+        var versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
+        var satisfying = FhirSemVer.SatisfyingRange(versions, rangeExpression);
+
+        if (options?.AllowPreRelease is false)
+            satisfying = satisfying.Where(v => !v.IsPreRelease);
+
+        return satisfying.OrderByDescending(v => v).FirstOrDefault()?.ToString();
+    }
 }

@@ -11,7 +11,7 @@ namespace FhirPkg.Cache;
 /// All implementations must be thread-safe for concurrent read access. Write operations
 /// (install, remove, clear) should be serialized.
 /// </summary>
-public interface IPackageCache
+public interface IPackageCache : IDisposable
 {
     /// <summary>
     /// Gets the root directory of the package cache (e.g., ~/.fhir/packages).
@@ -156,4 +156,10 @@ public class InstallCacheOptions
     /// <see cref="VerifyChecksum"/> is <c>true</c>.
     /// </summary>
     public string? ExpectedShaSum { get; set; }
+
+    /// <summary>
+    /// Expected SHA-256 hash of the tarball. When provided and <see cref="VerifyChecksum"/> is <c>true</c>,
+    /// SHA-256 is preferred over SHA-1 for integrity verification.
+    /// </summary>
+    public string? ExpectedSha256Sum { get; set; }
 }

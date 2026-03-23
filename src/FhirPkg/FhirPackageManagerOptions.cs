@@ -24,7 +24,7 @@ public class FhirPackageManagerOptions
     /// When empty, the default chain is constructed from <see cref="IncludeCiBuilds"/>
     /// and <see cref="IncludeHl7WebsiteFallback"/> settings.
     /// </summary>
-    public List<RegistryEndpoint> Registries { get; set; } = new();
+    public List<RegistryEndpoint> Registries { get; init; } = [];
 
     /// <summary>
     /// Whether to include the FHIR CI build registry (<c>build.fhir.org</c>) in the
@@ -75,7 +75,7 @@ public class FhirPackageManagerOptions
     /// Known package version fixups that correct well-known errata in the FHIR package ecosystem.
     /// Keys are in the format <c>"name@version"</c>; values are the corrected version strings.
     /// </summary>
-    public Dictionary<string, string> VersionFixups { get; set; } = new()
+    public Dictionary<string, string> VersionFixups { get; init; } = new()
     {
         ["hl7.fhir.r4.core@4.0.0"] = "4.0.1"
     };

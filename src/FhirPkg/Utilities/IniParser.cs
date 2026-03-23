@@ -34,8 +34,8 @@ public static class IniParser
     {
         ArgumentNullException.ThrowIfNull(content);
 
-        var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
-        var currentSection = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var sections = new Dictionary<string, Dictionary<string, string>>(5, StringComparer.OrdinalIgnoreCase);
+        var currentSection = new Dictionary<string, string>(50, StringComparer.OrdinalIgnoreCase);
         var currentSectionName = string.Empty;
 
         using var reader = new StringReader(content);
@@ -57,7 +57,7 @@ public static class IniParser
                 currentSectionName = trimmed[1..^1].Trim();
                 currentSection = sections.TryGetValue(currentSectionName, out var existing)
                     ? new Dictionary<string, string>(existing, StringComparer.OrdinalIgnoreCase)
-                    : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    : new Dictionary<string, string>(50, StringComparer.OrdinalIgnoreCase);
                 continue;
             }
 
@@ -155,5 +155,51 @@ public static class IniParser
             Directory.CreateDirectory(directory);
 
         File.WriteAllText(filePath, Serialize(sections));
+    }
+
+    /// <summary>
+    /// Asynchronously parses an INI file from disk into a nested dictionary structure.
+    /// Returns an empty structure if the file does not exist.
+    /// </summary>
+    /// <param name="filePath">Full path to the INI file.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>
+    /// A dictionary of section names to dictionaries of key-value pairs.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="filePath"/> is <c>null</c>.</exception>
+    public static async Task<IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>> ParseFileAsync(
+        string filePath,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(filePath);
+
+        if (!File.Exists(filePath))
+            return new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+
+        var content = await File.ReadAllTextAsync(filePath, ct).ConfigureAwait(false);
+        return Parse(content);
+    }
+
+    /// <summary>
+    /// Asynchronously writes a nested dictionary structure to an INI file on disk.
+    /// Creates parent directories if they do not exist.
+    /// </summary>
+    /// <param name="filePath">Full path to the INI file to write.</param>
+    /// <param name="sections">The section/key-value structure to write.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="filePath"/> or <paramref name="sections"/> is <c>null</c>.</exception>
+    public static async Task WriteFileAsync(
+        string filePath,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> sections,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(filePath);
+        ArgumentNullException.ThrowIfNull(sections);
+
+        var directory = Path.GetDirectoryName(filePath);
+        if (directory is not null)
+            Directory.CreateDirectory(directory);
+
+        await File.WriteAllTextAsync(filePath, Serialize(sections), ct).ConfigureAwait(false);
     }
 }

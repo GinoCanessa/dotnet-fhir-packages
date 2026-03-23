@@ -34,6 +34,7 @@ public class DependencyResolver : IDependencyResolver
     private readonly IVersionResolver _versionResolver;
     private readonly IPackageCache _cache;
     private readonly ILogger _logger;
+    private readonly TimeProvider _timeProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DependencyResolver"/> class.
@@ -45,11 +46,13 @@ public class DependencyResolver : IDependencyResolver
     /// <param name="versionResolver">Resolver for converting version specifiers to exact versions.</param>
     /// <param name="cache">The local package cache for reading manifests of already-cached packages.</param>
     /// <param name="logger">Logger for diagnostic output.</param>
+    /// <param name="timeProvider">Optional time provider; defaults to <see cref="TimeProvider.System"/>.</param>
     public DependencyResolver(
         IRegistryClient registryClient,
         IVersionResolver versionResolver,
         IPackageCache cache,
-        ILogger logger)
+        ILogger logger,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(registryClient);
         ArgumentNullException.ThrowIfNull(versionResolver);
@@ -60,6 +63,7 @@ public class DependencyResolver : IDependencyResolver
         _versionResolver = versionResolver;
         _cache = cache;
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <inheritdoc />
@@ -97,7 +101,7 @@ public class DependencyResolver : IDependencyResolver
 
         return new PackageClosure
         {
-            Timestamp = DateTime.UtcNow,
+            Timestamp = _timeProvider.GetUtcNow().UtcDateTime,
             Resolved = resolved,
             Missing = missing,
         };
@@ -172,7 +176,7 @@ public class DependencyResolver : IDependencyResolver
 
         return new PackageClosure
         {
-            Timestamp = DateTime.UtcNow,
+            Timestamp = _timeProvider.GetUtcNow().UtcDateTime,
             Resolved = resolved,
             Missing = missing,
         };
@@ -311,7 +315,7 @@ public class DependencyResolver : IDependencyResolver
         {
             ConflictResolutionStrategy.FirstWins => existing,
             ConflictResolutionStrategy.HighestWins => PickHighestVersion(existing, incoming),
-            ConflictResolutionStrategy.Error => null,
+            ConflictResolutionStrategy.Error => null!,
             _ => existing
         };
     }

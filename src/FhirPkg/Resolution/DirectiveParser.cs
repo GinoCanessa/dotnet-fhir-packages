@@ -12,22 +12,11 @@ namespace FhirPkg.Resolution;
 /// Supplements <see cref="PackageDirective.Parse"/> with lower-level classification
 /// and extraction helpers used by resolution components.
 /// </summary>
-public static class DirectiveParser
+public static partial class DirectiveParser
 {
-    // FHIR version suffix pattern: ".r2", ".r3", ".r4", ".r4b", ".r5", ".r6"
-    private static readonly Regex s_fhirVersionSuffix = new(
-        @"\.r(\d+b?)$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
     // CI branch pattern: "current$branchname"
-    private static readonly Regex s_ciBranchPattern = new(
-        @"^current\$(.+)$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    // HL7-scope prefix: hl7.fhir.*, hl7.cda.*, hl7.v2.*, ihe.*, who.*
-    private static readonly Regex s_hl7ScopePattern = new(
-        @"^(hl7\.fhir\.|hl7\.cda\.|hl7\.v2\.|hl7\.other\.|ihe\.|who\.)",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    [GeneratedRegex(@"^current\$(.+)$", RegexOptions.IgnoreCase)]
+    private static partial Regex CiBranchPattern();
 
     /// <summary>
     /// Parses a raw directive string into a fully classified <see cref="PackageDirective"/>.
@@ -48,73 +37,14 @@ public static class DirectiveParser
     /// <param name="packageId">The package identifier (e.g. "hl7.fhir.r4.core", "hl7.fhir.us.core").</param>
     /// <returns>The classification of the package name.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="packageId"/> is <c>null</c>.</exception>
-    public static PackageNameType ClassifyName(string packageId)
-    {
-        ArgumentNullException.ThrowIfNull(packageId);
-
-        var lower = packageId.ToLowerInvariant();
-
-        // Check for hl7.fhir.r* prefix (core packages)
-        if (lower.StartsWith("hl7.fhir.r", StringComparison.Ordinal))
-        {
-            var segments = lower.Split('.');
-            if (segments.Length >= 4)
-            {
-                var typeSuffix = segments[3];
-                if (FhirReleaseMapping.KnownCoreTypes.Contains(typeSuffix))
-                    return PackageNameType.CoreFull;
-            }
-            else if (segments.Length == 3)
-            {
-                return PackageNameType.CorePartial;
-            }
-        }
-
-        // Check for HL7-scope pattern
-        if (s_hl7ScopePattern.IsMatch(lower))
-        {
-            return s_fhirVersionSuffix.IsMatch(lower)
-                ? PackageNameType.GuideWithFhirSuffix
-                : PackageNameType.GuideWithoutSuffix;
-        }
-
-        return PackageNameType.NonHl7Guide;
-    }
+    public static PackageNameType ClassifyName(string packageId) => PackageDirective.ClassifyName(packageId);
 
     /// <summary>
     /// Classifies a version string into a <see cref="VersionType"/>.
     /// </summary>
     /// <param name="version">The version string (e.g. "4.0.1", "latest", "current", "4.0.x", "^4.0.0").</param>
     /// <returns>The classification of the version specifier.</returns>
-    public static VersionType ClassifyVersion(string? version)
-    {
-        if (string.IsNullOrEmpty(version) ||
-            version.Equals("latest", StringComparison.OrdinalIgnoreCase))
-            return VersionType.Latest;
-
-        if (version.Equals("current", StringComparison.OrdinalIgnoreCase))
-            return VersionType.CiBuild;
-
-        if (version.StartsWith("current$", StringComparison.OrdinalIgnoreCase))
-            return VersionType.CiBuildBranch;
-
-        if (version.Equals("dev", StringComparison.OrdinalIgnoreCase))
-            return VersionType.LocalBuild;
-
-        // Wildcard: contains 'x', 'X', or '*' as a version segment
-        var segments = version.Split('.');
-        foreach (var seg in segments)
-        {
-            if (seg is "x" or "X" or "*")
-                return VersionType.Wildcard;
-        }
-
-        // Range operators: ^, ~, or pipe
-        if (version.StartsWith('^') || version.StartsWith('~') || version.Contains('|'))
-            return VersionType.Range;
-
-        return VersionType.Exact;
-    }
+    public static VersionType ClassifyVersion(string? version) => PackageDirective.ClassifyVersion(version);
 
     /// <summary>
     /// Splits a raw directive string into its component parts: package ID, version, and optional alias.
@@ -130,18 +60,18 @@ public static class DirectiveParser
     {
         ArgumentNullException.ThrowIfNull(directive);
 
-        var trimmed = directive.Trim();
-        if (trimmed.Length == 0)
+        var span = directive.AsSpan().Trim();
+        if (span.Length == 0)
             throw new ArgumentException("Directive must not be empty.", nameof(directive));
 
         string? alias = null;
-        var input = trimmed;
+        var input = span;
 
         // Handle NPM alias syntax: "alias@npm:actual@version"
-        var npmPrefixIndex = input.IndexOf("@npm:", StringComparison.OrdinalIgnoreCase);
+        var npmPrefixIndex = input.IndexOf("@npm:".AsSpan(), StringComparison.OrdinalIgnoreCase);
         if (npmPrefixIndex > 0)
         {
-            alias = input[..npmPrefixIndex];
+            alias = new string(input[..npmPrefixIndex]);
             input = input[(npmPrefixIndex + 5)..]; // skip "@npm:"
         }
 
@@ -149,7 +79,7 @@ public static class DirectiveParser
         var hashIndex = input.IndexOf('#');
         if (hashIndex >= 0)
         {
-            var name = input[..hashIndex];
+            var name = new string(input[..hashIndex]);
             var ver = input[(hashIndex + 1)..];
             return (name, NullIfEmpty(ver), alias);
         }
@@ -158,13 +88,13 @@ public static class DirectiveParser
         var atIndex = input.LastIndexOf('@');
         if (atIndex > 0)
         {
-            var name = input[..atIndex];
+            var name = new string(input[..atIndex]);
             var ver = input[(atIndex + 1)..];
             return (name, NullIfEmpty(ver), alias);
         }
 
         // No separator — just a package name
-        return (input, null, alias);
+        return (new string(input), null, alias);
     }
 
     /// <summary>
@@ -180,7 +110,7 @@ public static class DirectiveParser
         if (version is null)
             return null;
 
-        var match = s_ciBranchPattern.Match(version);
+        var match = CiBranchPattern().Match(version);
         return match.Success ? match.Groups[1].Value : null;
     }
 
@@ -221,6 +151,6 @@ public static class DirectiveParser
         return FhirReleaseMapping.GetCorePackageNames(release.Value);
     }
 
-    private static string? NullIfEmpty(string value) =>
-        string.IsNullOrWhiteSpace(value) ? null : value;
+    private static string? NullIfEmpty(ReadOnlySpan<char> value) =>
+        value.IsEmpty || value.IsWhiteSpace() ? null : new string(value);
 }
