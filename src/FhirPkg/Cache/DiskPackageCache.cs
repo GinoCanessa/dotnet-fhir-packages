@@ -28,7 +28,7 @@ namespace FhirPkg.Cache;
 /// On Windows, cross-volume moves fall back to a copy-then-delete strategy.
 /// </para>
 /// </remarks>
-public class DiskPackageCache : IPackageCache
+public class DiskPackageCache : IPackageCache, IDisposable
 {
     private const string PackageSubdirectory = "package";
     private const string ManifestFileName = "package.json";
@@ -434,10 +434,10 @@ public class DiskPackageCache : IPackageCache
         var ini = IniParser.ParseFile(metadataPath);
 
         // Build mutable copy of the INI structure
-        var sections = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var (key, value) in ini)
         {
-            sections[key] = new Dictionary<string, string>((IDictionary<string, string>)value, StringComparer.OrdinalIgnoreCase);
+            sections[key] = new Dictionary<string, string>(value, StringComparer.OrdinalIgnoreCase);
         }
 
         // Ensure required sections exist
@@ -451,17 +451,18 @@ public class DiskPackageCache : IPackageCache
         var dateStr = entry.DownloadDateTime.ToString(MetadataDateFormat, CultureInfo.InvariantCulture);
 
         // Update the packages section
-        var pkgSection = (Dictionary<string, string>)sections["packages"];
-        pkgSection[directive] = dateStr;
+        sections["packages"][directive] = dateStr;
 
         // Update the package-sizes section
         if (entry.SizeBytes.HasValue)
         {
-            var sizeSection = (Dictionary<string, string>)sections["package-sizes"];
-            sizeSection[directive] = entry.SizeBytes.Value.ToString(CultureInfo.InvariantCulture);
+            sections["package-sizes"][directive] = entry.SizeBytes.Value.ToString(CultureInfo.InvariantCulture);
         }
 
-        IniParser.WriteFile(metadataPath, sections);
+        IniParser.WriteFile(metadataPath, sections.ToDictionary(
+            kvp => kvp.Key,
+            kvp => (IReadOnlyDictionary<string, string>)kvp.Value,
+            StringComparer.OrdinalIgnoreCase));
         return Task.CompletedTask;
     }
 
@@ -477,21 +478,24 @@ public class DiskPackageCache : IPackageCache
             return Task.CompletedTask;
 
         var ini = IniParser.ParseFile(metadataPath);
-        var sections = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var (key, value) in ini)
         {
-            sections[key] = new Dictionary<string, string>((IDictionary<string, string>)value, StringComparer.OrdinalIgnoreCase);
+            sections[key] = new Dictionary<string, string>(value, StringComparer.OrdinalIgnoreCase);
         }
 
         var directive = reference.FhirDirective;
 
         if (sections.TryGetValue("packages", out var pkgSection))
-            ((Dictionary<string, string>)pkgSection).Remove(directive);
+            pkgSection.Remove(directive);
 
         if (sections.TryGetValue("package-sizes", out var sizeSection))
-            ((Dictionary<string, string>)sizeSection).Remove(directive);
+            sizeSection.Remove(directive);
 
-        IniParser.WriteFile(metadataPath, sections);
+        IniParser.WriteFile(metadataPath, sections.ToDictionary(
+            kvp => kvp.Key,
+            kvp => (IReadOnlyDictionary<string, string>)kvp.Value,
+            StringComparer.OrdinalIgnoreCase));
         return Task.CompletedTask;
     }
 
@@ -579,11 +583,18 @@ public class DiskPackageCache : IPackageCache
     /// Ensures a section exists in the INI structure, using defaults if not present.
     /// </summary>
     private static void EnsureSection(
-        Dictionary<string, IReadOnlyDictionary<string, string>> sections,
+        Dictionary<string, Dictionary<string, string>> sections,
         string sectionName,
         Dictionary<string, string>? defaults = null)
     {
         if (!sections.ContainsKey(sectionName))
             sections[sectionName] = defaults ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        _installLock.Dispose();
+        GC.SuppressFinalize(this);
     }
 }

@@ -413,27 +413,27 @@ public abstract class RegistryClientBase : IRegistryClient
     /// <inheritdoc />
     public virtual Task<IReadOnlyList<CatalogEntry>> SearchAsync(
         PackageSearchCriteria criteria, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException();
+        Task.FromResult<IReadOnlyList<CatalogEntry>>(Array.Empty<CatalogEntry>());
 
     /// <inheritdoc />
     public virtual Task<PackageListing?> GetPackageListingAsync(
         string packageId, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException();
+        Task.FromResult<PackageListing?>(null);
 
     /// <inheritdoc />
     public virtual Task<ResolvedDirective?> ResolveAsync(
         PackageDirective directive, VersionResolveOptions? options = null,
         CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException();
+        Task.FromResult<ResolvedDirective?>(null);
 
     /// <inheritdoc />
     public virtual Task<PackageDownloadResult?> DownloadAsync(
         ResolvedDirective resolved, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException();
+        Task.FromResult<PackageDownloadResult?>(null);
 
     /// <inheritdoc />
     public virtual Task<PublishResult> PublishAsync(
         PackageReference reference, Stream tarballStream,
         CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException();
+        throw new NotSupportedException($"Publishing is not supported by {GetType().Name}.");
 }

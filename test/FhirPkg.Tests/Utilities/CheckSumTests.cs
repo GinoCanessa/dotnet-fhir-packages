@@ -92,4 +92,77 @@ public class CheckSumTests
         hash.Length.ShouldBe(40);
         hash.ShouldMatch("^[0-9a-f]{40}$");
     }
+
+    // ── SHA-256 tests ───────────────────────────────────────────────────
+
+    [Fact]
+    public void ComputeSha256_KnownInput_MatchesExpected()
+    {
+        // SHA-256 of empty byte array
+        var data = Array.Empty<byte>();
+
+        var hash = CheckSum.ComputeSha256(data);
+
+        hash.ShouldBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    }
+
+    [Fact]
+    public void ComputeSha256_Stream_ProducesConsistentHash()
+    {
+        var data = Encoding.UTF8.GetBytes("hello world");
+        using var stream = new MemoryStream(data);
+
+        var hashFromStream = CheckSum.ComputeSha256(stream);
+        var hashFromBytes = CheckSum.ComputeSha256(data);
+
+        hashFromStream.ShouldBe(hashFromBytes);
+    }
+
+    [Fact]
+    public void ComputeSha256_NonEmptyInput_Returns64Chars()
+    {
+        var data = Encoding.UTF8.GetBytes("FHIR package");
+
+        var hash = CheckSum.ComputeSha256(data);
+
+        hash.Length.ShouldBe(64);
+        hash.ShouldMatch("^[0-9a-f]{64}$");
+    }
+
+    [Fact]
+    public void VerifySha256_MatchingHash_ReturnsTrue()
+    {
+        var data = Encoding.UTF8.GetBytes("test content");
+        var expectedHash = CheckSum.ComputeSha256(data);
+        using var stream = new MemoryStream(data);
+
+        var result = CheckSum.VerifySha256(stream, expectedHash);
+
+        result.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void VerifySha256_MismatchedHash_ReturnsFalse()
+    {
+        var data = Encoding.UTF8.GetBytes("test content");
+        using var stream = new MemoryStream(data);
+
+        var result = CheckSum.VerifySha256(stream, "0000000000000000000000000000000000000000000000000000000000000000");
+
+        result.ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void VerifySha256_NullOrEmptyExpected_ReturnsTrue(string? expectedHash)
+    {
+        var data = Encoding.UTF8.GetBytes("any content");
+        using var stream = new MemoryStream(data);
+
+        var result = CheckSum.VerifySha256(stream, expectedHash);
+
+        result.ShouldBeTrue();
+    }
 }

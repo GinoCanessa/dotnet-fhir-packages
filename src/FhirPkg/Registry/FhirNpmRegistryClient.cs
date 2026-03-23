@@ -39,9 +39,6 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
     // ── IRegistryClient properties ──────────────────────────────────────
 
     /// <inheritdoc />
-    public RegistryEndpoint Endpoint => EndpointConfig;
-
-    /// <inheritdoc />
     public override IReadOnlyList<PackageNameType> SupportedNameTypes { get; } =
     [
         PackageNameType.CoreFull,

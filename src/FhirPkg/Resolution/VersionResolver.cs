@@ -243,8 +243,7 @@ public class VersionResolver : IVersionResolver
     /// </summary>
     private static FhirSemVer? ResolveWildcard(string pattern, IEnumerable<FhirSemVer> candidates)
     {
-        var satisfying = MaxSatisfying(pattern, candidates);
-        return satisfying;
+        return FhirSemVer.MaxSatisfying(candidates, pattern, includePreRelease: true);
     }
 
     /// <summary>
@@ -252,12 +251,8 @@ public class VersionResolver : IVersionResolver
     /// </summary>
     private static FhirSemVer? ResolveRange(string range, IEnumerable<FhirSemVer> candidates)
     {
-        var satisfying = SatisfyingRange(range, candidates);
-        return satisfying
-            .OrderByDescending(v => v.Major)
-            .ThenByDescending(v => v.Minor)
-            .ThenByDescending(v => v.Patch)
-            .ThenBy(v => v.PreRelease is null ? 0 : 1)
+        return FhirSemVer.SatisfyingRange(candidates, range)
+            .OrderByDescending(v => v)
             .FirstOrDefault();
     }
 
@@ -286,102 +281,6 @@ public class VersionResolver : IVersionResolver
             versions = versions.Where(v => v.PreRelease is null);
         }
         return versions;
-    }
-
-    /// <summary>
-    /// Finds the highest version satisfying a wildcard pattern such as "4.0.x" or "4.*".
-    /// </summary>
-    /// <remarks>
-    /// The pattern is split by '.'; segments that are "x", "X", or "*" match any value.
-    /// Fixed segments must match exactly. The highest matching version is returned.
-    /// </remarks>
-    private static FhirSemVer? MaxSatisfying(string pattern, IEnumerable<FhirSemVer> candidates)
-    {
-        var segments = pattern.Split('.');
-        var matchMajor = ParseSegment(segments, 0);
-        var matchMinor = ParseSegment(segments, 1);
-        var matchPatch = ParseSegment(segments, 2);
-
-        return candidates
-            .Where(v =>
-                (matchMajor is null || v.Major == matchMajor.Value) &&
-                (matchMinor is null || v.Minor == matchMinor.Value) &&
-                (matchPatch is null || v.Patch == matchPatch.Value))
-            .OrderByDescending(v => v.Major)
-            .ThenByDescending(v => v.Minor)
-            .ThenByDescending(v => v.Patch)
-            .ThenBy(v => v.PreRelease is null ? 0 : 1)
-            .FirstOrDefault();
-    }
-
-    /// <summary>
-    /// Finds all versions satisfying a range expression.
-    /// </summary>
-    /// <remarks>
-    /// <para>Supported range operators:</para>
-    /// <list type="bullet">
-    ///   <item><description><c>^major.minor.patch</c> — compatible with: same major, minor &amp; patch ≥ specified.</description></item>
-    ///   <item><description><c>~major.minor.patch</c> — approximately: same major &amp; minor, patch ≥ specified.</description></item>
-    ///   <item><description><c>version1|version2</c> — union of multiple exact versions.</description></item>
-    /// </list>
-    /// </remarks>
-    private static IEnumerable<FhirSemVer> SatisfyingRange(string range, IEnumerable<FhirSemVer> candidates)
-    {
-        // Handle pipe-separated union of versions
-        if (range.Contains('|'))
-        {
-            var parts = range.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-            var targets = parts.Select(TryParseSemVer).Where(v => v is not null).Cast<FhirSemVer>().ToList();
-
-            return candidates.Where(c =>
-                targets.Any(t =>
-                    t.Major == c.Major &&
-                    t.Minor == c.Minor &&
-                    t.Patch == c.Patch &&
-                    string.Equals(t.PreRelease, c.PreRelease, StringComparison.OrdinalIgnoreCase)));
-        }
-
-        // Handle caret range: ^major.minor.patch
-        if (range.StartsWith('^'))
-        {
-            var baseVersion = TryParseSemVer(range[1..]);
-            if (baseVersion is null) return [];
-
-            return candidates.Where(v =>
-                v.Major == baseVersion.Major &&
-                (v.Minor > baseVersion.Minor ||
-                 (v.Minor == baseVersion.Minor && v.Patch >= baseVersion.Patch)));
-        }
-
-        // Handle tilde range: ~major.minor.patch
-        if (range.StartsWith('~'))
-        {
-            var baseVersion = TryParseSemVer(range[1..]);
-            if (baseVersion is null) return [];
-
-            return candidates.Where(v =>
-                v.Major == baseVersion.Major &&
-                v.Minor == baseVersion.Minor &&
-                v.Patch >= baseVersion.Patch);
-        }
-
-        return [];
-    }
-
-    /// <summary>
-    /// Parses a segment of a wildcard pattern. Returns <c>null</c> for wildcard segments
-    /// ("x", "X", "*") or if the segment doesn't exist at the given index.
-    /// </summary>
-    private static int? ParseSegment(string[] segments, int index)
-    {
-        if (index >= segments.Length)
-            return null;
-
-        var seg = segments[index];
-        if (seg is "x" or "X" or "*")
-            return null;
-
-        return int.TryParse(seg, out var value) ? value : null;
     }
 
     /// <summary>

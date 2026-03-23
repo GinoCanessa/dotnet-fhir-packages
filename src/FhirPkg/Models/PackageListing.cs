@@ -27,8 +27,8 @@ public record PackageListing
     public required IReadOnlyDictionary<string, PackageVersionInfo> Versions { get; init; }
 
     /// <summary>
-    /// Returns the version tagged as "latest", or falls back to the highest version key.
-    /// Returns <c>null</c> if there are no versions.
+    /// Returns the version tagged as "latest", or falls back to the highest version key
+    /// using semantic version comparison. Returns <c>null</c> if there are no versions.
     /// </summary>
     [JsonIgnore]
     public string? LatestVersion
@@ -38,8 +38,12 @@ public record PackageListing
             if (DistTags is not null && DistTags.TryGetValue("latest", out var tagged))
                 return tagged;
 
-            // Fall back to the last key (registries typically order ascending)
-            return Versions.Count > 0 ? Versions.Keys.Last() : null;
+            // Parse version keys and pick the highest using semantic version ordering
+            return Versions.Keys
+                .Select(k => FhirSemVer.TryParse(k, out var v) ? v : null)
+                .Where(v => v is not null)
+                .Max()
+                ?.ToString();
         }
     }
 }

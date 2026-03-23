@@ -52,7 +52,7 @@ internal static class InfoCommand
             try
             {
                 var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = new FhirPackageManager(mgrOptions);
+                var manager = ManagerFactory.Create(mgrOptions);
 
                 if (globalOpts.Verbose)
                 {
@@ -75,7 +75,7 @@ internal static class InfoCommand
 
                 if (listing is null)
                 {
-                    WriteErrorOutput(globalOpts, $"Package '{packageId}' not found.");
+                    CommandHelpers.WriteErrorOutput(globalOpts, $"Package '{packageId}' not found.");
                     return ExitCodes.NotFound;
                 }
 
@@ -104,17 +104,17 @@ internal static class InfoCommand
             }
             catch (HttpRequestException ex)
             {
-                WriteErrorOutput(globalOpts, $"Network error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Network error: {ex.Message}");
                 return ExitCodes.NetworkError;
             }
             catch (OperationCanceledException)
             {
-                WriteErrorOutput(globalOpts, "Operation was cancelled.");
+                CommandHelpers.WriteErrorOutput(globalOpts, "Operation was cancelled.");
                 return ExitCodes.GeneralError;
             }
             catch (Exception ex)
             {
-                WriteErrorOutput(globalOpts, ex.Message);
+                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
                 return ExitCodes.GeneralError;
             }
         });
@@ -154,11 +154,4 @@ internal static class InfoCommand
         AnsiConsole.Write(table);
     }
 
-    private static void WriteErrorOutput(GlobalOptions opts, string message)
-    {
-        if (opts.Json)
-            JsonOutput.WriteError(message);
-        else
-            ConsoleOutput.WriteError(message);
-    }
 }

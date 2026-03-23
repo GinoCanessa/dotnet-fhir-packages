@@ -56,12 +56,12 @@ internal static class PublishCommand
             {
                 if (!File.Exists(tarball))
                 {
-                    WriteErrorOutput(globalOpts, $"Tarball not found: {tarball}");
+                    CommandHelpers.WriteErrorOutput(globalOpts, $"Tarball not found: {tarball}");
                     return ExitCodes.NotFound;
                 }
 
                 var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = new FhirPackageManager(mgrOptions);
+                var manager = ManagerFactory.Create(mgrOptions);
 
                 var endpoint = new RegistryEndpoint
                 {
@@ -102,22 +102,22 @@ internal static class PublishCommand
             }
             catch (HttpRequestException ex)
             {
-                WriteErrorOutput(globalOpts, $"Network error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Network error: {ex.Message}");
                 return ExitCodes.NetworkError;
             }
             catch (UnauthorizedAccessException ex)
             {
-                WriteErrorOutput(globalOpts, $"Authentication error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Authentication error: {ex.Message}");
                 return ExitCodes.AuthError;
             }
             catch (OperationCanceledException)
             {
-                WriteErrorOutput(globalOpts, "Operation was cancelled.");
+                CommandHelpers.WriteErrorOutput(globalOpts, "Operation was cancelled.");
                 return ExitCodes.GeneralError;
             }
             catch (Exception ex)
             {
-                WriteErrorOutput(globalOpts, ex.Message);
+                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
                 return ExitCodes.GeneralError;
             }
         });
@@ -125,11 +125,4 @@ internal static class PublishCommand
         return command;
     }
 
-    private static void WriteErrorOutput(GlobalOptions opts, string message)
-    {
-        if (opts.Json)
-            JsonOutput.WriteError(message);
-        else
-            ConsoleOutput.WriteError(message);
-    }
 }

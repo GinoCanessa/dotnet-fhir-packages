@@ -55,7 +55,7 @@ internal static class RemoveCommand
                 }
 
                 var mgrOptions = globalOpts.BuildManagerOptions();
-                var manager = new FhirPackageManager(mgrOptions);
+                var manager = ManagerFactory.Create(mgrOptions);
 
                 var removedCount = 0;
                 var failedCount = 0;
@@ -99,17 +99,17 @@ internal static class RemoveCommand
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                WriteErrorOutput(globalOpts, $"Cache error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Cache error: {ex.Message}");
                 return ExitCodes.CacheError;
             }
             catch (OperationCanceledException)
             {
-                WriteErrorOutput(globalOpts, "Operation was cancelled.");
+                CommandHelpers.WriteErrorOutput(globalOpts, "Operation was cancelled.");
                 return ExitCodes.GeneralError;
             }
             catch (Exception ex)
             {
-                WriteErrorOutput(globalOpts, ex.Message);
+                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
                 return ExitCodes.GeneralError;
             }
         });
@@ -117,11 +117,4 @@ internal static class RemoveCommand
         return command;
     }
 
-    private static void WriteErrorOutput(GlobalOptions opts, string message)
-    {
-        if (opts.Json)
-            JsonOutput.WriteError(message);
-        else
-            ConsoleOutput.WriteError(message);
-    }
 }

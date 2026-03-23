@@ -26,6 +26,23 @@ public class RegistryClientBaseTests
         /// <summary>Expose GetResponseAsync for test assertions.</summary>
         public Task<HttpResponseMessage?> TestGetResponseAsync(string uri, CancellationToken ct) =>
             GetResponseAsync(uri, ct);
+
+        // Expose base virtual methods for testing
+        public Task<IReadOnlyList<CatalogEntry>> TestSearchAsync(CancellationToken ct) =>
+            SearchAsync(new PackageSearchCriteria { Name = "test" }, ct);
+
+        public Task<PackageListing?> TestGetPackageListingAsync(CancellationToken ct) =>
+            GetPackageListingAsync("test", ct);
+
+        public Task<ResolvedDirective?> TestResolveAsync(CancellationToken ct) =>
+            ResolveAsync(PackageDirective.Parse("test#1.0.0"), cancellationToken: ct);
+
+        public Task<PackageDownloadResult?> TestDownloadAsync(CancellationToken ct) =>
+            DownloadAsync(new ResolvedDirective
+            {
+                Reference = new PackageReference { Name = "test", Version = "1.0.0" },
+                TarballUri = new Uri("https://example.com/test-1.0.0.tgz")
+            }, ct);
     }
 
     /// <summary>
@@ -123,5 +140,75 @@ public class RegistryClientBaseTests
 
         allHeaders.ShouldContainKey("X-Correlation");
         allHeaders["X-Correlation"].ShouldBe("test-run-1");
+    }
+
+    // ── M-5: Virtual methods return sensible defaults ───────────────────
+
+    [Fact]
+    public async Task VirtualSearchAsync_ReturnsEmptyList()
+    {
+        var handler = new HeaderCapturingHandler();
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+
+        var result = await client.TestSearchAsync(CancellationToken.None);
+
+        result.ShouldNotBeNull();
+        result.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task VirtualGetPackageListingAsync_ReturnsNull()
+    {
+        var handler = new HeaderCapturingHandler();
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+
+        var result = await client.TestGetPackageListingAsync(CancellationToken.None);
+
+        result.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task VirtualResolveAsync_ReturnsNull()
+    {
+        var handler = new HeaderCapturingHandler();
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+
+        var result = await client.TestResolveAsync(CancellationToken.None);
+
+        result.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task VirtualDownloadAsync_ReturnsNull()
+    {
+        var handler = new HeaderCapturingHandler();
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+
+        var result = await client.TestDownloadAsync(CancellationToken.None);
+
+        result.ShouldBeNull();
+    }
+
+    [Fact]
+    public void VirtualPublishAsync_ThrowsNotSupportedException()
+    {
+        var handler = new HeaderCapturingHandler();
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://example.com") };
+        var ep = new RegistryEndpoint { Url = "https://example.com/", Type = RegistryType.FhirNpm };
+        var client = new TestableRegistryClient(httpClient, ep, NullLogger.Instance);
+
+        Should.Throw<NotSupportedException>(async () =>
+            await client.PublishAsync(
+                new PackageReference("test", "1.0.0"),
+                Stream.Null,
+                CancellationToken.None));
     }
 }

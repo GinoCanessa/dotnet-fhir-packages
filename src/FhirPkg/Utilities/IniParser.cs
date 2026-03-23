@@ -34,7 +34,7 @@ public static class IniParser
     {
         ArgumentNullException.ThrowIfNull(content);
 
-        var sections = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        var sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
         var currentSection = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var currentSectionName = string.Empty;
 
@@ -56,7 +56,7 @@ public static class IniParser
 
                 currentSectionName = trimmed[1..^1].Trim();
                 currentSection = sections.TryGetValue(currentSectionName, out var existing)
-                    ? new Dictionary<string, string>((Dictionary<string, string>)existing, StringComparer.OrdinalIgnoreCase)
+                    ? new Dictionary<string, string>(existing, StringComparer.OrdinalIgnoreCase)
                     : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 continue;
             }
@@ -79,7 +79,11 @@ public static class IniParser
         // Save the final section
         sections[currentSectionName] = currentSection;
 
-        return sections;
+        // Expose Dictionary<string, string> as IReadOnlyDictionary at the API boundary
+        return sections.ToDictionary(
+            kvp => kvp.Key,
+            kvp => (IReadOnlyDictionary<string, string>)kvp.Value,
+            StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>

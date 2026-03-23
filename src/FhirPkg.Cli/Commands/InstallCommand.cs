@@ -86,6 +86,14 @@ internal static class InstallCommand
             progressOption
         };
 
+        command.Validators.Add(result =>
+        {
+            var pre = result.GetValue(preReleaseOption);
+            var noPre = result.GetValue(noPreReleaseOption);
+            if (pre == true && noPre)
+                result.AddError("Cannot specify both --pre-release and --no-pre-release.");
+        });
+
         command.SetAction(async (parseResult, ct) =>
         {
             var packages = parseResult.GetValue(packagesArg);
@@ -120,7 +128,7 @@ internal static class InstallCommand
                     mgrOptions.IncludeCiBuilds = false;
                 }
 
-                var manager = new FhirPackageManager(mgrOptions);
+                var manager = ManagerFactory.Create(mgrOptions);
 
                 var installOptions = new InstallOptions
                 {
@@ -181,29 +189,21 @@ internal static class InstallCommand
             }
             catch (HttpRequestException ex)
             {
-                WriteErrorOutput(globalOpts, $"Network error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Network error: {ex.Message}");
                 return ExitCodes.NetworkError;
             }
             catch (OperationCanceledException)
             {
-                WriteErrorOutput(globalOpts, "Operation was cancelled.");
+                CommandHelpers.WriteErrorOutput(globalOpts, "Operation was cancelled.");
                 return ExitCodes.GeneralError;
             }
             catch (Exception ex)
             {
-                WriteErrorOutput(globalOpts, ex.Message);
+                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
                 return ExitCodes.GeneralError;
             }
         });
 
         return command;
-    }
-
-    private static void WriteErrorOutput(GlobalOptions opts, string message)
-    {
-        if (opts.Json)
-            JsonOutput.WriteError(message);
-        else
-            ConsoleOutput.WriteError(message);
     }
 }

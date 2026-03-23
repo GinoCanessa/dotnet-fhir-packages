@@ -99,7 +99,9 @@ internal static class Program
     }
 
     private static bool IsTruthy(string? value) =>
-        value is "1" or "true" or "yes" or "True" or "TRUE" or "YES";
+        value is "1" ||
+        string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
 }
 
 // ─────────────────────────────────────────────────────────────

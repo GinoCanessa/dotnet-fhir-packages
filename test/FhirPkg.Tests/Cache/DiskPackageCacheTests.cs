@@ -72,6 +72,17 @@ public class DiskPackageCacheTests : IDisposable
     }
 
     [Fact]
+    public void Dispose_DisposesInstallLock()
+    {
+        var cache = new DiskPackageCache(_tempDir);
+
+        cache.Dispose();
+
+        // Verify the cache implements IDisposable and does not throw on double-dispose
+        cache.Dispose();
+    }
+
+    [Fact]
     public void Constructor_NoPathNoEnvVar_UsesDefault()
     {
         Environment.SetEnvironmentVariable("PACKAGE_CACHE_FOLDER", null);

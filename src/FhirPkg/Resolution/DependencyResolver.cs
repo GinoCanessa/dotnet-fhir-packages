@@ -328,7 +328,7 @@ public class DependencyResolver : IDependencyResolver
         if (verA is null) return b;
         if (verB is null) return a;
 
-        var cmp = CompareSemVer(verA, verB);
+        var cmp = verA.CompareTo(verB);
         return cmp >= 0 ? a : b;
     }
 
@@ -369,34 +369,5 @@ public class DependencyResolver : IDependencyResolver
             return null;
 
         return FhirSemVer.TryParse(version, out var result) ? result : null;
-    }
-
-    /// <summary>
-    /// Compares two <see cref="FhirSemVer"/> instances.
-    /// Stable (no pre-release) sorts higher than pre-release at the same numeric version.
-    /// </summary>
-    /// <returns>
-    /// A value less than zero if <paramref name="a"/> is lower than <paramref name="b"/>,
-    /// zero if equal, or greater than zero if <paramref name="a"/> is higher.
-    /// </returns>
-    private static int CompareSemVer(FhirSemVer a, FhirSemVer b)
-    {
-        var cmp = a.Major.CompareTo(b.Major);
-        if (cmp != 0) return cmp;
-
-        cmp = a.Minor.CompareTo(b.Minor);
-        if (cmp != 0) return cmp;
-
-        cmp = a.Patch.CompareTo(b.Patch);
-        if (cmp != 0) return cmp;
-
-        // Both stable → equal
-        if (a.PreRelease is null && b.PreRelease is null) return 0;
-
-        // Stable > pre-release
-        if (a.PreRelease is null) return 1;
-        if (b.PreRelease is null) return -1;
-
-        return string.Compare(a.PreRelease, b.PreRelease, StringComparison.OrdinalIgnoreCase);
     }
 }

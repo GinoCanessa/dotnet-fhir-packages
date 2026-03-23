@@ -84,7 +84,7 @@ internal static class SearchCommand
                     });
                 }
 
-                var manager = new FhirPackageManager(mgrOptions);
+                var manager = ManagerFactory.Create(mgrOptions);
 
                 var criteria = new PackageSearchCriteria
                 {
@@ -132,29 +132,21 @@ internal static class SearchCommand
             }
             catch (HttpRequestException ex)
             {
-                WriteErrorOutput(globalOpts, $"Network error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Network error: {ex.Message}");
                 return ExitCodes.NetworkError;
             }
             catch (OperationCanceledException)
             {
-                WriteErrorOutput(globalOpts, "Operation was cancelled.");
+                CommandHelpers.WriteErrorOutput(globalOpts, "Operation was cancelled.");
                 return ExitCodes.GeneralError;
             }
             catch (Exception ex)
             {
-                WriteErrorOutput(globalOpts, ex.Message);
+                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
                 return ExitCodes.GeneralError;
             }
         });
 
         return command;
-    }
-
-    private static void WriteErrorOutput(GlobalOptions opts, string message)
-    {
-        if (opts.Json)
-            JsonOutput.WriteError(message);
-        else
-            ConsoleOutput.WriteError(message);
     }
 }
