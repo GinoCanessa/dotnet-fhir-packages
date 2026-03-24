@@ -37,5 +37,8 @@ jobs:
     - name: Build
       run: dotnet build --configuration Release --no-restore
     
-    - name: Test
-      run: dotnet test --configuration Release --no-restore --verbosity normal
+    - name: Unit Tests
+      run: dotnet test test/FhirPkg.Tests --configuration Release --no-restore --verbosity normal
+
+    - name: Integration Tests (net10.0 only)
+      run: dotnet test test/FhirPkg.IntegrationTests --configuration Release --no-restore --verbosity normal --framework net10.0
