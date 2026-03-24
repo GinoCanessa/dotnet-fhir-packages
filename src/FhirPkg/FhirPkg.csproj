@@ -1,18 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk">
+	<Import Project="..\common.props" />
 
   <PropertyGroup>
-    <TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>
-    <LangVersion>14</LangVersion>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>FhirPkg</RootNamespace>
 
-    <!-- NuGet metadata -->
-    <PackageId>FhirPkg</PackageId>
+	  <!-- NuGet metadata -->
+    <PackageId>fhir-pkg-lib</PackageId>
     <Description>C# SDK for discovering, resolving, downloading, caching, and managing FHIR packages from multiple registries.</Description>
-    <Authors>Gino Canessa</Authors>
-    <PackageTags>FHIR;HL7;packages;npm;registry;healthcare</PackageTags>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>FHIR;HL7;packages;npm;registry;</PackageTags>
+	  <Title>fhir-pkg-lib</Title>
+	  <PackageOutputPath>..\..\nupkg</PackageOutputPath>
+	  <PackageReadmeFile>README.md</PackageReadmeFile>
+	  <IsPackable>true</IsPackable>
+	  <DebugSymbols>true</DebugSymbols>
+	  <IncludeSymbols>true</IncludeSymbols>
+	  <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+	  <Deterministic>true</Deterministic>
+	  <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">

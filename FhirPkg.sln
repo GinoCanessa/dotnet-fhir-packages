@@ -1,27 +1,35 @@
-
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.0.31903.59
+# Visual Studio Version 18
+VisualStudioVersion = 18.3.11527.330 d18.3
 MinimumVisualStudioVersion = 10.0.40219.1
-
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{A1000000-0000-0000-0000-000000000001}"
 EndProject
-
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "test", "test", "{A2000000-0000-0000-0000-000000000001}"
 EndProject
-
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FhirPkg", "src\FhirPkg\FhirPkg.csproj", "{B1000000-0000-0000-0000-000000000001}"
 EndProject
-
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FhirPkg.Cli", "src\FhirPkg.Cli\FhirPkg.Cli.csproj", "{B2000000-0000-0000-0000-000000000001}"
 EndProject
-
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FhirPkg.Tests", "test\FhirPkg.Tests\FhirPkg.Tests.csproj", "{C1000000-0000-0000-0000-000000000001}"
 EndProject
-
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FhirPkg.IntegrationTests", "test\FhirPkg.IntegrationTests\FhirPkg.IntegrationTests.csproj", "{C2000000-0000-0000-0000-000000000001}"
 EndProject
-
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{FD1DDD39-5C5B-492C-BE6B-B328B6090CB9}"
+	ProjectSection(SolutionItems) = preProject
+		.gitignore = .gitignore
+		src\common.props = src\common.props
+		LICENSE = LICENSE
+		README.md = README.md
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = ".github", ".github", "{6AB6B541-E345-4292-977D-9EF0C95D7E2A}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "workflows", "workflows", "{3D76841E-C6E3-4B9B-B517-9256CEEF0C90}"
+	ProjectSection(SolutionItems) = preProject
+		.github\workflows\build-and-test.yaml = .github\workflows\build-and-test.yaml
+		.github\workflows\nuget-generator.yaml = .github\workflows\nuget-generator.yaml
+	EndProjectSection
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -45,10 +53,17 @@ Global
 		{C2000000-0000-0000-0000-000000000001}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C2000000-0000-0000-0000-000000000001}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{B1000000-0000-0000-0000-000000000001} = {A1000000-0000-0000-0000-000000000001}
 		{B2000000-0000-0000-0000-000000000001} = {A1000000-0000-0000-0000-000000000001}
 		{C1000000-0000-0000-0000-000000000001} = {A2000000-0000-0000-0000-000000000001}
 		{C2000000-0000-0000-0000-000000000001} = {A2000000-0000-0000-0000-000000000001}
+		{3D76841E-C6E3-4B9B-B517-9256CEEF0C90} = {6AB6B541-E345-4292-977D-9EF0C95D7E2A}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {DE86E7B4-343D-443B-A441-102E1E828269}
 	EndGlobalSection
 EndGlobal

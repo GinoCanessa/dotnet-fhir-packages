@@ -1,20 +1,27 @@
 <Project Sdk="Microsoft.NET.Sdk">
+	<Import Project="..\common.props" />
 
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>
-    <LangVersion>14</LangVersion>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>FhirPkg.Cli</RootNamespace>
+	<PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <RootNamespace>FhirPkg.Cli</RootNamespace>
 
     <!-- .NET tool metadata -->
-    <PackAsTool>true</PackAsTool>
-    <ToolCommandName>fhir-pkg</ToolCommandName>
-    <PackageId>fhir-pkg</PackageId>
-    <Description>CLI tool for managing FHIR packages — install, restore, list, search, and cache management.</Description>
-    <Authors>Gino Canessa</Authors>
-  </PropertyGroup>
+		<IsPackable>true</IsPackable>
+		<PackAsTool>true</PackAsTool>
+        <ToolCommandName>fhir-pkg</ToolCommandName>
+        <PackageId>fhir-pkg-cli</PackageId>
+        <Description>CLI tool for managing FHIR packages — install, restore, list, search, and cache management.</Description>
+        <Authors>Gino Canessa</Authors>
+		<PackageTags>FHIR;HL7;packages;npm;registry;</PackageTags>
+		<Title>fhir-pkg-cli</Title>
+		<PackageOutputPath>..\..\nupkg</PackageOutputPath>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+		<DebugSymbols>true</DebugSymbols>
+		<IncludeSymbols>true</IncludeSymbols>
+		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
+		<Deterministic>true</Deterministic>
+		<ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+	</PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="System.CommandLine" Version="2.*" />
