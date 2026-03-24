@@ -5,7 +5,7 @@
         <OutputType>Exe</OutputType>
         <RootNamespace>FhirPkg.Cli</RootNamespace>
 
-    <!-- .NET tool metadata -->
+    	<!-- .NET tool metadata -->
 		<IsPackable>true</IsPackable>
 		<PackAsTool>true</PackAsTool>
         <ToolCommandName>fhir-pkg</ToolCommandName>
