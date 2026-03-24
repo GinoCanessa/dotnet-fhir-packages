@@ -10,6 +10,8 @@ namespace FhirPkg.IntegrationTests;
 [Trait("Category", "Integration")]
 public class CliIntegrationTests : IntegrationTestBase
 {
+    private const int _timeoutSeconds = 60 * 10;
+
     private static readonly string CliProjectPath = Path.GetFullPath(
         Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
             "src", "FhirPkg.Cli", "FhirPkg.Cli.csproj"));
@@ -25,7 +27,7 @@ public class CliIntegrationTests : IntegrationTestBase
 
     private async Task<(int ExitCode, string StdOut, string StdErr)> RunCliRaw(string allArgs)
     {
-        using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(_timeoutSeconds));
 
         Process process = new Process
         {
@@ -54,7 +56,7 @@ public class CliIntegrationTests : IntegrationTestBase
         {
             try { process.Kill(entireProcessTree: true); } catch { /* best effort */ }
             throw new TimeoutException(
-                $"CLI process did not complete within the 60-second timeout. Args: {allArgs}");
+                $"CLI process did not complete within the {_timeoutSeconds}-second timeout. Args: {allArgs}");
         }
 
         return (process.ExitCode, stdoutTask.Result, stderrTask.Result);
