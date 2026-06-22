@@ -108,7 +108,7 @@ public class DiskPackageCacheTests : IDisposable
 
         using MemoryStream tarball = CreateTestTarball("""{"name":"test.package","version":"1.0.0"}""");
 
-        PackageRecord record = await cache.InstallAsync(reference, tarball, new InstallCacheOptions { VerifyChecksum = false });
+        PackageRecord record = await cache.InstallAsync(reference, tarball, new InstallCacheOptions { VerifyChecksum = false }, ct: TestContext.Current.CancellationToken);
 
         record.ShouldNotBeNull();
         record.Reference.Name.ShouldBe("test.package");

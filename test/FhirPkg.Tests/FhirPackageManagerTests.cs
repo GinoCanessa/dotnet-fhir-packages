@@ -57,7 +57,7 @@ public class FhirPackageManagerTests
 
         using FhirPackageManager manager = CreateManager();
 
-        PackageRecord? result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+        PackageRecord? result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1", cancellationToken: TestContext.Current.CancellationToken);
 
         result.ShouldNotBeNull();
         result!.Reference.Name.ShouldBe("hl7.fhir.r4.core");
@@ -104,7 +104,7 @@ public class FhirPackageManagerTests
 
         using FhirPackageManager manager = CreateManager();
 
-        IReadOnlyList<PackageRecord> result = await manager.ListCachedAsync("hl7");
+        IReadOnlyList<PackageRecord> result = await manager.ListCachedAsync("hl7", cancellationToken: TestContext.Current.CancellationToken);
 
         result.Count.ShouldBe(1);
         result[0].Reference.Name.ShouldBe("hl7.fhir.r4.core");
@@ -156,7 +156,7 @@ public class FhirPackageManagerTests
 
         using FhirPackageManager manager = CreateManager();
 
-        PackageRecord? result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+        PackageRecord? result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1", cancellationToken: TestContext.Current.CancellationToken);
 
         result.ShouldNotBeNull();
         result!.Reference.Version.ShouldBe("4.0.1");
@@ -176,7 +176,7 @@ public class FhirPackageManagerTests
 
         using FhirPackageManager manager = CreateManager();
 
-        PackageRecord? result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+        PackageRecord? result = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1", cancellationToken: TestContext.Current.CancellationToken);
 
         result.ShouldBeNull();
     }
@@ -266,7 +266,8 @@ public class FhirPackageManagerTests
 
         PackageRecord? result = await manager.InstallAsync(
             "hl7.fhir.r4.core#4.0.1",
-            new InstallOptions { OverwriteExisting = true });
+            new InstallOptions { OverwriteExisting = true },
+            cancellationToken: TestContext.Current.CancellationToken);
 
         result.ShouldNotBeNull();
         result!.Reference.Version.ShouldBe("4.0.1");

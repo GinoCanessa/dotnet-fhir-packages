@@ -49,7 +49,7 @@ public class RedundantRegistryClientTests
         RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
         PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
 
-        ResolvedDirective? result = await sut.ResolveAsync(directive);
+        ResolvedDirective? result = await sut.ResolveAsync(directive, cancellationToken: TestContext.Current.CancellationToken);
 
         result.ShouldBe(expected);
         client2.Verify(c => c.ResolveAsync(
@@ -84,7 +84,7 @@ public class RedundantRegistryClientTests
         RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
         PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
 
-        ResolvedDirective? result = await sut.ResolveAsync(directive);
+        ResolvedDirective? result = await sut.ResolveAsync(directive, cancellationToken: TestContext.Current.CancellationToken);
 
         result.ShouldBe(expected);
     }
@@ -109,7 +109,7 @@ public class RedundantRegistryClientTests
         RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
         PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
 
-        ResolvedDirective? result = await sut.ResolveAsync(directive);
+        ResolvedDirective? result = await sut.ResolveAsync(directive, cancellationToken: TestContext.Current.CancellationToken);
 
         result.ShouldBeNull();
     }
@@ -140,7 +140,7 @@ public class RedundantRegistryClientTests
         RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
         PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0.1");
 
-        ResolvedDirective? result = await sut.ResolveAsync(directive);
+        ResolvedDirective? result = await sut.ResolveAsync(directive, cancellationToken: TestContext.Current.CancellationToken);
 
         result.ShouldBe(expected);
     }
@@ -173,7 +173,7 @@ public class RedundantRegistryClientTests
             }.AsReadOnly());
 
         RedundantRegistryClient sut = new RedundantRegistryClient(client1.Object, client2.Object);
-        IReadOnlyList<CatalogEntry> results = await sut.SearchAsync(new PackageSearchCriteria { Name = "package" });
+        IReadOnlyList<CatalogEntry> results = await sut.SearchAsync(new PackageSearchCriteria { Name = "package" }, cancellationToken: TestContext.Current.CancellationToken);
 
         results.Count.ShouldBe(3);
         results.Select(r => r.Name).ShouldBe(new[] { "package.a", "package.b", "package.c" }, ignoreOrder: true);
