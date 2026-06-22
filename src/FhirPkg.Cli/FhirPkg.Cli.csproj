@@ -24,8 +24,8 @@
 	</PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.CommandLine" Version="2.*" />
-    <PackageReference Include="Spectre.Console" Version="0.*" />
+    <PackageReference Include="System.CommandLine" />
+    <PackageReference Include="Spectre.Console" />
     <ProjectReference Include="..\FhirPkg\FhirPkg.csproj" />
   </ItemGroup>
 
