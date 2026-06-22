@@ -20,7 +20,7 @@ public class CacheIntegrationTests : IntegrationTestBase
     {
         DiskPackageCache cache = CreateCache();
 
-        IReadOnlyList<PackageRecord> packages = await cache.ListPackagesAsync();
+        IReadOnlyList<PackageRecord> packages = await cache.ListPackagesAsync(ct: TestContext.Current.CancellationToken);
 
         packages.ShouldBeEmpty();
     }
@@ -36,7 +36,7 @@ public class CacheIntegrationTests : IntegrationTestBase
         using Stream tarball = CreateTestTarball("test.package", "1.0.0",
             new Dictionary<string, string> { ["Patient.json"] = """{"resourceType":"Patient"}""" });
 
-        PackageRecord record = await cache.InstallAsync(reference, tarball);
+        PackageRecord record = await cache.InstallAsync(reference, tarball, ct: TestContext.Current.CancellationToken);
 
         record.ShouldNotBeNull();
         record.Reference.Name.ShouldBe("test.package");
@@ -56,7 +56,7 @@ public class CacheIntegrationTests : IntegrationTestBase
         PackageReference reference = "test.package#1.0.0";
 
         using Stream tarball1 = CreateTestTarball("test.package", "1.0.0");
-        await cache.InstallAsync(reference, tarball1);
+        await cache.InstallAsync(reference, tarball1, ct: TestContext.Current.CancellationToken);
 
         using Stream tarball2 = CreateTestTarball("test.package", "1.0.0");
         Func<Task<PackageRecord>> act = () => cache.InstallAsync(reference, tarball2);
@@ -72,12 +72,12 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         using Stream tarball1 = CreateTestTarball("test.package", "1.0.0",
             new Dictionary<string, string> { ["old.json"] = "{}" });
-        await cache.InstallAsync(reference, tarball1);
+        await cache.InstallAsync(reference, tarball1, ct: TestContext.Current.CancellationToken);
 
         using Stream tarball2 = CreateTestTarball("test.package", "1.0.0",
             new Dictionary<string, string> { ["new.json"] = "{}" });
         PackageRecord record = await cache.InstallAsync(reference, tarball2,
-            new InstallCacheOptions { OverwriteExisting = true });
+            new InstallCacheOptions { OverwriteExisting = true }, ct: TestContext.Current.CancellationToken);
 
         record.ShouldNotBeNull();
         string pkgDir = Path.Combine(TempCacheDir, "test.package#1.0.0", "package");
@@ -93,9 +93,9 @@ public class CacheIntegrationTests : IntegrationTestBase
         PackageReference reference = "test.package#2.0.0";
 
         using Stream tarball = CreateTestTarball("test.package", "2.0.0");
-        await cache.InstallAsync(reference, tarball);
+        await cache.InstallAsync(reference, tarball, ct: TestContext.Current.CancellationToken);
 
-        PackageManifest? manifest = await cache.ReadManifestAsync(reference);
+        PackageManifest? manifest = await cache.ReadManifestAsync(reference, ct: TestContext.Current.CancellationToken);
 
         manifest.ShouldNotBeNull();
         manifest!.Name.ShouldBe("test.package");
@@ -111,9 +111,9 @@ public class CacheIntegrationTests : IntegrationTestBase
         PackageReference reference = "test.package#1.0.0";
 
         using Stream tarball = CreateTestTarball("test.package", "1.0.0");
-        await cache.InstallAsync(reference, tarball);
+        await cache.InstallAsync(reference, tarball, ct: TestContext.Current.CancellationToken);
 
-        bool removed = await cache.RemoveAsync(reference);
+        bool removed = await cache.RemoveAsync(reference, ct: TestContext.Current.CancellationToken);
 
         removed.ShouldBeTrue();
         Directory.Exists(Path.Combine(TempCacheDir, "test.package#1.0.0")).ShouldBeFalse();
@@ -125,7 +125,7 @@ public class CacheIntegrationTests : IntegrationTestBase
         DiskPackageCache cache = CreateCache();
         PackageReference reference = "nonexistent#1.0.0";
 
-        bool removed = await cache.RemoveAsync(reference);
+        bool removed = await cache.RemoveAsync(reference, ct: TestContext.Current.CancellationToken);
 
         removed.ShouldBeFalse();
     }
@@ -138,16 +138,16 @@ public class CacheIntegrationTests : IntegrationTestBase
         DiskPackageCache cache = CreateCache();
 
         using Stream tarball1 = CreateTestTarball("pkg.a", "1.0.0");
-        await cache.InstallAsync(PackageReference.Parse("pkg.a#1.0.0"), tarball1);
+        await cache.InstallAsync(PackageReference.Parse("pkg.a#1.0.0"), tarball1, ct: TestContext.Current.CancellationToken);
 
         using Stream tarball2 = CreateTestTarball("pkg.b", "2.0.0");
-        await cache.InstallAsync(PackageReference.Parse("pkg.b#2.0.0"), tarball2);
+        await cache.InstallAsync(PackageReference.Parse("pkg.b#2.0.0"), tarball2, ct: TestContext.Current.CancellationToken);
 
-        int count = await cache.ClearAsync();
+        int count = await cache.ClearAsync(ct: TestContext.Current.CancellationToken);
 
         count.ShouldBeGreaterThanOrEqualTo(2);
 
-        IReadOnlyList<PackageRecord> remaining = await cache.ListPackagesAsync();
+        IReadOnlyList<PackageRecord> remaining = await cache.ListPackagesAsync(ct: TestContext.Current.CancellationToken);
         remaining.ShouldBeEmpty();
     }
 
@@ -160,7 +160,7 @@ public class CacheIntegrationTests : IntegrationTestBase
         PackageReference reference = "test.package#1.0.0";
 
         using Stream tarball = CreateTestTarball("test.package", "1.0.0");
-        await cache.InstallAsync(reference, tarball);
+        await cache.InstallAsync(reference, tarball, ct: TestContext.Current.CancellationToken);
 
         string? path = cache.GetPackageContentPath(reference);
 
@@ -189,7 +189,7 @@ public class CacheIntegrationTests : IntegrationTestBase
         PackageReference reference = "test.package#1.0.0";
 
         using Stream tarball = CreateTestTarball("test.package", "1.0.0");
-        await cache.InstallAsync(reference, tarball);
+        await cache.InstallAsync(reference, tarball, ct: TestContext.Current.CancellationToken);
 
         string iniPath = Path.Combine(TempCacheDir, "packages.ini");
         File.Exists(iniPath).ShouldBeTrue("packages.ini should be created after install");
@@ -207,12 +207,12 @@ public class CacheIntegrationTests : IntegrationTestBase
         DiskPackageCache cache = CreateCache();
 
         using Stream tarball1 = CreateTestTarball("hl7.fhir.r4.core", "4.0.1");
-        await cache.InstallAsync(PackageReference.Parse("hl7.fhir.r4.core#4.0.1"), tarball1);
+        await cache.InstallAsync(PackageReference.Parse("hl7.fhir.r4.core#4.0.1"), tarball1, ct: TestContext.Current.CancellationToken);
 
         using Stream tarball2 = CreateTestTarball("other.package", "1.0.0");
-        await cache.InstallAsync(PackageReference.Parse("other.package#1.0.0"), tarball2);
+        await cache.InstallAsync(PackageReference.Parse("other.package#1.0.0"), tarball2, ct: TestContext.Current.CancellationToken);
 
-        IReadOnlyList<PackageRecord> filtered = await cache.ListPackagesAsync(packageIdFilter: "hl7");
+        IReadOnlyList<PackageRecord> filtered = await cache.ListPackagesAsync(packageIdFilter: "hl7", ct: TestContext.Current.CancellationToken);
 
         filtered.ShouldHaveSingleItem()
             .Reference.Name.ShouldBe("hl7.fhir.r4.core");
