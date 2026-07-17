@@ -1,8 +1,10 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Security.Cryptography;
 using System.Text.Json;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
+using FhirPkg.Installation;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
@@ -37,6 +39,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
     private readonly IPackageIndexer _packageIndexer;
     private readonly MemoryResourceCache? _memoryCache;
     private readonly FhirPackageManagerOptions _options;
+    private readonly PackageInstallLimits _managerInstallLimits;
     private readonly ILogger<FhirPackageManager> _logger;
     private readonly ILoggerFactory _loggerFactory;
     private readonly HttpClient? _ownedHttpClient;
@@ -63,16 +66,23 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
     /// <param name="loggerFactory">Optional logger factory for creating typed loggers.</param>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="options"/> is <c>null</c>.</exception>
     public FhirPackageManager(FhirPackageManagerOptions options, ILoggerFactory? loggerFactory = null)
+        : this(options, loggerFactory, ResolveManagerLimits(options))
     {
-        ArgumentNullException.ThrowIfNull(options);
+    }
 
+    private FhirPackageManager(
+        FhirPackageManagerOptions options,
+        ILoggerFactory? loggerFactory,
+        PackageInstallLimits managerInstallLimits)
+    {
         _options = options;
+        _managerInstallLimits = managerInstallLimits;
         ILoggerFactory factory = loggerFactory ?? NullLoggerFactory.Instance;
         _loggerFactory = factory;
         _logger = factory.CreateLogger<FhirPackageManager>();
 
         // Build cache
-        _cache = new DiskPackageCache(options.CachePath);
+        _cache = new DiskPackageCache(options.CachePath, null, null, managerInstallLimits);
 
         // Build HTTP client with configured timeout and redirect policy
         HttpClientHandler handler = new HttpClientHandler
@@ -123,6 +133,29 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         FhirPackageManagerOptions options,
         ILogger<FhirPackageManager> logger,
         MemoryResourceCache? memoryCache = null)
+        : this(
+            cache,
+            registryClient,
+            versionResolver,
+            dependencyResolver,
+            packageIndexer,
+            options,
+            logger,
+            memoryCache,
+            ResolveManagerLimits(options))
+    {
+    }
+
+    internal FhirPackageManager(
+        IPackageCache cache,
+        IRegistryClient registryClient,
+        IVersionResolver versionResolver,
+        IDependencyResolver dependencyResolver,
+        IPackageIndexer packageIndexer,
+        FhirPackageManagerOptions options,
+        ILogger<FhirPackageManager> logger,
+        MemoryResourceCache? memoryCache,
+        PackageInstallLimits managerInstallLimits)
     {
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(registryClient);
@@ -131,6 +164,8 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ArgumentNullException.ThrowIfNull(packageIndexer);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(managerInstallLimits);
+        managerInstallLimits.Validate();
 
         _cache = cache;
         _registryClient = registryClient;
@@ -138,6 +173,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         _dependencyResolver = dependencyResolver;
         _packageIndexer = packageIndexer;
         _options = options;
+        _managerInstallLimits = managerInstallLimits;
         _logger = logger;
         _loggerFactory = NullLoggerFactory.Instance;
         _memoryCache = memoryCache;
@@ -152,147 +188,13 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(directive);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        options ??= new InstallOptions();
+        ResolvedPackageInstallPolicy policy = ResolvedPackageInstallPolicy.Resolve(
+            _options,
+            _managerInstallLimits,
+            options);
 
-        _logger.LogDebug("InstallAsync starting for directive '{Directive}'.", directive);
-
-        // Step 1: Parse directive into a reference
-        PackageReference reference = PackageReference.Parse(directive);
-        _logger.LogDebug("Parsed directive to reference: {Name}#{Version}.", reference.Name, reference.Version);
-
-        // Step 2: Apply known fixups
-        reference = PackageFixups.Apply(reference);
-        _logger.LogDebug("After fixups: {Name}#{Version}.", reference.Name, reference.Version);
-
-        // Step 3: Check cache (skip download if already installed and not overwriting)
-        if (!options.OverwriteExisting && reference.HasVersion)
-        {
-            bool isInstalled = await _cache.IsInstalledAsync(reference, cancellationToken).ConfigureAwait(false);
-            if (isInstalled)
-            {
-                _logger.LogInformation("Package {Name}#{Version} is already cached.", reference.Name, reference.Version);
-                return await _cache.GetPackageAsync(reference, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        // Step 4: Resolve directive to an exact version
-        ReportProgress(options.Progress, reference.Name, PackageProgressPhase.Resolving);
-
-        PackageDirective parsedDirective = DirectiveParser.Parse(directive);
-        ResolvedDirective? resolved = await _registryClient.ResolveAsync(parsedDirective, new VersionResolveOptions
-        {
-            AllowPreRelease = options.AllowPreRelease,
-            FhirRelease = options.PreferredFhirRelease
-        }, cancellationToken).ConfigureAwait(false);
-
-        if (resolved is null)
-        {
-            _logger.LogWarning("Could not resolve directive '{Directive}' from any registry.", directive);
-            ReportProgress(options.Progress, reference.Name, PackageProgressPhase.Failed);
-            return null;
-        }
-
-        _logger.LogInformation("Resolved {Name} to version {Version} from {Registry}.",
-            resolved.Reference.Name, resolved.Reference.Version, resolved.SourceRegistry?.Url ?? "unknown");
-
-        // Re-check cache with the resolved exact version (the original directive may have been a wildcard)
-        if (!options.OverwriteExisting)
-        {
-            bool isInstalled = await _cache.IsInstalledAsync(resolved.Reference, cancellationToken).ConfigureAwait(false);
-            if (isInstalled)
-            {
-                _logger.LogInformation("Resolved package {Name}#{Version} is already cached.",
-                    resolved.Reference.Name, resolved.Reference.Version);
-                ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Complete);
-                return await _cache.GetPackageAsync(resolved.Reference, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        // Step 5: Download tarball
-        ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Downloading);
-
-        await using PackageDownloadResult? downloadResult = await _registryClient.DownloadAsync(resolved, cancellationToken).ConfigureAwait(false);
-        if (downloadResult is null)
-        {
-            _logger.LogError("Failed to download package {Name}#{Version}.", resolved.Reference.Name, resolved.Reference.Version);
-            ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Failed);
-            return null;
-        }
-
-        // Step 6: Verify checksum if configured
-        Stream contentStream = downloadResult.Content;
-        MemoryStream? checksumBuffer = null;
-        try
-        {
-            if (_options.VerifyChecksums && (resolved.Sha256Sum is not null || resolved.ShaSum is not null))
-            {
-                checksumBuffer = new MemoryStream();
-                await contentStream.CopyToAsync(checksumBuffer, cancellationToken).ConfigureAwait(false);
-                checksumBuffer.Position = 0;
-
-                bool checksumValid;
-                string algorithm;
-                string expectedHash;
-
-                if (resolved.Sha256Sum is not null)
-                {
-                    checksumValid = CheckSum.VerifySha256(checksumBuffer, resolved.Sha256Sum);
-                    algorithm = "SHA-256";
-                    expectedHash = resolved.Sha256Sum;
-                }
-                else
-                {
-                    checksumValid = CheckSum.Verify(checksumBuffer, resolved.ShaSum);
-                    algorithm = "SHA-1";
-                    expectedHash = resolved.ShaSum!;
-                }
-
-                if (!checksumValid)
-                {
-                    _logger.LogError(
-                        "{Algorithm} checksum verification failed for {Name}#{Version}. Expected: {Expected}.",
-                        algorithm, resolved.Reference.Name, resolved.Reference.Version, expectedHash);
-                    ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Failed);
-                    throw new InvalidOperationException(
-                        $"{algorithm} checksum verification failed for {resolved.Reference.FhirDirective}.");
-                }
-
-                checksumBuffer.Position = 0;
-                contentStream = checksumBuffer;
-                _logger.LogDebug("{Algorithm} checksum verified for {Name}#{Version}.", algorithm, resolved.Reference.Name, resolved.Reference.Version);
-            }
-
-            // Step 7: Install to cache
-            ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Extracting);
-
-            InstallCacheOptions installCacheOptions = new InstallCacheOptions
-            {
-                OverwriteExisting = options.OverwriteExisting,
-                VerifyChecksum = false // We already verified above
-            };
-
-            PackageRecord record = await _cache.InstallAsync(resolved.Reference, contentStream, installCacheOptions, cancellationToken)
-                .ConfigureAwait(false);
-
-            _logger.LogInformation("Installed {Name}#{Version} to {Path}.",
-                record.Reference.Name, record.Reference.Version, record.DirectoryPath);
-
-            // Step 8: Recursively install dependencies if requested
-            if (options.IncludeDependencies)
-            {
-                await InstallDependenciesAsync(record, options, cancellationToken).ConfigureAwait(false);
-            }
-
-            ReportProgress(options.Progress, resolved.Reference.Name, PackageProgressPhase.Complete);
-            return record;
-        }
-        finally
-        {
-            if (checksumBuffer is not null)
-            {
-                await checksumBuffer.DisposeAsync().ConfigureAwait(false);
-            }
-        }
+        return await InstallDirectiveAsync(directive, policy, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -304,60 +206,18 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ArgumentNullException.ThrowIfNull(directives);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        options ??= new InstallOptions();
         List<string> directiveList = directives.ToList();
+        ResolvedPackageInstallPolicy policy = ResolvedPackageInstallPolicy.Resolve(
+            _options,
+            _managerInstallLimits,
+            options);
 
         if (directiveList.Count == 0)
             return [];
 
         _logger.LogInformation("InstallManyAsync starting for {Count} directives.", directiveList.Count);
-
-        PackageInstallResult[] results = new PackageInstallResult[directiveList.Count];
-        using SemaphoreSlim semaphore = new SemaphoreSlim(_options.MaxParallelRegistryQueries);
-
-        IEnumerable<Task> tasks = directiveList.Select(async (directive, index) =>
-        {
-            await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                PackageRecord? record = await InstallAsync(directive, options, cancellationToken).ConfigureAwait(false);
-                results[index] = record is not null
-                    ? new PackageInstallResult
-                    {
-                        Directive = directive,
-                        Package = record,
-                        Status = PackageInstallStatus.Installed
-                    }
-                    : new PackageInstallResult
-                    {
-                        Directive = directive,
-                        Status = PackageInstallStatus.NotFound,
-                        ErrorMessage = $"Package '{directive}' could not be resolved."
-                    };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogError(ex, "Failed to install '{Directive}'.", directive);
-                results[index] = new PackageInstallResult
-                {
-                    Directive = directive,
-                    Status = PackageInstallStatus.Failed,
-                    ErrorMessage = ex.Message
-                };
-            }
-            finally
-            {
-                semaphore.Release();
-            }
-        });
-
-        await Task.WhenAll(tasks).ConfigureAwait(false);
-
-        int installed = results.Count(r => r.Status == PackageInstallStatus.Installed);
-        _logger.LogInformation("InstallManyAsync completed: {Installed}/{Total} packages installed.",
-            installed, directiveList.Count);
-
-        return results;
+        return await InstallManyResolvedAsync(directiveList, policy, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -369,7 +229,11 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(projectPath);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        options ??= new RestoreOptions();
+        RestoreOptions effectiveOptions = options ?? new RestoreOptions();
+        ResolvedPackageInstallPolicy installPolicy = ResolvedPackageInstallPolicy.Resolve(
+            _options,
+            _managerInstallLimits,
+            effectiveOptions);
 
         _logger.LogInformation("RestoreAsync starting for project at '{ProjectPath}'.", projectPath);
 
@@ -392,7 +256,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         string lockFilePath = Path.Combine(projectPath, LockFileName);
         PackageClosure closure;
 
-        if (File.Exists(lockFilePath) && !options.OverwriteExisting)
+        if (File.Exists(lockFilePath) && !installPolicy.OverwriteExisting)
         {
             _logger.LogDebug("Found existing lock file at '{LockFilePath}'.", lockFilePath);
 
@@ -406,7 +270,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
                     .ConfigureAwait(false);
 
                 // Install all resolved packages from the lock file
-                await InstallClosureAsync(closure, options, cancellationToken).ConfigureAwait(false);
+                await InstallClosureAsync(closure, installPolicy, cancellationToken).ConfigureAwait(false);
                 return closure;
             }
 
@@ -416,10 +280,10 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         // Step 3: Resolve full dependency tree
         DependencyResolveOptions resolveOptions = new DependencyResolveOptions
         {
-            ConflictStrategy = options.ConflictStrategy,
-            MaxDepth = options.MaxDepth,
-            AllowPreRelease = options.AllowPreRelease,
-            PreferredFhirRelease = options.PreferredFhirRelease
+            ConflictStrategy = effectiveOptions.ConflictStrategy,
+            MaxDepth = effectiveOptions.MaxDepth,
+            AllowPreRelease = installPolicy.AllowPreRelease,
+            PreferredFhirRelease = installPolicy.PreferredFhirRelease
         };
 
         closure = await _dependencyResolver.ResolveAsync(manifest, resolveOptions, cancellationToken)
@@ -429,10 +293,10 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             closure.Resolved.Count, closure.Missing.Count);
 
         // Step 4: Install all resolved packages
-        await InstallClosureAsync(closure, options, cancellationToken).ConfigureAwait(false);
+        await InstallClosureAsync(closure, installPolicy, cancellationToken).ConfigureAwait(false);
 
         // Step 5: Write lock file if configured
-        if (options.WriteLockFile)
+        if (effectiveOptions.WriteLockFile)
         {
             await WriteLockFileAsync(lockFilePath, closure, cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("Lock file written to '{LockFilePath}'.", lockFilePath);
@@ -605,12 +469,750 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
 
     #region Private helpers
 
+    private static PackageInstallLimits ResolveManagerLimits(FhirPackageManagerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (!Enum.IsDefined(options.CorruptCacheBehavior))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPolicy,
+                PackageInstallStage.PolicyValidation,
+                "CorruptCacheBehavior is not a supported value.");
+        }
+
+        return PackageInstallLimits.ResolveManager(options.InstallLimits);
+    }
+
+    private async Task<PackageRecord?> InstallDirectiveAsync(
+        string directive,
+        ResolvedPackageInstallPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await InstallDirectiveCoreAsync(directive, policy, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (PackageInstallException)
+        {
+            ReportProgress(policy.Progress, directive, PackageProgressPhase.Failed);
+            throw;
+        }
+    }
+
+    private async Task<PackageRecord?> InstallDirectiveCoreAsync(
+        string directive,
+        ResolvedPackageInstallPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogDebug("Installing directive '{Directive}' through the unified install contract.", directive);
+
+        PackageDirective parsedDirective = DirectiveParser.Parse(directive);
+        PackageReference requestedReference = PackageFixups.Apply(parsedDirective.ToReference());
+        if (!requestedReference.Equals(parsedDirective.ToReference()))
+        {
+            parsedDirective = DirectiveParser.Parse(requestedReference.FhirDirective);
+        }
+
+        PackageCacheKey.ValidatePackageName(requestedReference);
+        PackageInstallFreshness freshness = GetFreshness(parsedDirective.VersionType);
+        PackageCacheKey? requestedCacheKey = parsedDirective.VersionType
+            is VersionType.Exact
+                or VersionType.CiBuild
+                or VersionType.CiBuildBranch
+                or VersionType.LocalBuild
+            ? PackageCacheKey.Create(requestedReference)
+            : null;
+
+        if (freshness == PackageInstallFreshness.LocalAuthoritative)
+        {
+            PackageCacheKey localKey = requestedCacheKey!;
+            bool isInstalled = await IsInstalledAsync(localKey, cancellationToken).ConfigureAwait(false);
+            if (isInstalled)
+            {
+                _logger.LogInformation(
+                    "Local package alias {Name}#{Version} is already cached.",
+                    requestedReference.Name,
+                    requestedReference.Version);
+                return await GetCachedPackageAsync(localKey, cancellationToken).ConfigureAwait(false);
+            }
+
+            _logger.LogWarning(
+                "Local package alias '{Directive}' is not present and cannot be resolved from registries.",
+                directive);
+            ReportProgress(policy.Progress, requestedReference.Name, PackageProgressPhase.Failed);
+            return null;
+        }
+
+        if (parsedDirective.VersionType == VersionType.Exact && !policy.OverwriteExisting)
+        {
+            PackageCacheKey requestedKey = requestedCacheKey!;
+            if (await IsInstalledAsync(requestedKey, cancellationToken).ConfigureAwait(false))
+            {
+                _logger.LogInformation(
+                    "Package {Name}#{Version} is already cached.",
+                    requestedReference.Name,
+                    requestedReference.Version);
+                return await GetCachedPackageAsync(requestedKey, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        ReportProgress(policy.Progress, requestedReference.Name, PackageProgressPhase.Resolving);
+        ResolvedDirective? resolved = await ResolveDirectiveAsync(
+                directive,
+                parsedDirective,
+                policy,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (resolved is null)
+        {
+            _logger.LogWarning("Could not resolve directive '{Directive}' from any registry.", directive);
+            ReportProgress(policy.Progress, requestedReference.Name, PackageProgressPhase.Failed);
+            return null;
+        }
+
+        bool preservesAlias = parsedDirective.VersionType
+            is VersionType.CiBuild or VersionType.CiBuildBranch;
+        PackageReference cacheReference = preservesAlias
+            ? requestedReference
+            : resolved.Reference;
+        PackageCacheKey cacheKey = preservesAlias
+            ? requestedCacheKey!
+            : PackageCacheKey.Create(cacheReference);
+
+        PackageIdentityExpectation identityExpectation = new PackageIdentityExpectation
+        {
+            Kind = preservesAlias
+                ? PackageIdentityExpectationKind.Alias
+                : PackageIdentityExpectationKind.Exact,
+            Reference = preservesAlias ? requestedReference : resolved.Reference
+        };
+
+        PackageInstallRequest request = new PackageInstallRequest
+        {
+            Directive = directive,
+            CacheKey = cacheKey,
+            Source = PackageInstallSource.FromDirective(resolved),
+            IdentityExpectation = identityExpectation,
+            Freshness = freshness,
+            Policy = policy
+        };
+
+        _logger.LogInformation(
+            "Resolved {Name} to version {Version} from {Registry}; cache key is {CacheKey}.",
+            resolved.Reference.Name,
+            resolved.Reference.Version,
+            resolved.SourceRegistry?.Url ?? "unknown",
+            cacheKey.MetadataKey);
+
+        return await InstallResolvedAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<ResolvedDirective?> ResolveDirectiveAsync(
+        string directive,
+        PackageDirective parsedDirective,
+        ResolvedPackageInstallPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _registryClient.ResolveAsync(
+                    parsedDirective,
+                    new VersionResolveOptions
+                    {
+                        AllowPreRelease = policy.AllowPreRelease,
+                        FhirRelease = policy.PreferredFhirRelease
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.ResolutionFailed,
+                PackageInstallStage.Resolution,
+                $"Package directive '{directive}' could not be resolved before the source timed out.",
+                directive,
+                exception);
+        }
+        catch (HttpRequestException exception)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.ResolutionFailed,
+                PackageInstallStage.Resolution,
+                $"Package directive '{directive}' could not be resolved from its source.",
+                directive,
+                exception);
+        }
+        catch (IOException exception)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.ResolutionFailed,
+                PackageInstallStage.Resolution,
+                $"Package directive '{directive}' could not be resolved from its source.",
+                directive,
+                exception);
+        }
+    }
+
+    private async Task<PackageRecord> InstallResolvedAsync(
+        PackageInstallRequest request,
+        CancellationToken cancellationToken)
+    {
+        PackageReference cacheReference = request.CacheKey.DisplayReference;
+        ResolvedDirective resolved = request.Source.ResolvedDirective;
+        bool isInstalled = await IsInstalledAsync(request.CacheKey, cancellationToken).ConfigureAwait(false);
+        PackageRecord? cachedRecord = isInstalled
+            ? await GetCachedPackageAsync(request.CacheKey, cancellationToken).ConfigureAwait(false)
+            : null;
+        CacheMetadataEntry? existingMetadata = null;
+
+        if (request.Freshness == PackageInstallFreshness.Immutable
+            && isInstalled
+            && !request.Policy.OverwriteExisting
+            && cachedRecord is not null)
+        {
+            ReportProgress(
+                request.Policy.Progress,
+                cacheReference.Name,
+                PackageProgressPhase.Complete);
+            return cachedRecord;
+        }
+
+        DateTimeOffset? sourcePublicationDate = NormalizePublicationDate(resolved.PublicationDate);
+        if (request.Freshness == PackageInstallFreshness.RefreshableAlias && isInstalled)
+        {
+            existingMetadata = await GetCacheMetadataEntryAsync(
+                    request.CacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!request.Policy.OverwriteExisting
+                && cachedRecord is not null
+                && sourcePublicationDate.HasValue
+                && existingMetadata?.SourcePublicationDate is DateTimeOffset cachedPublicationDate
+                && cachedPublicationDate >= sourcePublicationDate.Value)
+            {
+                _logger.LogInformation(
+                    "Mutable alias {CacheKey} is current according to source publication metadata.",
+                    request.CacheKey.MetadataKey);
+                ReportProgress(
+                    request.Policy.Progress,
+                    cacheReference.Name,
+                    PackageProgressPhase.Complete);
+                return cachedRecord;
+            }
+        }
+
+        ReportProgress(
+            request.Policy.Progress,
+            cacheReference.Name,
+            PackageProgressPhase.Downloading);
+
+        await using PackageDownloadResult downloadResult = await DownloadAsync(
+                request,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await using AcquiredPackageContent acquiredContent = await AcquireContentAsync(
+                request,
+                downloadResult,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        VerifyChecksum(request, acquiredContent);
+
+        if (request.Freshness == PackageInstallFreshness.RefreshableAlias
+            && !request.Policy.OverwriteExisting
+            && cachedRecord is not null
+            && existingMetadata?.ArchiveSha256 is string cachedArchiveSha256
+            && string.Equals(
+                cachedArchiveSha256,
+                acquiredContent.Sha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            await RefreshAliasMetadataAsync(
+                    request.CacheKey,
+                    existingMetadata,
+                    sourcePublicationDate,
+                    acquiredContent.Sha256,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "Mutable alias {CacheKey} has unchanged archive content.",
+                request.CacheKey.MetadataKey);
+            ReportProgress(
+                request.Policy.Progress,
+                cacheReference.Name,
+                PackageProgressPhase.Complete);
+            return cachedRecord;
+        }
+
+        ReportProgress(
+            request.Policy.Progress,
+            cacheReference.Name,
+            PackageProgressPhase.Extracting);
+
+        InstallCacheOptions installCacheOptions = new InstallCacheOptions
+        {
+            OverwriteExisting = request.Policy.OverwriteExisting
+                || (request.Freshness == PackageInstallFreshness.RefreshableAlias && isInstalled),
+            VerifyChecksum = false,
+            SourcePublicationDate = sourcePublicationDate,
+            ArchiveSha256 = acquiredContent.Sha256
+        };
+
+        PackageRecord record;
+        try
+        {
+            record = await _cache.InstallAsync(
+                    cacheReference,
+                    acquiredContent.Content,
+                    installCacheOptions,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (PackageInstallException)
+        {
+            throw;
+        }
+        catch (InvalidDataException exception)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidArchive,
+                PackageInstallStage.ArchiveValidation,
+                $"Package '{request.Directive}' contains an invalid archive.",
+                request.Directive,
+                exception);
+        }
+        catch (JsonException exception)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidArchive,
+                PackageInstallStage.ArchiveValidation,
+                $"Package '{request.Directive}' contains an invalid manifest.",
+                request.Directive,
+                exception);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw CommitFailure(request.Directive, exception);
+        }
+        catch (IOException exception)
+        {
+            throw CommitFailure(request.Directive, exception);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw CommitFailure(request.Directive, exception);
+        }
+
+        _logger.LogInformation(
+            "Installed {Name}#{Version} to {Path}.",
+            record.Reference.Name,
+            record.Reference.Version,
+            record.DirectoryPath);
+
+        if (request.Policy.IncludeDependencies)
+        {
+            await InstallDependenciesAsync(record, request.Policy, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        ReportProgress(
+            request.Policy.Progress,
+            cacheReference.Name,
+            PackageProgressPhase.Complete);
+        return record;
+    }
+
+    private async Task<IReadOnlyList<PackageInstallResult>> InstallManyResolvedAsync(
+        IReadOnlyList<string> directives,
+        ResolvedPackageInstallPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        PackageInstallResult[] results = new PackageInstallResult[directives.Count];
+        using SemaphoreSlim semaphore = new SemaphoreSlim(_options.MaxParallelRegistryQueries);
+
+        IEnumerable<Task> tasks = directives.Select(async (directive, index) =>
+        {
+            await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                PackageRecord? record = await InstallDirectiveAsync(
+                        directive,
+                        policy,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                results[index] = record is not null
+                    ? new PackageInstallResult
+                    {
+                        Directive = directive,
+                        Package = record,
+                        Status = PackageInstallStatus.Installed
+                    }
+                    : new PackageInstallResult
+                    {
+                        Directive = directive,
+                        Status = PackageInstallStatus.NotFound,
+                        ErrorMessage = $"Package '{directive}' could not be resolved.",
+                        ErrorCode = PackageInstallErrorCode.ResolutionFailed,
+                        ErrorStage = PackageInstallStage.Resolution
+                    };
+            }
+            catch (PackageInstallException exception)
+            {
+                _logger.LogError(exception, "Failed to install '{Directive}'.", directive);
+                results[index] = new PackageInstallResult
+                {
+                    Directive = directive,
+                    Status = PackageInstallStatus.Failed,
+                    ErrorMessage = exception.Message,
+                    ErrorCode = exception.ErrorCode,
+                    ErrorStage = exception.Stage
+                };
+            }
+            catch (ArgumentException exception)
+            {
+                _logger.LogError(exception, "Invalid package directive '{Directive}'.", directive);
+                results[index] = new PackageInstallResult
+                {
+                    Directive = directive,
+                    Status = PackageInstallStatus.Failed,
+                    ErrorMessage = exception.Message,
+                    ErrorCode = PackageInstallErrorCode.InvalidPackageIdentity,
+                    ErrorStage = PackageInstallStage.IdentityValidation
+                };
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        });
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        int installed = results.Count(result => result.Status == PackageInstallStatus.Installed);
+        _logger.LogInformation(
+            "InstallManyAsync completed: {Installed}/{Total} packages installed.",
+            installed,
+            directives.Count);
+        return results;
+    }
+
+    private async Task<PackageDownloadResult> DownloadAsync(
+        PackageInstallRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            PackageDownloadResult? result = await _registryClient.DownloadAsync(
+                    request.Source.ResolvedDirective,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            return result
+                ?? throw new PackageInstallException(
+                    PackageInstallErrorCode.DownloadFailed,
+                    PackageInstallStage.Acquisition,
+                    $"Package '{request.Directive}' could not be downloaded.",
+                    request.Directive);
+        }
+        catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                $"Package '{request.Directive}' download timed out.",
+                request.Directive,
+                exception);
+        }
+        catch (HttpRequestException exception)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                $"Package '{request.Directive}' could not be downloaded.",
+                request.Directive,
+                exception);
+        }
+        catch (IOException exception)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                $"Package '{request.Directive}' could not be downloaded.",
+                request.Directive,
+                exception);
+        }
+    }
+
+    private static async Task<AcquiredPackageContent> AcquireContentAsync(
+        PackageInstallRequest request,
+        PackageDownloadResult downloadResult,
+        CancellationToken cancellationToken)
+    {
+        long maxCompressedBytes = request.Policy.Limits.MaxCompressedBytes;
+        if (downloadResult.ContentLength is < 0)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                $"Package '{request.Directive}' reported an invalid content length.",
+                request.Directive);
+        }
+
+        if (downloadResult.ContentLength > maxCompressedBytes)
+        {
+            throw CompressedLimitExceeded(request.Directive, maxCompressedBytes);
+        }
+
+        int capacity = downloadResult.ContentLength is > 0 and <= int.MaxValue
+            ? (int)downloadResult.ContentLength.Value
+            : 0;
+        MemoryStream content = capacity > 0 ? new MemoryStream(capacity) : new MemoryStream();
+        bool completed = false;
+
+        try
+        {
+            using IncrementalHash sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            using IncrementalHash? sha1 = request.Source.ResolvedDirective.ShaSum is not null
+                ? IncrementalHash.CreateHash(HashAlgorithmName.SHA1)
+                : null;
+
+            byte[] buffer = new byte[81_920];
+            long totalBytes = 0;
+
+            try
+            {
+                while (true)
+                {
+                    int bytesRead = await downloadResult.Content.ReadAsync(
+                            buffer,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (bytesRead == 0)
+                        break;
+
+                    if (totalBytes > maxCompressedBytes - bytesRead)
+                        throw CompressedLimitExceeded(request.Directive, maxCompressedBytes);
+
+                    totalBytes += bytesRead;
+                    sha256.AppendData(buffer, 0, bytesRead);
+                    sha1?.AppendData(buffer, 0, bytesRead);
+                    await content.WriteAsync(
+                            buffer.AsMemory(0, bytesRead),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (IOException exception)
+            {
+                throw new PackageInstallException(
+                    PackageInstallErrorCode.DownloadFailed,
+                    PackageInstallStage.Acquisition,
+                    $"Package '{request.Directive}' could not be read from its source.",
+                    request.Directive,
+                    exception);
+            }
+
+            content.Position = 0;
+            string sha256Value = Convert.ToHexString(sha256.GetHashAndReset()).ToLowerInvariant();
+            string? sha1Value = sha1 is null
+                ? null
+                : Convert.ToHexString(sha1.GetHashAndReset()).ToLowerInvariant();
+            completed = true;
+            return new AcquiredPackageContent(content, sha256Value, sha1Value);
+        }
+        finally
+        {
+            if (!completed)
+                await content.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static void VerifyChecksum(
+        PackageInstallRequest request,
+        AcquiredPackageContent content)
+    {
+        if (!request.Policy.VerifyChecksums)
+            return;
+
+        ResolvedDirective resolved = request.Source.ResolvedDirective;
+        string? expectedHash = resolved.Sha256Sum ?? resolved.ShaSum;
+        string? actualHash = resolved.Sha256Sum is not null ? content.Sha256 : content.Sha1;
+        if (string.IsNullOrWhiteSpace(expectedHash))
+            return;
+
+        if (actualHash is null
+            || !string.Equals(
+                expectedHash.Trim(),
+                actualHash,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            string algorithm = resolved.Sha256Sum is not null ? "SHA-256" : "SHA-1";
+            throw new PackageInstallException(
+                PackageInstallErrorCode.ChecksumMismatch,
+                PackageInstallStage.ChecksumValidation,
+                $"{algorithm} checksum verification failed for '{request.Directive}'.",
+                request.Directive);
+        }
+    }
+
+    private async Task<bool> IsInstalledAsync(
+        PackageCacheKey cacheKey,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _cache.IsInstalledAsync(cacheKey.DisplayReference, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw CacheInspectionFailure(cacheKey, exception);
+        }
+        catch (IOException exception)
+        {
+            throw CacheInspectionFailure(cacheKey, exception);
+        }
+    }
+
+    private async Task<PackageRecord?> GetCachedPackageAsync(
+        PackageCacheKey cacheKey,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _cache.GetPackageAsync(cacheKey.DisplayReference, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw CacheInspectionFailure(cacheKey, exception);
+        }
+        catch (IOException exception)
+        {
+            throw CacheInspectionFailure(cacheKey, exception);
+        }
+    }
+
+    private async Task<CacheMetadataEntry?> GetCacheMetadataEntryAsync(
+        PackageCacheKey cacheKey,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            CacheMetadata? metadata = await _cache.GetMetadataAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (metadata is null)
+                return null;
+
+            metadata.Packages.TryGetValue(
+                cacheKey.MetadataKey,
+                out CacheMetadataEntry? entry);
+            return entry;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw CacheInspectionFailure(cacheKey, exception);
+        }
+        catch (IOException exception)
+        {
+            throw CacheInspectionFailure(cacheKey, exception);
+        }
+    }
+
+    private async Task RefreshAliasMetadataAsync(
+        PackageCacheKey cacheKey,
+        CacheMetadataEntry existingMetadata,
+        DateTimeOffset? sourcePublicationDate,
+        string archiveSha256,
+        CancellationToken cancellationToken)
+    {
+        CacheMetadataEntry refreshedMetadata = existingMetadata with
+        {
+            SourcePublicationDate = sourcePublicationDate
+                ?? existingMetadata.SourcePublicationDate,
+            ArchiveSha256 = archiveSha256
+        };
+
+        try
+        {
+            await _cache.UpdateMetadataAsync(
+                    cacheKey.DisplayReference,
+                    refreshedMetadata,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw CommitFailure(cacheKey.DisplayReference.FhirDirective, exception);
+        }
+        catch (IOException exception)
+        {
+            throw CommitFailure(cacheKey.DisplayReference.FhirDirective, exception);
+        }
+    }
+
+    private static PackageInstallFreshness GetFreshness(VersionType versionType) =>
+        versionType switch
+        {
+            VersionType.CiBuild or VersionType.CiBuildBranch =>
+                PackageInstallFreshness.RefreshableAlias,
+            VersionType.LocalBuild => PackageInstallFreshness.LocalAuthoritative,
+            _ => PackageInstallFreshness.Immutable
+        };
+
+    private static DateTimeOffset? NormalizePublicationDate(DateTime? publicationDate)
+    {
+        if (!publicationDate.HasValue)
+            return null;
+
+        DateTime value = publicationDate.Value;
+        if (value.Kind == DateTimeKind.Unspecified)
+            value = DateTime.SpecifyKind(value, DateTimeKind.Utc);
+
+        return new DateTimeOffset(value);
+    }
+
+    private static PackageInstallException CompressedLimitExceeded(
+        string directive,
+        long maxCompressedBytes) =>
+        new PackageInstallException(
+            PackageInstallErrorCode.CompressedSizeLimitExceeded,
+            PackageInstallStage.Acquisition,
+            $"Package '{directive}' exceeds the compressed size limit of {maxCompressedBytes} bytes.",
+            directive);
+
+    private static PackageInstallException CacheInspectionFailure(
+        PackageCacheKey cacheKey,
+        Exception exception) =>
+        new PackageInstallException(
+            PackageInstallErrorCode.CorruptCache,
+            PackageInstallStage.CacheInspection,
+            $"The cache entry for '{cacheKey.MetadataKey}' could not be inspected.",
+            cacheKey.DisplayReference.FhirDirective,
+            exception);
+
+    private static PackageInstallException CommitFailure(
+        string directive,
+        Exception exception) =>
+        new PackageInstallException(
+            PackageInstallErrorCode.CommitFailed,
+            PackageInstallStage.Commit,
+            $"Package '{directive}' could not be committed to the cache.",
+            directive,
+            exception);
+
     /// <summary>
     /// Recursively installs dependencies of a cached package.
     /// </summary>
     private async Task InstallDependenciesAsync(
         PackageRecord record,
-        InstallOptions options,
+        ResolvedPackageInstallPolicy policy,
         CancellationToken cancellationToken)
     {
         PackageManifest manifest = record.Manifest;
@@ -632,11 +1234,16 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
 
             try
             {
-                await InstallAsync(depDirective, options, cancellationToken).ConfigureAwait(false);
+                await InstallDirectiveAsync(depDirective, policy, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (PackageInstallException exception)
             {
-                _logger.LogWarning(ex, "Failed to install dependency '{Directive}' for {Name}#{Version}.",
+                _logger.LogWarning(exception, "Failed to install dependency '{Directive}' for {Name}#{Version}.",
+                    depDirective, record.Reference.Name, record.Reference.Version);
+            }
+            catch (ArgumentException exception)
+            {
+                _logger.LogWarning(exception, "Failed to install dependency '{Directive}' for {Name}#{Version}.",
                     depDirective, record.Reference.Name, record.Reference.Version);
             }
         }
@@ -647,7 +1254,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
     /// </summary>
     private async Task InstallClosureAsync(
         PackageClosure closure,
-        InstallOptions options,
+        ResolvedPackageInstallPolicy policy,
         CancellationToken cancellationToken)
     {
         List<string> directives = closure.Resolved.Values
@@ -660,17 +1267,34 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
 
         _logger.LogDebug("Installing {Count} packages from closure.", directives.Count);
 
-        // Install without recursing into dependencies (the closure already has everything resolved)
-        InstallOptions installOptions = new InstallOptions
-        {
-            IncludeDependencies = false,
-            OverwriteExisting = options.OverwriteExisting,
-            AllowPreRelease = options.AllowPreRelease,
-            PreferredFhirRelease = options.PreferredFhirRelease,
-            Progress = options.Progress
-        };
+        // The closure already contains all transitive dependencies.
+        IReadOnlyList<PackageInstallResult> results = await InstallManyResolvedAsync(
+                directives,
+                policy.WithoutDependencies(),
+                cancellationToken)
+            .ConfigureAwait(false);
 
-        await InstallManyAsync(directives, installOptions, cancellationToken).ConfigureAwait(false);
+        PackageInstallResult? failure = results.FirstOrDefault(
+            result => result.Status
+                is PackageInstallStatus.Failed or PackageInstallStatus.NotFound);
+        if (failure is null)
+            return;
+
+        PackageInstallErrorCode errorCode = failure.ErrorCode
+            ?? (failure.Status == PackageInstallStatus.NotFound
+                ? PackageInstallErrorCode.ResolutionFailed
+                : PackageInstallErrorCode.CommitFailed);
+        PackageInstallStage stage = failure.ErrorStage
+            ?? (failure.Status == PackageInstallStatus.NotFound
+                ? PackageInstallStage.Resolution
+                : PackageInstallStage.Commit);
+
+        throw new PackageInstallException(
+            errorCode,
+            stage,
+            failure.ErrorMessage
+                ?? $"Package '{failure.Directive}' could not be restored.",
+            failure.Directive);
     }
 
     /// <summary>
@@ -833,6 +1457,27 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             BytesDownloaded = bytesDownloaded,
             TotalBytes = totalBytes
         });
+    }
+
+    private sealed class AcquiredPackageContent : IAsyncDisposable
+    {
+        internal AcquiredPackageContent(
+            MemoryStream content,
+            string sha256,
+            string? sha1)
+        {
+            Content = content;
+            Sha256 = sha256;
+            Sha1 = sha1;
+        }
+
+        internal MemoryStream Content { get; }
+
+        internal string Sha256 { get; }
+
+        internal string? Sha1 { get; }
+
+        public ValueTask DisposeAsync() => Content.DisposeAsync();
     }
 
     private static readonly JsonSerializerOptions s_jsonOptions = new()

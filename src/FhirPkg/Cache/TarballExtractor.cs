@@ -2,6 +2,7 @@
 
 using System.Formats.Tar;
 using System.IO.Compression;
+using FhirPkg.Installation;
 
 namespace FhirPkg.Cache;
 
@@ -60,18 +61,25 @@ public static class TarballExtractor
         {
             ct.ThrowIfCancellationRequested();
 
-            // Sanitize the entry name (remove leading ./ or /)
-            string entryName = SanitizeEntryName(entry.Name);
+            string entryName = NormalizeEntryName(
+                entry.Name,
+                entry.EntryType == TarEntryType.Directory);
             if (string.IsNullOrEmpty(entryName))
                 continue;
 
             string targetPath = Path.GetFullPath(Path.Combine(destinationPath, entryName));
+            string relativePath = Path.GetRelativePath(destinationPath, targetPath);
 
-            // Path traversal protection: ensure the target is within the destination
-            if (!targetPath.StartsWith(destinationPath, StringComparison.OrdinalIgnoreCase))
+            if (Path.IsPathRooted(relativePath)
+                || string.Equals(relativePath, "..", StringComparison.Ordinal)
+                || relativePath.StartsWith(
+                    $"..{Path.DirectorySeparatorChar}",
+                    StringComparison.Ordinal)
+                || relativePath.StartsWith(
+                    $"..{Path.AltDirectorySeparatorChar}",
+                    StringComparison.Ordinal))
             {
-                throw new InvalidOperationException(
-                    $"Tar entry '{entry.Name}' attempted path traversal outside destination directory.");
+                throw UnsafeArchivePath();
             }
 
             if (entry.EntryType == TarEntryType.Directory)
@@ -130,17 +138,41 @@ public static class TarballExtractor
     }
 
     /// <summary>
-    /// Sanitizes a tar entry name by removing leading directory separators
-    /// and normalizing path separators for the current platform.
+    /// Normalizes a portable tar entry path while rejecting roots and traversal.
     /// </summary>
-    private static string SanitizeEntryName(string entryName)
+    private static string NormalizeEntryName(string entryName, bool isDirectory)
     {
-        // Normalize separators
-        string sanitized = entryName.Replace('/', Path.DirectorySeparatorChar);
+        string normalized = entryName.Replace('\\', '/');
+        while (normalized.StartsWith("./", StringComparison.Ordinal))
+            normalized = normalized[2..];
 
-        // Remove leading .\ or ./ or \ or /
-        sanitized = sanitized.TrimStart('.', Path.DirectorySeparatorChar, '/');
+        if (normalized.StartsWith('/')
+            || (normalized.Length >= 2
+                && char.IsAsciiLetter(normalized[0])
+                && normalized[1] == ':'))
+        {
+            throw UnsafeArchivePath();
+        }
 
-        return sanitized;
+        if (isDirectory)
+            normalized = normalized.TrimEnd('/');
+
+        if (normalized.Length == 0)
+            return string.Empty;
+
+        string[] segments = normalized.Split('/', StringSplitOptions.None);
+        foreach (string segment in segments)
+        {
+            if (segment.Length == 0 || segment is "." or "..")
+                throw UnsafeArchivePath();
+        }
+
+        return string.Join(Path.DirectorySeparatorChar, segments);
     }
+
+    private static PackageInstallException UnsafeArchivePath() =>
+        new PackageInstallException(
+            PackageInstallErrorCode.InvalidArchive,
+            PackageInstallStage.ArchiveValidation,
+            "Package archive contains an unsafe entry path.");
 }

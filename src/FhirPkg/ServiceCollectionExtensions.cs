@@ -83,7 +83,8 @@ public static class ServiceCollectionExtensions
             FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
             ILogger<DiskPackageCache> logger = sp.GetRequiredService<ILogger<DiskPackageCache>>();
             TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
-            return new DiskPackageCache(options.CachePath, logger, timeProvider);
+            PackageInstallLimits installLimits = PackageInstallLimits.ResolveManager(options.InstallLimits);
+            return new DiskPackageCache(options.CachePath, logger, timeProvider, installLimits);
         });
 
         // Register IRegistryClient as a composite RedundantRegistryClient
@@ -137,6 +138,7 @@ public static class ServiceCollectionExtensions
             IPackageIndexer packageIndexer = sp.GetRequiredService<IPackageIndexer>();
             FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
             ILogger<FhirPackageManager> logger = sp.GetRequiredService<ILogger<FhirPackageManager>>();
+            PackageInstallLimits installLimits = PackageInstallLimits.ResolveManager(options.InstallLimits);
 
             // Only create in-memory resource cache when configured with a positive cache size
             MemoryResourceCache? memoryCache = options.ResourceCacheSize > 0
@@ -151,7 +153,8 @@ public static class ServiceCollectionExtensions
                 packageIndexer,
                 options,
                 logger,
-                memoryCache);
+                memoryCache,
+                installLimits);
         });
 
         return services;

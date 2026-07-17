@@ -13,6 +13,18 @@ namespace FhirPkg;
 public class FhirPackageManagerOptions
 {
     /// <summary>
+    /// Finite package-processing limits. Explicit values override environment
+    /// values; unspecified values use the environment and then documented defaults.
+    /// </summary>
+    public PackageInstallLimits InstallLimits { get; set; } = new PackageInstallLimits();
+
+    /// <summary>
+    /// Controls whether an invalid cache target is repaired or reported.
+    /// Default: <see cref="FhirPkg.CorruptCacheBehavior.Repair"/>.
+    /// </summary>
+    public CorruptCacheBehavior CorruptCacheBehavior { get; set; } = CorruptCacheBehavior.Repair;
+
+    /// <summary>
     /// Path to the local package cache directory.
     /// When <c>null</c>, the <c>PACKAGE_CACHE_FOLDER</c> environment variable is used
     /// if set; otherwise defaults to <c>~/.fhir/packages</c>.
@@ -86,6 +98,12 @@ public class FhirPackageManagerOptions
 /// </summary>
 public class InstallOptions
 {
+    /// <summary>
+    /// Optional per-call package-processing limits. Specified values may only
+    /// tighten the manager-level limits.
+    /// </summary>
+    public PackageInstallLimits? InstallLimits { get; set; }
+
     /// <summary>
     /// Whether to recursively install transitive dependencies of the target package.
     /// Default: <c>false</c>.

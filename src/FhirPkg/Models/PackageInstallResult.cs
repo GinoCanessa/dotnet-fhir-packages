@@ -1,5 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using FhirPkg.Installation;
+
 namespace FhirPkg.Models;
 
 /// <summary>
@@ -18,4 +20,10 @@ public record PackageInstallResult
 
     /// <summary>Error message if the installation failed.</summary>
     public string? ErrorMessage { get; init; }
+
+    /// <summary>Typed failure category when installation did not succeed.</summary>
+    public PackageInstallErrorCode? ErrorCode { get; init; }
+
+    /// <summary>Installation stage associated with <see cref="ErrorCode"/>.</summary>
+    public PackageInstallStage? ErrorStage { get; init; }
 }

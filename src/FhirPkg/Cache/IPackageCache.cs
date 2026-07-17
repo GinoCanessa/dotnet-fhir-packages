@@ -162,4 +162,14 @@ public class InstallCacheOptions
     /// SHA-256 is preferred over SHA-1 for integrity verification.
     /// </summary>
     public string? ExpectedSha256Sum { get; set; }
+
+    /// <summary>
+    /// Source publication time associated with a mutable package alias, when known.
+    /// </summary>
+    public DateTimeOffset? SourcePublicationDate { get; set; }
+
+    /// <summary>
+    /// SHA-256 of the compressed archive used to install the package.
+    /// </summary>
+    public string? ArchiveSha256 { get; set; }
 }
