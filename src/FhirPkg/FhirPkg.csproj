@@ -40,4 +40,8 @@
     <PackageReference Include="Microsoft.Extensions.Options" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="FhirPkg.Tests" />
+  </ItemGroup>
+
 </Project>

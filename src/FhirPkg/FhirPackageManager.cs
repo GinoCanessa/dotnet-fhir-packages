@@ -1,6 +1,5 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
-using System.Security.Cryptography;
 using System.Text.Json;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
@@ -715,13 +714,19 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
                 request,
                 cancellationToken)
             .ConfigureAwait(false);
-        await using AcquiredPackageContent acquiredContent = await AcquireContentAsync(
-                request,
-                downloadResult,
-                cancellationToken)
+        ResolvedDirective resolvedDirective = request.Source.ResolvedDirective;
+        await using PackageContentAcquisition acquiredContent =
+            await PackageContentAcquirer.AcquireAsync(
+                    downloadResult.Content,
+                    GetAcquisitionCacheRoot(),
+                    request.Policy.Limits,
+                    downloadResult.ContentLength,
+                    resolvedDirective.Sha256Sum,
+                    resolvedDirective.ShaSum,
+                    request.Policy.VerifyChecksums,
+                    request.Directive,
+                    cancellationToken)
             .ConfigureAwait(false);
-
-        VerifyChecksum(request, acquiredContent);
 
         if (request.Freshness == PackageInstallFreshness.RefreshableAlias
             && !request.Policy.OverwriteExisting
@@ -759,17 +764,23 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         {
             OverwriteExisting = request.Policy.OverwriteExisting
                 || (request.Freshness == PackageInstallFreshness.RefreshableAlias && isInstalled),
-            VerifyChecksum = false,
+            VerifyChecksum = request.Policy.VerifyChecksums,
+            Limits = request.Policy.Limits,
+            ReportedContentLength = downloadResult.ContentLength,
+            ExpectedSha256Sum = resolvedDirective.Sha256Sum,
+            ExpectedShaSum = resolvedDirective.ShaSum,
             SourcePublicationDate = sourcePublicationDate,
-            ArchiveSha256 = acquiredContent.Sha256
+            ArchiveSha256 = acquiredContent.Sha256,
+            AcquiredContent = acquiredContent
         };
 
         PackageRecord record;
         try
         {
+            await using FileStream archiveStream = acquiredContent.OpenArchiveRead();
             record = await _cache.InstallAsync(
                     cacheReference,
-                    acquiredContent.Content,
+                    archiveStream,
                     installCacheOptions,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -949,118 +960,6 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         }
     }
 
-    private static async Task<AcquiredPackageContent> AcquireContentAsync(
-        PackageInstallRequest request,
-        PackageDownloadResult downloadResult,
-        CancellationToken cancellationToken)
-    {
-        long maxCompressedBytes = request.Policy.Limits.MaxCompressedBytes;
-        if (downloadResult.ContentLength is < 0)
-        {
-            throw new PackageInstallException(
-                PackageInstallErrorCode.DownloadFailed,
-                PackageInstallStage.Acquisition,
-                $"Package '{request.Directive}' reported an invalid content length.",
-                request.Directive);
-        }
-
-        if (downloadResult.ContentLength > maxCompressedBytes)
-        {
-            throw CompressedLimitExceeded(request.Directive, maxCompressedBytes);
-        }
-
-        int capacity = downloadResult.ContentLength is > 0 and <= int.MaxValue
-            ? (int)downloadResult.ContentLength.Value
-            : 0;
-        MemoryStream content = capacity > 0 ? new MemoryStream(capacity) : new MemoryStream();
-        bool completed = false;
-
-        try
-        {
-            using IncrementalHash sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            using IncrementalHash? sha1 = request.Source.ResolvedDirective.ShaSum is not null
-                ? IncrementalHash.CreateHash(HashAlgorithmName.SHA1)
-                : null;
-
-            byte[] buffer = new byte[81_920];
-            long totalBytes = 0;
-
-            try
-            {
-                while (true)
-                {
-                    int bytesRead = await downloadResult.Content.ReadAsync(
-                            buffer,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    if (bytesRead == 0)
-                        break;
-
-                    if (totalBytes > maxCompressedBytes - bytesRead)
-                        throw CompressedLimitExceeded(request.Directive, maxCompressedBytes);
-
-                    totalBytes += bytesRead;
-                    sha256.AppendData(buffer, 0, bytesRead);
-                    sha1?.AppendData(buffer, 0, bytesRead);
-                    await content.WriteAsync(
-                            buffer.AsMemory(0, bytesRead),
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                }
-            }
-            catch (IOException exception)
-            {
-                throw new PackageInstallException(
-                    PackageInstallErrorCode.DownloadFailed,
-                    PackageInstallStage.Acquisition,
-                    $"Package '{request.Directive}' could not be read from its source.",
-                    request.Directive,
-                    exception);
-            }
-
-            content.Position = 0;
-            string sha256Value = Convert.ToHexString(sha256.GetHashAndReset()).ToLowerInvariant();
-            string? sha1Value = sha1 is null
-                ? null
-                : Convert.ToHexString(sha1.GetHashAndReset()).ToLowerInvariant();
-            completed = true;
-            return new AcquiredPackageContent(content, sha256Value, sha1Value);
-        }
-        finally
-        {
-            if (!completed)
-                await content.DisposeAsync().ConfigureAwait(false);
-        }
-    }
-
-    private static void VerifyChecksum(
-        PackageInstallRequest request,
-        AcquiredPackageContent content)
-    {
-        if (!request.Policy.VerifyChecksums)
-            return;
-
-        ResolvedDirective resolved = request.Source.ResolvedDirective;
-        string? expectedHash = resolved.Sha256Sum ?? resolved.ShaSum;
-        string? actualHash = resolved.Sha256Sum is not null ? content.Sha256 : content.Sha1;
-        if (string.IsNullOrWhiteSpace(expectedHash))
-            return;
-
-        if (actualHash is null
-            || !string.Equals(
-                expectedHash.Trim(),
-                actualHash,
-                StringComparison.OrdinalIgnoreCase))
-        {
-            string algorithm = resolved.Sha256Sum is not null ? "SHA-256" : "SHA-1";
-            throw new PackageInstallException(
-                PackageInstallErrorCode.ChecksumMismatch,
-                PackageInstallStage.ChecksumValidation,
-                $"{algorithm} checksum verification failed for '{request.Directive}'.",
-                request.Directive);
-        }
-    }
-
     private async Task<bool> IsInstalledAsync(
         PackageCacheKey cacheKey,
         CancellationToken cancellationToken)
@@ -1166,6 +1065,24 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             _ => PackageInstallFreshness.Immutable
         };
 
+    private string GetAcquisitionCacheRoot()
+    {
+        if (!string.IsNullOrWhiteSpace(_cache.CacheDirectory))
+            return _cache.CacheDirectory;
+
+        if (!string.IsNullOrWhiteSpace(_options.CachePath))
+            return _options.CachePath;
+
+        string? configuredCacheRoot =
+            Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER");
+        return !string.IsNullOrWhiteSpace(configuredCacheRoot)
+            ? configuredCacheRoot
+            : Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".fhir",
+                "packages");
+    }
+
     private static DateTimeOffset? NormalizePublicationDate(DateTime? publicationDate)
     {
         if (!publicationDate.HasValue)
@@ -1177,15 +1094,6 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
 
         return new DateTimeOffset(value);
     }
-
-    private static PackageInstallException CompressedLimitExceeded(
-        string directive,
-        long maxCompressedBytes) =>
-        new PackageInstallException(
-            PackageInstallErrorCode.CompressedSizeLimitExceeded,
-            PackageInstallStage.Acquisition,
-            $"Package '{directive}' exceeds the compressed size limit of {maxCompressedBytes} bytes.",
-            directive);
 
     private static PackageInstallException CacheInspectionFailure(
         PackageCacheKey cacheKey,
@@ -1457,27 +1365,6 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             BytesDownloaded = bytesDownloaded,
             TotalBytes = totalBytes
         });
-    }
-
-    private sealed class AcquiredPackageContent : IAsyncDisposable
-    {
-        internal AcquiredPackageContent(
-            MemoryStream content,
-            string sha256,
-            string? sha1)
-        {
-            Content = content;
-            Sha256 = sha256;
-            Sha1 = sha1;
-        }
-
-        internal MemoryStream Content { get; }
-
-        internal string Sha256 { get; }
-
-        internal string? Sha1 { get; }
-
-        public ValueTask DisposeAsync() => Content.DisposeAsync();
     }
 
     private static readonly JsonSerializerOptions s_jsonOptions = new()

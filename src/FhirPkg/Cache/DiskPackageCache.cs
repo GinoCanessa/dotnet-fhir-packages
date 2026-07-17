@@ -41,7 +41,6 @@ public class DiskPackageCache : IPackageCache, IDisposable
     private const string SourcePublicationDatesSection = "package-source-publication-dates";
     private const string ArchiveSha256Section = "package-archive-sha256";
     private const string OperationsDirectoryName = ".fhirpkg";
-    private const string StagingDirectoryName = "staging";
     private const string BackupDirectoryName = "backup";
 
     private static readonly JsonSerializerOptions s_jsonOptions = new()
@@ -54,6 +53,7 @@ public class DiskPackageCache : IPackageCache, IDisposable
     private readonly SemaphoreSlim _installLock = new(1, 1);
     private readonly ILogger _logger;
     private readonly TimeProvider _timeProvider;
+    private readonly PackageInstallLimits _installLimits;
 
     /// <inheritdoc />
     public string CacheDirectory { get; }
@@ -88,6 +88,9 @@ public class DiskPackageCache : IPackageCache, IDisposable
 
         _logger = logger ?? NullLogger<DiskPackageCache>.Instance;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _installLimits = PackageInstallLimits.ResolvePerCall(
+            installLimits,
+            requestedLimits: null);
         CacheDirectory = cacheDirectory
             ?? Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER")
             ?? Path.Combine(
@@ -201,210 +204,222 @@ public class DiskPackageCache : IPackageCache, IDisposable
 
         PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
         options ??= new InstallCacheOptions();
+        PackageInstallLimits effectiveLimits = PackageInstallLimits.ResolvePerCall(
+            _installLimits,
+            options.Limits);
+        PackageContentAcquisition? acquiredContent = options.AcquiredContent;
+        bool ownsAcquiredContent = false;
 
-        // Verify checksum if requested
-        if (options.VerifyChecksum)
-        {
-            if (options.ExpectedSha256Sum is not null)
-            {
-                if (!CheckSum.VerifySha256(tarballStream, options.ExpectedSha256Sum))
-                {
-                    throw new PackageInstallException(
-                        PackageInstallErrorCode.ChecksumMismatch,
-                        PackageInstallStage.ChecksumValidation,
-                        $"SHA-256 checksum mismatch for package {reference.FhirDirective}. " +
-                        $"Expected: {options.ExpectedSha256Sum}",
-                        reference.FhirDirective);
-                }
-            }
-            else if (options.ExpectedShaSum is not null)
-            {
-                if (!CheckSum.Verify(tarballStream, options.ExpectedShaSum))
-                {
-                    throw new PackageInstallException(
-                        PackageInstallErrorCode.ChecksumMismatch,
-                        PackageInstallStage.ChecksumValidation,
-                        $"SHA-1 checksum mismatch for package {reference.FhirDirective}. " +
-                        $"Expected: {options.ExpectedShaSum}",
-                        reference.FhirDirective);
-                }
-            }
-            // Verify now resets position by default when the stream supports seeking
-        }
-
-        string targetDirectory = cacheKey.GetPackageDirectoryPath(CacheDirectory);
-
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            bool targetExists = Directory.Exists(targetDirectory);
-            if (targetExists && !options.OverwriteExisting)
+            if (acquiredContent is null)
             {
-                throw new PackageInstallException(
-                    PackageInstallErrorCode.CommitFailed,
-                    PackageInstallStage.Commit,
-                    $"Package {reference.FhirDirective} is already installed. " +
-                    "Set OverwriteExisting to true to overwrite.",
-                    reference.FhirDirective);
+                acquiredContent = await PackageContentAcquirer.AcquireAsync(
+                        tarballStream,
+                        CacheDirectory,
+                        effectiveLimits,
+                        options.ReportedContentLength,
+                        options.ExpectedSha256Sum,
+                        options.ExpectedShaSum,
+                        options.VerifyChecksum,
+                        reference.FhirDirective,
+                        ct)
+                    .ConfigureAwait(false);
+                ownsAcquiredContent = true;
             }
 
-            string operationId = Guid.NewGuid().ToString("N");
-            string operationRoot = Path.Combine(CacheDirectory, OperationsDirectoryName);
-            string stagingRoot = Path.Combine(operationRoot, StagingDirectoryName);
-            string backupRoot = Path.Combine(operationRoot, BackupDirectoryName);
+            string targetDirectory = cacheKey.GetPackageDirectoryPath(CacheDirectory);
+            string operationRoot = Path.Combine(
+                CacheDirectory,
+                OperationsDirectoryName);
+            string backupRoot = Path.Combine(
+                operationRoot,
+                BackupDirectoryName);
             string stagingDirectory = Path.Combine(
-                stagingRoot,
-                $"{cacheKey.LockHash}-{operationId}");
+                acquiredContent.OperationDirectory,
+                "expanded");
             string backupDirectory = Path.Combine(
                 backupRoot,
-                $"{cacheKey.LockHash}-{operationId}");
-            Directory.CreateDirectory(stagingRoot);
-            Directory.CreateDirectory(backupRoot);
-            string? targetParent = Path.GetDirectoryName(targetDirectory);
-            if (targetParent is not null)
-                Directory.CreateDirectory(targetParent);
+                $"{cacheKey.LockHash}-{acquiredContent.OperationId}");
 
-            bool commitSucceeded = false;
+            await _installLock.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                try
-                {
-                    await TarballExtractor.ExtractAsync(
-                            tarballStream,
-                            stagingDirectory,
-                            ct)
-                        .ConfigureAwait(false);
-                }
-                catch (PackageInstallException)
-                {
-                    throw;
-                }
-                catch (InvalidDataException exception)
-                {
-                    throw InvalidArchive(reference, exception);
-                }
-                catch (InvalidOperationException exception)
-                {
-                    throw InvalidArchive(reference, exception);
-                }
-
-                TarballExtractor.NormalizePackageStructure(stagingDirectory);
-
-                string stagedContentPath = Path.Combine(
-                    stagingDirectory,
-                    PackageSubdirectory);
-                PackageManifest? manifest;
-                try
-                {
-                    manifest = await ReadManifestFromPathAsync(stagedContentPath, ct)
-                        .ConfigureAwait(false);
-                }
-                catch (JsonException exception)
-                {
-                    throw InvalidArchive(reference, exception);
-                }
-
-                if (manifest is null)
+                bool targetExists = Directory.Exists(targetDirectory);
+                if (targetExists && !options.OverwriteExisting)
                 {
                     throw new PackageInstallException(
-                        PackageInstallErrorCode.InvalidArchive,
-                        PackageInstallStage.ArchiveValidation,
-                        $"Package {reference.FhirDirective} is missing package.json manifest.",
+                        PackageInstallErrorCode.CommitFailed,
+                        PackageInstallStage.Commit,
+                        $"Package {reference.FhirDirective} is already installed. " +
+                        "Set OverwriteExisting to true to overwrite.",
                         reference.FhirDirective);
                 }
 
-                long sizeBytes = CalculateDirectorySize(stagedContentPath);
-                CacheMetadataEntry entry = new CacheMetadataEntry
-                {
-                    DownloadDateTime = _timeProvider.GetUtcNow().UtcDateTime,
-                    SizeBytes = sizeBytes,
-                    SourcePublicationDate = options.SourcePublicationDate,
-                    ArchiveSha256 = options.ArchiveSha256
-                };
-                MetadataFileSnapshot metadataBefore = await CaptureMetadataFileNoLockAsync(ct)
-                    .ConfigureAwait(false);
+                Directory.CreateDirectory(backupRoot);
+                string? targetParent = Path.GetDirectoryName(targetDirectory);
+                if (targetParent is not null)
+                    Directory.CreateDirectory(targetParent);
 
-                ct.ThrowIfCancellationRequested();
-
-                bool backupCreated = false;
-                bool replacementPromoted = false;
+                bool commitSucceeded = false;
                 try
                 {
-                    if (targetExists)
+                    try
                     {
-                        Directory.Move(targetDirectory, backupDirectory);
-                        backupCreated = true;
+                        await using FileStream archiveStream =
+                            acquiredContent.OpenArchiveRead();
+                        ArchiveExtractionMetrics metrics =
+                            await TarballExtractor.ExtractAsync(
+                                    archiveStream,
+                                    stagingDirectory,
+                                    effectiveLimits,
+                                    reference.FhirDirective,
+                                    ct)
+                                .ConfigureAwait(false);
+                        _logger.LogDebug(
+                            "Extracted {EntryCount} entries and {ExpandedBytes} bytes for {Directive}.",
+                            metrics.EntryCount,
+                            metrics.ExpandedBytes,
+                            reference.FhirDirective);
+                    }
+                    catch (PackageInstallException)
+                    {
+                        throw;
+                    }
+                    catch (InvalidDataException exception)
+                    {
+                        throw InvalidArchive(reference, exception);
+                    }
+                    catch (InvalidOperationException exception)
+                    {
+                        throw InvalidArchive(reference, exception);
                     }
 
-                    Directory.Move(stagingDirectory, targetDirectory);
-                    replacementPromoted = true;
-                    await UpdateMetadataNoLockAsync(
-                            reference,
-                            entry,
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
-                    commitSucceeded = true;
-                }
-                catch (UnauthorizedAccessException exception)
-                {
-                    await RollbackInstallNoLockAsync(
-                            reference,
-                            targetDirectory,
-                            backupDirectory,
-                            backupCreated,
-                            replacementPromoted,
-                            metadataBefore)
-                        .ConfigureAwait(false);
-                    throw CommitFailure(reference, exception);
-                }
-                catch (IOException exception)
-                {
-                    await RollbackInstallNoLockAsync(
-                            reference,
-                            targetDirectory,
-                            backupDirectory,
-                            backupCreated,
-                            replacementPromoted,
-                            metadataBefore)
-                        .ConfigureAwait(false);
-                    throw CommitFailure(reference, exception);
-                }
+                    TarballExtractor.NormalizePackageStructure(stagingDirectory);
 
-                TryDeleteDirectory(
-                    backupDirectory,
-                    "backup directory after successful package replacement");
+                    string stagedContentPath = Path.Combine(
+                        stagingDirectory,
+                        PackageSubdirectory);
+                    PackageManifest? manifest;
+                    try
+                    {
+                        manifest = await ReadManifestFromPathAsync(stagedContentPath, ct)
+                            .ConfigureAwait(false);
+                    }
+                    catch (JsonException exception)
+                    {
+                        throw InvalidArchive(reference, exception);
+                    }
 
-                string contentPath = Path.Combine(
-                    targetDirectory,
-                    PackageSubdirectory);
-                return new PackageRecord
+                    if (manifest is null)
+                    {
+                        throw new PackageInstallException(
+                            PackageInstallErrorCode.InvalidArchive,
+                            PackageInstallStage.ArchiveValidation,
+                            $"Package {reference.FhirDirective} is missing package.json manifest.",
+                            reference.FhirDirective);
+                    }
+
+                    long sizeBytes = CalculateDirectorySize(stagedContentPath);
+                    CacheMetadataEntry entry = new CacheMetadataEntry
+                    {
+                        DownloadDateTime = _timeProvider.GetUtcNow().UtcDateTime,
+                        SizeBytes = sizeBytes,
+                        SourcePublicationDate = options.SourcePublicationDate,
+                        ArchiveSha256 = options.ArchiveSha256
+                            ?? acquiredContent.Sha256
+                    };
+                    MetadataFileSnapshot metadataBefore =
+                        await CaptureMetadataFileNoLockAsync(ct)
+                            .ConfigureAwait(false);
+
+                    ct.ThrowIfCancellationRequested();
+
+                    bool backupCreated = false;
+                    bool replacementPromoted = false;
+                    try
+                    {
+                        if (targetExists)
+                        {
+                            Directory.Move(targetDirectory, backupDirectory);
+                            backupCreated = true;
+                        }
+
+                        Directory.Move(stagingDirectory, targetDirectory);
+                        replacementPromoted = true;
+                        await UpdateMetadataNoLockAsync(
+                                reference,
+                                entry,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                        commitSucceeded = true;
+                    }
+                    catch (UnauthorizedAccessException exception)
+                    {
+                        await RollbackInstallNoLockAsync(
+                                reference,
+                                targetDirectory,
+                                backupDirectory,
+                                backupCreated,
+                                replacementPromoted,
+                                metadataBefore)
+                            .ConfigureAwait(false);
+                        throw CommitFailure(reference, exception);
+                    }
+                    catch (IOException exception)
+                    {
+                        await RollbackInstallNoLockAsync(
+                                reference,
+                                targetDirectory,
+                                backupDirectory,
+                                backupCreated,
+                                replacementPromoted,
+                                metadataBefore)
+                            .ConfigureAwait(false);
+                        throw CommitFailure(reference, exception);
+                    }
+
+                    TryDeleteDirectory(
+                        backupDirectory,
+                        "backup directory after successful package replacement");
+
+                    string contentPath = Path.Combine(
+                        targetDirectory,
+                        PackageSubdirectory);
+                    return new PackageRecord
+                    {
+                        Reference = reference,
+                        DirectoryPath = targetDirectory,
+                        ContentPath = contentPath,
+                        Manifest = manifest,
+                        InstalledAt = entry.DownloadDateTime,
+                        SizeBytes = sizeBytes
+                    };
+                }
+                finally
                 {
-                    Reference = reference,
-                    DirectoryPath = targetDirectory,
-                    ContentPath = contentPath,
-                    Manifest = manifest,
-                    InstalledAt = entry.DownloadDateTime,
-                    SizeBytes = sizeBytes
-                };
+                    TryDeleteDirectory(
+                        stagingDirectory,
+                        "expanded staging directory after package installation");
+
+                    if (!commitSucceeded && !Directory.Exists(targetDirectory))
+                    {
+                        TryRestoreBackup(
+                            backupDirectory,
+                            targetDirectory,
+                            "backup directory during final rollback");
+                    }
+                }
             }
             finally
             {
-                TryDeleteDirectory(
-                    stagingDirectory,
-                    "staging directory after package installation");
-
-                if (!commitSucceeded && !Directory.Exists(targetDirectory))
-                {
-                    TryRestoreBackup(
-                        backupDirectory,
-                        targetDirectory,
-                        "backup directory during final rollback");
-                }
+                _installLock.Release();
             }
         }
         finally
         {
-            _installLock.Release();
+            if (ownsAcquiredContent && acquiredContent is not null)
+                await acquiredContent.DisposeAsync().ConfigureAwait(false);
         }
     }
 
