@@ -190,4 +190,6 @@ public class InstallCacheOptions
     public string? ArchiveSha256 { get; set; }
 
     internal PackageContentAcquisition? AcquiredContent { get; set; }
+
+    internal PackageIdentityExpectation? IdentityExpectation { get; set; }
 }

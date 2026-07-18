@@ -13,14 +13,12 @@ namespace FhirPkg.Cache;
 /// <remarks>
 /// FHIR packages are distributed as npm-style .tgz tarballs. The expected
 /// structure within the archive is a <c>package/</c> subdirectory containing
-/// all resource files and the package.json manifest. Some packages may not
-/// follow this convention, so <see cref="NormalizePackageStructure"/> is
-/// provided to ensure a consistent layout.
+/// all resource files and the package.json manifest.
+/// <see cref="NormalizePackageStructure"/> accepts that standard layout or one
+/// unambiguous legacy root layout and rejects all other shapes.
 /// </remarks>
 public static class TarballExtractor
 {
-    private const string PackageSubdirectory = "package";
-
     /// <summary>
     /// Extracts a .tgz tarball stream to the specified destination directory.
     /// </summary>
@@ -75,6 +73,7 @@ public static class TarballExtractor
         int maximumPathLength = 0;
         int maximumDepth = 0;
         byte[] buffer = new byte[81_920];
+        PackageArchiveInventory inventory = new PackageArchiveInventory(limits);
 
         while (await ReadNextEntryAsync(
                 tarReader,
@@ -89,31 +88,43 @@ public static class TarballExtractor
 
             entryCount++;
 
-            string entryName = NormalizeEntryName(
-                entry.Name,
-                entry.EntryType == TarEntryType.Directory);
-            if (string.IsNullOrEmpty(entryName))
-                continue;
+            bool isDirectory = entry.EntryType == TarEntryType.Directory;
+            if (!isDirectory && !IsRegularFile(entry.EntryType))
+                throw UnsupportedArchiveEntry(entry.EntryType, directive);
 
-            if (entryName.Length > limits.MaxArchivePathLength)
+            PortableArchivePath portablePath = PortableArchivePath.Create(
+                entry.Name,
+                isDirectory,
+                directive);
+
+            if (portablePath.CanonicalPath.Length > limits.MaxArchivePathLength)
             {
                 throw ArchivePathLengthLimitExceeded(
                     directive,
                     limits.MaxArchivePathLength);
             }
 
-            int depth = CountPathDepth(entryName);
-            if (depth > limits.MaxArchiveDepth)
+            if (portablePath.Depth > limits.MaxArchiveDepth)
                 throw ArchiveDepthLimitExceeded(directive, limits.MaxArchiveDepth);
 
-            maximumPathLength = Math.Max(maximumPathLength, entryName.Length);
-            maximumDepth = Math.Max(maximumDepth, depth);
+            maximumPathLength = Math.Max(
+                maximumPathLength,
+                portablePath.CanonicalPath.Length);
+            maximumDepth = Math.Max(maximumDepth, portablePath.Depth);
 
-            string localEntryName = entryName.Replace(
-                '/',
-                Path.DirectorySeparatorChar);
+            inventory.Add(
+                portablePath,
+                isDirectory
+                    ? PackageArchiveEntryKind.Directory
+                    : PackageArchiveEntryKind.RegularFile,
+                directive);
+
             string targetPath = Path.GetFullPath(
-                Path.Combine(fullDestination, localEntryName));
+                Path.Combine(
+                [
+                    fullDestination,
+                    .. portablePath.Segments
+                ]));
             string relativePath = Path.GetRelativePath(fullDestination, targetPath);
 
             if (Path.IsPathRooted(relativePath)
@@ -125,17 +136,14 @@ public static class TarballExtractor
                     $"..{Path.AltDirectorySeparatorChar}",
                     StringComparison.Ordinal))
             {
-                throw UnsafeArchivePath();
+                throw UnsafeArchivePath(directive);
             }
 
-            if (entry.EntryType == TarEntryType.Directory)
+            if (isDirectory)
             {
                 Directory.CreateDirectory(targetPath);
                 continue;
             }
-
-            if (!IsRegularFile(entry.EntryType))
-                throw UnsupportedArchiveEntry(entry.EntryType, directive);
 
             if (entry.Length < 0)
                 throw InvalidArchiveEntryLength(directive);
@@ -153,7 +161,7 @@ public static class TarballExtractor
             long entryBytes = 0;
             await using (FileStream destination = new FileStream(
                 targetPath,
-                FileMode.Create,
+                FileMode.CreateNew,
                 FileAccess.Write,
                 FileShare.None,
                 buffer.Length,
@@ -209,7 +217,8 @@ public static class TarballExtractor
             maximumDepth)
         {
             MetadataBytes = preflightStream.MetadataBytes,
-            MetadataEntryCount = preflightStream.MetadataEntryCount
+            MetadataEntryCount = preflightStream.MetadataEntryCount,
+            Inventory = inventory
         };
     }
 
@@ -313,100 +322,44 @@ public static class TarballExtractor
     }
 
     /// <summary>
-    /// Normalizes the package structure by ensuring a <c>package/</c> subdirectory exists.
-    /// If the extracted contents do not contain a <c>package/</c> subdirectory,
-    /// all top-level files are moved into a newly created one.
+    /// Validates an extracted package layout and normalizes an accepted legacy
+    /// root layout into the standard <c>package/</c> directory.
     /// </summary>
     /// <param name="extractedPath">The root directory of the extracted package.</param>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="extractedPath"/> is <c>null</c>.</exception>
     public static void NormalizePackageStructure(string extractedPath)
     {
         ArgumentNullException.ThrowIfNull(extractedPath);
-
-        string packageDir = Path.Combine(extractedPath, PackageSubdirectory);
-
-        // If the package/ subdirectory already exists, nothing to do
-        if (Directory.Exists(packageDir))
-            return;
-
-        // Create the package/ subdirectory
-        Directory.CreateDirectory(packageDir);
-
-        // Move all top-level files into package/
-        foreach (string file in Directory.GetFiles(extractedPath))
-        {
-            string fileName = Path.GetFileName(file);
-            string destination = Path.Combine(packageDir, fileName);
-            File.Move(file, destination);
-        }
-
-        // Move all top-level subdirectories (except "package" itself) into package/
-        foreach (string dir in Directory.GetDirectories(extractedPath))
-        {
-            string dirName = Path.GetFileName(dir);
-            if (string.Equals(dirName, PackageSubdirectory, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            string destination = Path.Combine(packageDir, dirName);
-            Directory.Move(dir, destination);
-        }
+        PackageArchiveInventory inventory =
+            PackageArchiveInventory.FromFileSystem(
+                extractedPath,
+                directive: null);
+        _ = PackageArchiveLayoutValidator.ValidateAndNormalize(
+            extractedPath,
+            inventory,
+            directive: null);
     }
 
-    /// <summary>
-    /// Normalizes a portable tar entry path while rejecting roots and traversal.
-    /// </summary>
-    private static string NormalizeEntryName(string entryName, bool isDirectory)
-    {
-        string normalized = entryName.Replace('\\', '/');
-        while (normalized.StartsWith("./", StringComparison.Ordinal))
-            normalized = normalized[2..];
-
-        if (normalized.StartsWith('/')
-            || (normalized.Length >= 2
-                && char.IsAsciiLetter(normalized[0])
-                && normalized[1] == ':'))
-        {
-            throw UnsafeArchivePath();
-        }
-
-        if (isDirectory)
-            normalized = normalized.TrimEnd('/');
-
-        if (normalized.Length == 0)
-            return string.Empty;
-
-        string[] segments = normalized.Split('/', StringSplitOptions.None);
-        foreach (string segment in segments)
-        {
-            if (segment.Length == 0 || segment is "." or "..")
-                throw UnsafeArchivePath();
-        }
-
-        return string.Join('/', segments);
-    }
-
-    private static int CountPathDepth(string normalizedEntryName)
-    {
-        int depth = 1;
-        foreach (char character in normalizedEntryName)
-        {
-            if (character == '/')
-                depth++;
-        }
-
-        return depth;
-    }
+    internal static PackageArchiveLayoutResult ValidateAndNormalizePackageStructure(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive) =>
+        PackageArchiveLayoutValidator.ValidateAndNormalize(
+            extractedPath,
+            inventory,
+            directive);
 
     private static bool IsRegularFile(TarEntryType entryType) =>
         entryType is TarEntryType.RegularFile
             or TarEntryType.V7RegularFile
             or TarEntryType.ContiguousFile;
 
-    private static PackageInstallException UnsafeArchivePath() =>
+    private static PackageInstallException UnsafeArchivePath(string? directive) =>
         new PackageInstallException(
             PackageInstallErrorCode.InvalidArchive,
             PackageInstallStage.ArchiveValidation,
-            "Package archive contains an unsafe entry path.");
+            "Package archive contains an unsafe entry path.",
+            directive);
 
     private static PackageInstallException UnsupportedArchiveEntry(
         TarEntryType entryType,
@@ -492,4 +445,6 @@ internal sealed record ArchiveExtractionMetrics(
     internal long MetadataBytes { get; init; }
 
     internal int MetadataEntryCount { get; init; }
+
+    internal PackageArchiveInventory? Inventory { get; init; }
 }

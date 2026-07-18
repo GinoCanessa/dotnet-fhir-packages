@@ -180,22 +180,37 @@ public enum ConflictResolutionStrategy
 public enum PackageProgressPhase
 {
     /// <summary>Resolving the package version from registries.</summary>
-    Resolving,
+    Resolving = 0,
 
     /// <summary>Downloading the package tarball.</summary>
-    Downloading,
+    Downloading = 1,
 
     /// <summary>Extracting the package contents.</summary>
-    Extracting,
+    Extracting = 2,
 
     /// <summary>Indexing the package resources.</summary>
-    Indexing,
+    Indexing = 3,
 
     /// <summary>Installation completed successfully.</summary>
-    Complete,
+    Complete = 4,
 
     /// <summary>Installation failed.</summary>
-    Failed
+    Failed = 5,
+
+    /// <summary>Acquiring package content into bounded local staging.</summary>
+    Acquiring = 6,
+
+    /// <summary>Validating archive shape, layout, manifest, and identity.</summary>
+    Validating = 7,
+
+    /// <summary>Waiting to acquire the package mutation lock.</summary>
+    WaitingForLock = 8,
+
+    /// <summary>Repairing an invalid existing cache entry.</summary>
+    Repairing = 9,
+
+    /// <summary>Committing validated package content to the cache.</summary>
+    Committing = 10
 }
 
 /// <summary>

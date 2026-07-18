@@ -771,7 +771,8 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             ExpectedShaSum = resolvedDirective.ShaSum,
             SourcePublicationDate = sourcePublicationDate,
             ArchiveSha256 = acquiredContent.Sha256,
-            AcquiredContent = acquiredContent
+            AcquiredContent = acquiredContent,
+            IdentityExpectation = request.IdentityExpectation
         };
 
         PackageRecord record;

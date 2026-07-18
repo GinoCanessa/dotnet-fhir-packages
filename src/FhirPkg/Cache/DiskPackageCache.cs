@@ -202,8 +202,27 @@ public class DiskPackageCache : IPackageCache, IDisposable
         if (!reference.HasVersion)
             throw new ArgumentException("PackageReference must have a version for installation.", nameof(reference));
 
-        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
         options ??= new InstallCacheOptions();
+        PackageIdentityExpectation identityExpectation =
+            options.IdentityExpectation is null
+                ? PackageIdentityValidator.CreateExpectation(
+                    reference,
+                    reference.FhirDirective)
+                : PackageIdentityValidator.ValidateExpectation(
+                    options.IdentityExpectation,
+                    reference.FhirDirective);
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        PackageCacheKey expectationKey = PackageCacheKey.Create(
+            identityExpectation.Reference);
+        if (!expectationKey.Equals(cacheKey))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPackageIdentity,
+                PackageInstallStage.IdentityValidation,
+                "Expected package identity does not match the cache target.",
+                reference.FhirDirective);
+        }
+
         PackageInstallLimits effectiveLimits = PackageInstallLimits.ResolvePerCall(
             _installLimits,
             options.Limits);
@@ -264,6 +283,8 @@ public class DiskPackageCache : IPackageCache, IDisposable
                 bool commitSucceeded = false;
                 try
                 {
+                    string stagedContentPath;
+                    PackageManifest manifest;
                     try
                     {
                         await using FileStream archiveStream =
@@ -281,6 +302,37 @@ public class DiskPackageCache : IPackageCache, IDisposable
                             metrics.EntryCount,
                             metrics.ExpandedBytes,
                             reference.FhirDirective);
+
+                        PackageArchiveInventory inventory = metrics.Inventory
+                            ?? throw new PackageInstallException(
+                                PackageInstallErrorCode.InvalidArchive,
+                                PackageInstallStage.ArchiveValidation,
+                                "Package archive inventory was not produced.",
+                                reference.FhirDirective);
+                        PackageArchiveLayoutResult layout =
+                            TarballExtractor.ValidateAndNormalizePackageStructure(
+                                stagingDirectory,
+                                inventory,
+                                reference.FhirDirective);
+                        PackageIdentityValidationResult identity =
+                            await PackageIdentityValidator.ValidateExpectedAsync(
+                                    layout.ManifestPath,
+                                    identityExpectation,
+                                    reference.FhirDirective,
+                                    ct)
+                                .ConfigureAwait(false);
+
+                        if (!identity.CacheKey.Equals(cacheKey))
+                        {
+                            throw new PackageInstallException(
+                                PackageInstallErrorCode.InvalidPackageIdentity,
+                                PackageInstallStage.IdentityValidation,
+                                "Validated package identity does not match the cache target.",
+                                reference.FhirDirective);
+                        }
+
+                        stagedContentPath = layout.ContentPath;
+                        manifest = identity.Manifest;
                     }
                     catch (PackageInstallException)
                     {
@@ -293,31 +345,6 @@ public class DiskPackageCache : IPackageCache, IDisposable
                     catch (InvalidOperationException exception)
                     {
                         throw InvalidArchive(reference, exception);
-                    }
-
-                    TarballExtractor.NormalizePackageStructure(stagingDirectory);
-
-                    string stagedContentPath = Path.Combine(
-                        stagingDirectory,
-                        PackageSubdirectory);
-                    PackageManifest? manifest;
-                    try
-                    {
-                        manifest = await ReadManifestFromPathAsync(stagedContentPath, ct)
-                            .ConfigureAwait(false);
-                    }
-                    catch (JsonException exception)
-                    {
-                        throw InvalidArchive(reference, exception);
-                    }
-
-                    if (manifest is null)
-                    {
-                        throw new PackageInstallException(
-                            PackageInstallErrorCode.InvalidArchive,
-                            PackageInstallStage.ArchiveValidation,
-                            $"Package {reference.FhirDirective} is missing package.json manifest.",
-                            reference.FhirDirective);
                     }
 
                     long sizeBytes = CalculateDirectorySize(stagedContentPath);

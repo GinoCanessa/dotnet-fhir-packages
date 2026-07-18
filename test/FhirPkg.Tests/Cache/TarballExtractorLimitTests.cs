@@ -125,8 +125,8 @@ public class TarballExtractorLimitTests : IDisposable
     [Fact]
     public async Task ExtractAsync_NormalizedPathOneOverLimit_UsesPathErrorCode()
     {
-        const string entryName = "./folder/file.txt";
-        const string normalizedName = "folder/file.txt";
+        const string entryName = "folder/file.txt";
+        const string normalizedName = entryName;
         using MemoryStream archive = CreateArchive((entryName, new byte[1]));
         PackageInstallLimits limits = CreateLimits();
         limits.MaxArchivePathLength = normalizedName.Length - 1;
