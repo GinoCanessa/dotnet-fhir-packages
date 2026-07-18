@@ -194,6 +194,20 @@ public class InstallCacheOptions
 
     internal PackageIdentityExpectation? IdentityExpectation { get; set; }
 
-    internal CorruptCacheBehavior CorruptCacheBehavior { get; set; } =
+    /// <summary>
+    /// Controls whether an invalid existing cache target is repaired or
+    /// reported. Hardened cache implementations must honor this policy before
+    /// consuming replacement content.
+    /// </summary>
+    public CorruptCacheBehavior CorruptCacheBehavior { get; set; } =
         CorruptCacheBehavior.Repair;
+
+    /// <summary>
+    /// When <c>true</c>, a mutable alias whose acquired archive SHA-256 matches
+    /// the recorded archive may refresh metadata without replacing content.
+    /// </summary>
+    public bool SkipIfArchiveUnchanged { get; set; }
+
+    /// <summary>Optional progress callback for hardened cache work.</summary>
+    public IProgress<PackageProgress>? Progress { get; set; }
 }

@@ -14,6 +14,7 @@ namespace FhirPkg.Cache;
 /// </summary>
 public class DiskPackageCache :
     IPackageCache,
+    IHardenedPackageCache,
     IHardenedPackageCacheCore,
     IDisposable
 {
@@ -27,13 +28,13 @@ public class DiskPackageCache :
         WriteIndented = true
     };
 
-    private readonly SemaphoreSlim _installLock = new(1, 1);
     private readonly ILogger _logger;
     private readonly TimeProvider _timeProvider;
     private readonly PackageInstallLimits _installLimits;
     private readonly PackageCacheValidator _validator;
     private readonly PackageCacheMetadataStore _metadataStore;
     private readonly PackageCacheCommitter _committer;
+    private readonly PackageCacheCoordinator _coordinator;
 
     /// <inheritdoc />
     public string CacheDirectory { get; }
@@ -112,6 +113,7 @@ public class DiskPackageCache :
             journalStore,
             fileOperations,
             faultObserver);
+        _coordinator = new PackageCacheCoordinator(CacheDirectory);
     }
 
     /// <inheritdoc />
@@ -129,30 +131,23 @@ public class DiskPackageCache :
         PackageReference reference,
         CancellationToken ct = default)
     {
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await RecoverNoLockAsync(ct).ConfigureAwait(false);
-            PackageCacheInspection inspection =
-                await _validator.InspectAsync(reference, ct)
-                    .ConfigureAwait(false);
-            if (inspection.State != PackageCacheInspectionState.Valid)
-                return null;
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        await using PackageCacheLease identityLease =
+            await AcquireIdentityAndRecoverAsync(cacheKey, ct)
+                .ConfigureAwait(false);
+        PackageCacheInspection inspection =
+            await _validator.InspectAsync(cacheKey, ct)
+                .ConfigureAwait(false);
+        if (inspection.State != PackageCacheInspectionState.Valid)
+            return null;
 
-            CacheMetadataEntry? entry =
-                await _metadataStore.GetEntryAsync(
-                        inspection.CacheKey,
-                        ct)
-                    .ConfigureAwait(false);
-            return CreateRecord(
-                inspection.CacheKey.DisplayReference,
-                inspection,
-                entry);
-        }
-        finally
-        {
-            _installLock.Release();
-        }
+        CacheMetadataEntry? entry =
+            await _metadataStore.GetEntryAsync(cacheKey, ct)
+                .ConfigureAwait(false);
+        return CreateRecord(
+            cacheKey.DisplayReference,
+            inspection,
+            entry);
     }
 
     /// <inheritdoc />
@@ -161,54 +156,64 @@ public class DiskPackageCache :
         string? versionFilter = null,
         CancellationToken ct = default)
     {
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
-        try
+        await RecoverPendingTransactionsAsync(ct).ConfigureAwait(false);
+        PackageCacheKeySnapshot snapshot;
+        await using (PackageCacheLease globalLease =
+            await _coordinator.AcquireGlobalAsync(ct).ConfigureAwait(false))
         {
-            await RecoverNoLockAsync(ct).ConfigureAwait(false);
-            CacheMetadata metadata = await _metadataStore.ReadAsync(ct)
+            snapshot = await SnapshotCacheKeysNoLockAsync(ct)
                 .ConfigureAwait(false);
-            List<PackageRecord> results = [];
-            foreach ((
-                PackageCacheKey cacheKey,
-                string _) in EnumeratePackageTargets())
+        }
+
+        List<PackageCacheKey> cacheKeys = snapshot.CanonicalKeys
+            .OrderBy(
+                key => key.CanonicalIdentity,
+                StringComparer.Ordinal)
+            .ToList();
+        List<PackageRecord> results = [];
+        foreach (PackageCacheKey cacheKey in cacheKeys)
+        {
+            ct.ThrowIfCancellationRequested();
+            PackageReference reference = cacheKey.CanonicalReference;
+            if (packageIdFilter is not null
+                && !reference.Name.StartsWith(
+                    packageIdFilter,
+                    StringComparison.OrdinalIgnoreCase))
             {
-                ct.ThrowIfCancellationRequested();
-                PackageReference reference = cacheKey.CanonicalReference;
-                if (packageIdFilter is not null
-                    && !reference.Name.StartsWith(
-                        packageIdFilter,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (versionFilter is not null
-                    && !string.Equals(
-                        reference.Version,
-                        versionFilter,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                PackageCacheInspection inspection =
-                    await _validator.InspectAsync(cacheKey, ct)
-                        .ConfigureAwait(false);
-                if (inspection.State != PackageCacheInspectionState.Valid)
-                    continue;
-
-                metadata.Packages.TryGetValue(
-                    cacheKey.MetadataKey,
-                    out CacheMetadataEntry? entry);
-                results.Add(CreateRecord(reference, inspection, entry));
+                continue;
             }
 
-            return results;
+            if (versionFilter is not null
+                && !string.Equals(
+                    reference.Version,
+                    versionFilter,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            await using PackageCacheLease identityLease =
+                await AcquireIdentityAndRecoverAsync(cacheKey, ct)
+                    .ConfigureAwait(false);
+            PackageCacheInspection inspection =
+                await _validator.InspectAsync(cacheKey, ct)
+                    .ConfigureAwait(false);
+            if (inspection.State != PackageCacheInspectionState.Valid)
+                continue;
+
+            CacheMetadataEntry? entry;
+            await using (PackageCacheLease globalLease =
+                await _coordinator.AcquireGlobalAsync(ct)
+                    .ConfigureAwait(false))
+            {
+                entry = await _metadataStore.GetEntryAsync(cacheKey, ct)
+                    .ConfigureAwait(false);
+            }
+
+            results.Add(CreateRecord(reference, inspection, entry));
         }
-        finally
-        {
-            _installLock.Release();
-        }
+
+        return results;
     }
 
     /// <inheritdoc />
@@ -256,11 +261,42 @@ public class DiskPackageCache :
                 reference.FhirDirective);
         }
 
-        await InspectInstallTargetAsync(
-                cacheKey,
-                options,
-                ct)
-            .ConfigureAwait(false);
+        ReportProgress(
+            options.Progress,
+            reference.Name,
+            PackageProgressPhase.WaitingForLock);
+        await using PackageCacheLease identityLease =
+            await AcquireIdentityAndRecoverAsync(
+                    cacheKey,
+                    ct,
+                    options.AcquiredContent?.OperationId)
+                .ConfigureAwait(false);
+        PackageCacheInspection initialInspection =
+            await _validator.InspectAsync(cacheKey, ct)
+                .ConfigureAwait(false);
+        if (initialInspection.State == PackageCacheInspectionState.Valid
+            && !options.OverwriteExisting)
+        {
+            CacheMetadataEntry? existingEntry =
+                await _metadataStore.GetEntryAsync(cacheKey, ct)
+                    .ConfigureAwait(false);
+            return CreateRecord(
+                cacheKey.DisplayReference,
+                initialInspection,
+                existingEntry);
+        }
+
+        ThrowIfInstallCannotReplace(
+            cacheKey,
+            initialInspection,
+            options);
+        if (initialInspection.State == PackageCacheInspectionState.Corrupt)
+        {
+            ReportProgress(
+                options.Progress,
+                reference.Name,
+                PackageProgressPhase.Repairing);
+        }
 
         PackageInstallLimits effectiveLimits =
             PackageInstallLimits.ResolvePerCall(
@@ -272,6 +308,10 @@ public class DiskPackageCache :
         {
             if (acquiredContent is null)
             {
+                ReportProgress(
+                    options.Progress,
+                    reference.Name,
+                    PackageProgressPhase.Acquiring);
                 acquiredContent = await PackageContentAcquirer.AcquireAsync(
                         tarballStream,
                         CacheDirectory,
@@ -281,11 +321,52 @@ public class DiskPackageCache :
                         options.ExpectedShaSum,
                         options.VerifyChecksum,
                         reference.FhirDirective,
+                        _coordinator,
                         ct)
                     .ConfigureAwait(false);
                 ownsAcquiredContent = true;
             }
 
+            if (options.SkipIfArchiveUnchanged
+                && initialInspection.State
+                    == PackageCacheInspectionState.Valid)
+            {
+                CacheMetadataEntry? existingEntry =
+                    await _metadataStore.GetEntryAsync(cacheKey, ct)
+                        .ConfigureAwait(false);
+                if (existingEntry?.ArchiveSha256 is string existingHash
+                    && string.Equals(
+                        existingHash,
+                        acquiredContent.Sha256,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    CacheMetadataEntry refreshedEntry = existingEntry with
+                    {
+                        SourcePublicationDate =
+                            options.SourcePublicationDate
+                            ?? existingEntry.SourcePublicationDate,
+                        ArchiveSha256 = acquiredContent.Sha256
+                    };
+                    await using PackageCacheLease globalLease =
+                        await _coordinator.AcquireGlobalAsync(ct)
+                            .ConfigureAwait(false);
+                    await _metadataStore.SetEntryAsync(
+                            cacheKey,
+                            refreshedEntry,
+                            mutation: null,
+                            ct)
+                        .ConfigureAwait(false);
+                    return CreateRecord(
+                        cacheKey.DisplayReference,
+                        initialInspection,
+                        refreshedEntry);
+                }
+            }
+
+            ReportProgress(
+                options.Progress,
+                reference.Name,
+                PackageProgressPhase.Extracting);
             string stagingDirectory = Path.Combine(
                 acquiredContent.OperationDirectory,
                 "expanded");
@@ -308,6 +389,10 @@ public class DiskPackageCache :
                     metrics.EntryCount,
                     metrics.ExpandedBytes,
                     reference.FhirDirective);
+                ReportProgress(
+                    options.Progress,
+                    reference.Name,
+                    PackageProgressPhase.Validating);
 
                 PackageArchiveInventory inventory = metrics.Inventory
                     ?? throw InvalidArchive(
@@ -362,10 +447,16 @@ public class DiskPackageCache :
             };
 
             PackageCacheInspection committedInspection;
-            await _installLock.WaitAsync(ct).ConfigureAwait(false);
-            try
+            await using (PackageCacheLease globalLease =
+                await _coordinator.AcquireGlobalAsync(ct)
+                    .ConfigureAwait(false))
             {
-                await RecoverNoLockAsync(ct).ConfigureAwait(false);
+                ReportProgress(
+                    options.Progress,
+                    reference.Name,
+                    PackageProgressPhase.Committing);
+                await RecoverNoLockAsync(cacheKey, ct)
+                    .ConfigureAwait(false);
                 PackageCacheInspection currentInspection =
                     await _validator.InspectAsync(cacheKey, ct)
                         .ConfigureAwait(false);
@@ -395,10 +486,6 @@ public class DiskPackageCache :
                         reference.FhirDirective);
                 }
             }
-            finally
-            {
-                _installLock.Release();
-            }
 
             return new PackageRecord
             {
@@ -418,87 +505,340 @@ public class DiskPackageCache :
     }
 
     /// <inheritdoc />
+    public async Task<PackageRecord> ImportAsync(
+        Stream tarballStream,
+        InstallCacheOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(tarballStream);
+        options ??= new InstallCacheOptions();
+        if (!Enum.IsDefined(options.CorruptCacheBehavior))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPolicy,
+                PackageInstallStage.PolicyValidation,
+                "CorruptCacheBehavior is not a supported value.");
+        }
+
+        PackageInstallLimits effectiveLimits =
+            PackageInstallLimits.ResolvePerCall(
+                _installLimits,
+                options.Limits);
+        PackageContentAcquisition? acquiredContent =
+            options.AcquiredContent;
+        bool ownsAcquiredContent = false;
+        try
+        {
+            if (acquiredContent is null)
+            {
+                ReportProgress(
+                    options.Progress,
+                    "package import",
+                    PackageProgressPhase.Acquiring);
+                acquiredContent = await PackageContentAcquirer.AcquireAsync(
+                        tarballStream,
+                        CacheDirectory,
+                        effectiveLimits,
+                        options.ReportedContentLength,
+                        options.ExpectedSha256Sum,
+                        options.ExpectedShaSum,
+                        options.VerifyChecksum,
+                        "package import",
+                        _coordinator,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                ownsAcquiredContent = true;
+            }
+
+            string stagingDirectory = Path.Combine(
+                acquiredContent.OperationDirectory,
+                "expanded");
+            ReportProgress(
+                options.Progress,
+                "package import",
+                PackageProgressPhase.Extracting);
+            PackageIdentityValidationResult identity;
+            string stagedContentPath;
+            try
+            {
+                await using FileStream archiveStream =
+                    acquiredContent.OpenArchiveRead();
+                ArchiveExtractionMetrics metrics =
+                    await TarballExtractor.ExtractAsync(
+                            archiveStream,
+                            stagingDirectory,
+                            effectiveLimits,
+                            "package import",
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                PackageArchiveInventory inventory = metrics.Inventory
+                    ?? throw new PackageInstallException(
+                        PackageInstallErrorCode.InvalidArchive,
+                        PackageInstallStage.ArchiveValidation,
+                        "Package archive inventory was not produced.");
+                ReportProgress(
+                    options.Progress,
+                    "package import",
+                    PackageProgressPhase.Validating);
+                PackageArchiveLayoutResult layout =
+                    TarballExtractor.ValidateAndNormalizePackageStructure(
+                        stagingDirectory,
+                        inventory,
+                        "package import");
+                identity = await PackageIdentityValidator.DiscoverAsync(
+                        layout.ManifestPath,
+                        "package import",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                stagedContentPath = layout.ContentPath;
+            }
+            catch (PackageInstallException)
+            {
+                throw;
+            }
+            catch (InvalidDataException exception)
+            {
+                throw new PackageInstallException(
+                    PackageInstallErrorCode.InvalidArchive,
+                    PackageInstallStage.ArchiveValidation,
+                    "Imported package content contains an invalid archive.",
+                    innerException: exception);
+            }
+            catch (InvalidOperationException exception)
+            {
+                throw new PackageInstallException(
+                    PackageInstallErrorCode.InvalidArchive,
+                    PackageInstallStage.ArchiveValidation,
+                    "Imported package content contains an invalid archive.",
+                    innerException: exception);
+            }
+
+            PackageCacheKey cacheKey = identity.CacheKey;
+            ReportProgress(
+                options.Progress,
+                cacheKey.DisplayReference.Name,
+                PackageProgressPhase.WaitingForLock);
+            await using PackageCacheLease identityLease =
+                await AcquireIdentityAndRecoverAsync(
+                        cacheKey,
+                        cancellationToken,
+                        acquiredContent.OperationId)
+                    .ConfigureAwait(false);
+            PackageCacheInspection inspection =
+                await _validator.InspectAsync(
+                        cacheKey,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (inspection.State == PackageCacheInspectionState.Valid
+                && !options.OverwriteExisting)
+            {
+                CacheMetadataEntry? existingEntry =
+                    await _metadataStore.GetEntryAsync(
+                            cacheKey,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                return CreateRecord(
+                    cacheKey.DisplayReference,
+                    inspection,
+                    existingEntry);
+            }
+
+            ThrowIfInstallCannotReplace(cacheKey, inspection, options);
+            if (inspection.State == PackageCacheInspectionState.Corrupt)
+            {
+                ReportProgress(
+                    options.Progress,
+                    cacheKey.DisplayReference.Name,
+                    PackageProgressPhase.Repairing);
+            }
+            long sizeBytes = CalculateDirectorySize(stagedContentPath);
+            CacheMetadataEntry entry = new()
+            {
+                DownloadDateTime =
+                    _timeProvider.GetUtcNow().UtcDateTime,
+                SizeBytes = sizeBytes,
+                SourcePublicationDate = options.SourcePublicationDate,
+                ArchiveSha256 = options.ArchiveSha256
+                    ?? acquiredContent.Sha256
+            };
+
+            PackageCacheInspection committedInspection;
+            await using (PackageCacheLease globalLease =
+                await _coordinator.AcquireGlobalAsync(
+                        cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                ReportProgress(
+                    options.Progress,
+                    cacheKey.DisplayReference.Name,
+                    PackageProgressPhase.Committing);
+                await RecoverNoLockAsync(
+                        cacheKey,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                PackageCacheInspection currentInspection =
+                    await _validator.InspectAsync(
+                            cacheKey,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                if (currentInspection.State
+                        == PackageCacheInspectionState.Valid
+                    && !options.OverwriteExisting)
+                {
+                    CacheMetadataEntry? existingEntry =
+                        await _metadataStore.GetEntryAsync(
+                                cacheKey,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    return CreateRecord(
+                        cacheKey.DisplayReference,
+                        currentInspection,
+                        existingEntry);
+                }
+
+                ThrowIfInstallCannotReplace(
+                    cacheKey,
+                    currentInspection,
+                    options);
+                await _committer.CommitInstallAsync(
+                        cacheKey,
+                        currentInspection,
+                        stagingDirectory,
+                        acquiredContent.OperationId,
+                        entry,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                committedInspection = await _validator.InspectAsync(
+                        cacheKey,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (committedInspection.State
+                    != PackageCacheInspectionState.Valid)
+                {
+                    throw new PackageInstallException(
+                        PackageInstallErrorCode.CommitFailed,
+                        PackageInstallStage.Commit,
+                        "The committed imported package is not readable.",
+                        cacheKey.DisplayReference.FhirDirective);
+                }
+            }
+
+            return new PackageRecord
+            {
+                Reference = cacheKey.DisplayReference,
+                DirectoryPath = committedInspection.TargetPath,
+                ContentPath = committedInspection.ContentPath!,
+                Manifest = identity.Manifest,
+                InstalledAt = entry.DownloadDateTime,
+                SizeBytes = sizeBytes
+            };
+        }
+        finally
+        {
+            if (ownsAcquiredContent && acquiredContent is not null)
+            {
+                await acquiredContent.DisposeAsync()
+                    .ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<bool> RemoveAsync(
         PackageReference reference,
         CancellationToken ct = default)
     {
         PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
-        try
+        await using PackageCacheLease identityLease =
+            await AcquireIdentityAndRecoverAsync(cacheKey, ct)
+                .ConfigureAwait(false);
+        await using PackageCacheLease globalLease =
+            await _coordinator.AcquireGlobalAsync(ct)
+                .ConfigureAwait(false);
+        await RecoverNoLockAsync(cacheKey, ct).ConfigureAwait(false);
+        PackageCacheInspection inspection =
+            await _validator.InspectAsync(cacheKey, ct)
+                .ConfigureAwait(false);
+        if (inspection.State == PackageCacheInspectionState.Missing)
         {
-            await RecoverNoLockAsync(ct).ConfigureAwait(false);
-            PackageCacheInspection inspection =
-                await _validator.InspectAsync(cacheKey, ct)
+            CacheMetadataEntry? staleEntry =
+                await _metadataStore.GetEntryAsync(cacheKey, ct)
                     .ConfigureAwait(false);
-            if (inspection.State == PackageCacheInspectionState.Missing)
+            if (staleEntry is not null)
             {
-                CacheMetadataEntry? staleEntry =
-                    await _metadataStore.GetEntryAsync(cacheKey, ct)
-                        .ConfigureAwait(false);
-                if (staleEntry is not null)
-                {
-                    await _metadataStore.SetEntryAsync(
-                            cacheKey,
-                            entry: null,
-                            mutation: null,
-                            ct)
-                        .ConfigureAwait(false);
-                }
-
-                return false;
+                await _metadataStore.SetEntryAsync(
+                        cacheKey,
+                        entry: null,
+                        mutation: null,
+                        ct)
+                    .ConfigureAwait(false);
             }
 
-            return await _committer.RemoveAsync(
-                    cacheKey,
-                    inspection,
-                    Guid.NewGuid().ToString("N"),
-                    ct)
-                .ConfigureAwait(false);
+            return false;
         }
-        finally
-        {
-            _installLock.Release();
-        }
+
+        return await _committer.RemoveAsync(
+                cacheKey,
+                inspection,
+                Guid.NewGuid().ToString("N"),
+                ct)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async Task<int> ClearAsync(CancellationToken ct = default)
     {
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
-        try
+        PackageCacheKeySnapshot snapshot;
+        await using (PackageCacheLease globalLease =
+            await _coordinator.AcquireGlobalAsync(ct).ConfigureAwait(false))
         {
-            await RecoverNoLockAsync(ct).ConfigureAwait(false);
-            List<(PackageCacheKey Key, string Path)> targets =
-                EnumeratePackageTargets().ToList();
-            int count = 0;
-            foreach ((PackageCacheKey cacheKey, string _) in targets)
-            {
-                ct.ThrowIfCancellationRequested();
-                PackageCacheInspection inspection =
-                    await _validator.InspectAsync(cacheKey, ct)
-                        .ConfigureAwait(false);
-                if (inspection.State == PackageCacheInspectionState.Missing)
-                    continue;
+            snapshot = await SnapshotCacheKeysNoLockAsync(ct)
+                .ConfigureAwait(false);
+            await _metadataStore.RemoveManagedKeysAsync(
+                    snapshot.NonCanonicalManagedKeys,
+                    ct)
+                .ConfigureAwait(false);
+        }
 
-                bool removed = await _committer.RemoveAsync(
+        int count = 0;
+        foreach (PackageCacheKey cacheKey in snapshot.CanonicalKeys.OrderBy(
+            key => key.CanonicalIdentity,
+            StringComparer.Ordinal))
+        {
+            ct.ThrowIfCancellationRequested();
+            await using PackageCacheLease identityLease =
+                await AcquireIdentityAndRecoverAsync(cacheKey, ct)
+                    .ConfigureAwait(false);
+            await using PackageCacheLease globalLease =
+                await _coordinator.AcquireGlobalAsync(ct)
+                    .ConfigureAwait(false);
+            await RecoverNoLockAsync(cacheKey, ct).ConfigureAwait(false);
+            PackageCacheInspection inspection =
+                await _validator.InspectAsync(cacheKey, ct)
+                    .ConfigureAwait(false);
+            if (inspection.State == PackageCacheInspectionState.Missing)
+            {
+                await _metadataStore.SetEntryAsync(
                         cacheKey,
-                        inspection,
-                        Guid.NewGuid().ToString("N"),
+                        entry: null,
+                        mutation: null,
                         ct)
                     .ConfigureAwait(false);
-                if (removed)
-                    count++;
+                continue;
             }
 
-            RemoveEmptyScopeDirectories();
-            await _metadataStore.ClearManagedEntriesAsync(ct)
+            bool removed = await _committer.RemoveAsync(
+                    cacheKey,
+                    inspection,
+                    Guid.NewGuid().ToString("N"),
+                    ct)
                 .ConfigureAwait(false);
-            return count;
+            if (removed)
+                count++;
+            RemoveEmptyScopeDirectories();
         }
-        finally
-        {
-            _installLock.Release();
-        }
+
+        return count;
     }
 
     /// <inheritdoc />
@@ -518,39 +858,34 @@ public class DiskPackageCache :
         PackageReference reference,
         CancellationToken ct = default)
     {
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await RecoverNoLockAsync(ct).ConfigureAwait(false);
-            PackageCacheInspection inspection =
-                await _validator.InspectAsync(reference, ct)
-                    .ConfigureAwait(false);
-            if (inspection.State != PackageCacheInspectionState.Valid)
-                return null;
-
-            string indexPath = Path.Combine(
-                inspection.ContentPath!,
-                IndexFileName);
-            if (!File.Exists(indexPath))
-                return null;
-
-            await using FileStream stream = new FileStream(
-                indexPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                16_384,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            return await JsonSerializer.DeserializeAsync<PackageIndex>(
-                    stream,
-                    s_jsonOptions,
-                    ct)
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        await using PackageCacheLease identityLease =
+            await AcquireIdentityAndRecoverAsync(cacheKey, ct)
                 .ConfigureAwait(false);
-        }
-        finally
-        {
-            _installLock.Release();
-        }
+        PackageCacheInspection inspection =
+            await _validator.InspectAsync(cacheKey, ct)
+                .ConfigureAwait(false);
+        if (inspection.State != PackageCacheInspectionState.Valid)
+            return null;
+
+        string indexPath = Path.Combine(
+            inspection.ContentPath!,
+            IndexFileName);
+        if (!File.Exists(indexPath))
+            return null;
+
+        await using FileStream stream = new FileStream(
+            indexPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            16_384,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        return await JsonSerializer.DeserializeAsync<PackageIndex>(
+                stream,
+                s_jsonOptions,
+                ct)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -561,80 +896,61 @@ public class DiskPackageCache :
     {
         ArgumentNullException.ThrowIfNull(relativePath);
 
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await RecoverNoLockAsync(ct).ConfigureAwait(false);
-            PackageCacheInspection inspection =
-                await _validator.InspectAsync(reference, ct)
-                    .ConfigureAwait(false);
-            if (inspection.State != PackageCacheInspectionState.Valid)
-                return null;
-
-            string contentPath = inspection.ContentPath!;
-            string filePath = Path.GetFullPath(
-                Path.Combine(contentPath, relativePath));
-            string containment = Path.GetRelativePath(contentPath, filePath);
-            if (Path.IsPathRooted(containment)
-                || containment == ".."
-                || containment.StartsWith(
-                    $"..{Path.DirectorySeparatorChar}",
-                    StringComparison.Ordinal)
-                || containment.StartsWith(
-                    $"..{Path.AltDirectorySeparatorChar}",
-                    StringComparison.Ordinal))
-            {
-                throw new ArgumentException(
-                    "Relative path must not traverse outside the package directory.",
-                    nameof(relativePath));
-            }
-
-            if (!File.Exists(filePath))
-                return null;
-
-            return await File.ReadAllTextAsync(filePath, ct)
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        await using PackageCacheLease identityLease =
+            await AcquireIdentityAndRecoverAsync(cacheKey, ct)
                 .ConfigureAwait(false);
-        }
-        finally
+        PackageCacheInspection inspection =
+            await _validator.InspectAsync(cacheKey, ct)
+                .ConfigureAwait(false);
+        if (inspection.State != PackageCacheInspectionState.Valid)
+            return null;
+
+        string contentPath = inspection.ContentPath!;
+        string filePath = Path.GetFullPath(
+            Path.Combine(contentPath, relativePath));
+        string containment = Path.GetRelativePath(contentPath, filePath);
+        if (Path.IsPathRooted(containment)
+            || containment == ".."
+            || containment.StartsWith(
+                $"..{Path.DirectorySeparatorChar}",
+                StringComparison.Ordinal)
+            || containment.StartsWith(
+                $"..{Path.AltDirectorySeparatorChar}",
+                StringComparison.Ordinal))
         {
-            _installLock.Release();
+            throw new ArgumentException(
+                "Relative path must not traverse outside the package directory.",
+                nameof(relativePath));
         }
+
+        if (!File.Exists(filePath))
+            return null;
+
+        return await File.ReadAllTextAsync(filePath, ct)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public string? GetPackageContentPath(PackageReference reference)
     {
-        _installLock.Wait();
-        try
-        {
-            RecoverNoLockAsync(CancellationToken.None)
-                .GetAwaiter()
-                .GetResult();
-            PackageCacheInspection inspection = _validator.Inspect(reference);
-            return inspection.State == PackageCacheInspectionState.Valid
-                ? inspection.ContentPath
-                : null;
-        }
-        finally
-        {
-            _installLock.Release();
-        }
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        using PackageCacheLease identityLease =
+            AcquireIdentityAndRecover(cacheKey);
+        PackageCacheInspection inspection = _validator.Inspect(cacheKey);
+        return inspection.State == PackageCacheInspectionState.Valid
+            ? inspection.ContentPath
+            : null;
     }
 
     /// <inheritdoc />
     public async Task<CacheMetadata> GetMetadataAsync(
         CancellationToken ct = default)
     {
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await RecoverNoLockAsync(ct).ConfigureAwait(false);
-            return await _metadataStore.ReadAsync(ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            _installLock.Release();
-        }
+        await using PackageCacheLease globalLease =
+            await _coordinator.AcquireGlobalAsync(ct)
+                .ConfigureAwait(false);
+        return await _metadataStore.ReadAsync(ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -645,21 +961,18 @@ public class DiskPackageCache :
     {
         ArgumentNullException.ThrowIfNull(entry);
         PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await RecoverNoLockAsync(ct).ConfigureAwait(false);
-            await _metadataStore.SetEntryAsync(
-                    cacheKey,
-                    entry,
-                    mutation: null,
-                    ct)
+        await using PackageCacheLease identityLease =
+            await AcquireIdentityAndRecoverAsync(cacheKey, ct)
                 .ConfigureAwait(false);
-        }
-        finally
-        {
-            _installLock.Release();
-        }
+        await using PackageCacheLease globalLease =
+            await _coordinator.AcquireGlobalAsync(ct)
+                .ConfigureAwait(false);
+        await _metadataStore.SetEntryAsync(
+                cacheKey,
+                entry,
+                mutation: null,
+                ct)
+            .ConfigureAwait(false);
     }
 
     async Task<PackageCacheInspection>
@@ -680,49 +993,43 @@ public class DiskPackageCache :
                 cancellationToken)
             .ConfigureAwait(false);
 
+    async Task<HardenedPackageCacheInspection>
+        IHardenedPackageCache.InspectAsync(
+            PackageReference reference,
+            CancellationToken cancellationToken)
+    {
+        PackageCacheInspection inspection =
+            await InspectAsync(reference, cancellationToken)
+                .ConfigureAwait(false);
+        return new HardenedPackageCacheInspection
+        {
+            State = inspection.State switch
+            {
+                PackageCacheInspectionState.Missing =>
+                    HardenedPackageCacheState.Missing,
+                PackageCacheInspectionState.Valid =>
+                    HardenedPackageCacheState.Valid,
+                _ => HardenedPackageCacheState.Corrupt
+            },
+            IsRepairable = inspection.IsRepairable,
+            CorruptionReason = inspection.CorruptionReason
+        };
+    }
+
     internal async Task<PackageCacheInspection> InspectAsync(
         PackageReference reference,
         CancellationToken cancellationToken = default)
     {
-        await _installLock.WaitAsync(cancellationToken)
-            .ConfigureAwait(false);
-        try
-        {
-            await RecoverNoLockAsync(cancellationToken)
-                .ConfigureAwait(false);
-            return await _validator.InspectAsync(
-                    reference,
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        await using PackageCacheLease identityLease =
+            await AcquireIdentityAndRecoverAsync(
+                    cacheKey,
                     cancellationToken)
                 .ConfigureAwait(false);
-        }
-        finally
-        {
-            _installLock.Release();
-        }
-    }
-
-    private async Task InspectInstallTargetAsync(
-        PackageCacheKey cacheKey,
-        InstallCacheOptions options,
-        CancellationToken cancellationToken)
-    {
-        await _installLock.WaitAsync(cancellationToken)
+        return await _validator.InspectAsync(
+                cacheKey,
+                cancellationToken)
             .ConfigureAwait(false);
-        try
-        {
-            await RecoverNoLockAsync(cancellationToken)
-                .ConfigureAwait(false);
-            PackageCacheInspection inspection =
-                await _validator.InspectAsync(
-                        cacheKey,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            ThrowIfInstallCannotReplace(cacheKey, inspection, options);
-        }
-        finally
-        {
-            _installLock.Release();
-        }
     }
 
     private static void ThrowIfInstallCannotReplace(
@@ -754,12 +1061,121 @@ public class DiskPackageCache :
         }
     }
 
+    private async Task<PackageCacheLease> AcquireIdentityAndRecoverAsync(
+        PackageCacheKey cacheKey,
+        CancellationToken cancellationToken,
+        string? protectedOperationId = null)
+    {
+        PackageCacheLease identityLease =
+            await _coordinator.AcquireIdentityAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        bool completed = false;
+        try
+        {
+            if (await _committer.HasPendingTransactionAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false))
+            {
+                await using PackageCacheLease globalLease =
+                    await _coordinator.AcquireGlobalAsync(
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                await RecoverNoLockAsync(cacheKey, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            await CleanupAbandonedStagingNoLockAsync(
+                    cancellationToken,
+                    protectedOperationId)
+                .ConfigureAwait(false);
+            completed = true;
+            return identityLease;
+        }
+        finally
+        {
+            if (!completed)
+                await identityLease.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private PackageCacheLease AcquireIdentityAndRecover(
+        PackageCacheKey cacheKey)
+    {
+        PackageCacheLease identityLease =
+            _coordinator.AcquireIdentity(cacheKey);
+        bool completed = false;
+        try
+        {
+            bool hasPendingTransaction =
+                _committer.HasPendingTransactionAsync(
+                        cacheKey,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+            if (hasPendingTransaction)
+            {
+                using PackageCacheLease globalLease =
+                    _coordinator.AcquireGlobal();
+                RecoverNoLockAsync(cacheKey, CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+
+            CleanupAbandonedStagingNoLockAsync(CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            completed = true;
+            return identityLease;
+        }
+        finally
+        {
+            if (!completed)
+                identityLease.Dispose();
+        }
+    }
+
+    private async Task RecoverPendingTransactionsAsync(
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<PackageCacheTransactionJournal> journals;
+        await using (PackageCacheLease globalLease =
+            await _coordinator.AcquireGlobalAsync(cancellationToken)
+                .ConfigureAwait(false))
+        {
+            journals = await _committer.GetPendingTransactionsAsync(
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        List<PackageCacheKey> cacheKeys = journals
+            .Select(journal => journal.GetCacheKey())
+            .Distinct()
+            .OrderBy(
+                key => key.CanonicalIdentity,
+                StringComparer.Ordinal)
+            .ToList();
+        foreach (PackageCacheKey cacheKey in cacheKeys)
+        {
+            await using PackageCacheLease identityLease =
+                await AcquireIdentityAndRecoverAsync(
+                        cacheKey,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+        }
+    }
+
     private async Task RecoverNoLockAsync(
+        PackageCacheKey cacheKey,
         CancellationToken cancellationToken)
     {
         try
         {
-            await _committer.RecoverAsync(cancellationToken)
+            await _committer.RecoverAsync(
+                    cacheKey,
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -781,6 +1197,55 @@ public class DiskPackageCache :
         catch (IOException exception)
         {
             throw RecoveryFailure(exception);
+        }
+    }
+
+    private async Task CleanupAbandonedStagingNoLockAsync(
+        CancellationToken cancellationToken,
+        string? protectedOperationId = null)
+    {
+        string stagingRoot = Path.Combine(
+            CacheDirectory,
+            ".fhirpkg",
+            "staging");
+        if (!Directory.Exists(stagingRoot))
+            return;
+
+        IReadOnlyList<PackageCacheTransactionJournal> journals =
+            await _committer.GetPendingTransactionsAsync(cancellationToken)
+                .ConfigureAwait(false);
+        HashSet<string> journalOperationIds = journals
+            .Select(journal => journal.OperationId)
+            .ToHashSet(StringComparer.Ordinal);
+        string[] operationDirectories = Directory.GetDirectories(
+            stagingRoot,
+            "*",
+            SearchOption.TopDirectoryOnly);
+        Array.Sort(operationDirectories, StringComparer.Ordinal);
+        foreach (string operationDirectory in operationDirectories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string operationId = Path.GetFileName(operationDirectory);
+            if (journalOperationIds.Contains(operationId)
+                || string.Equals(
+                    operationId,
+                    protectedOperationId,
+                    StringComparison.Ordinal)
+                || !Guid.TryParseExact(operationId, "N", out Guid _))
+            {
+                continue;
+            }
+
+            PackageCacheLease? ownerLease =
+                _coordinator.TryAcquireOperationOwner(operationId);
+            if (ownerLease is null)
+                continue;
+
+            using (ownerLease)
+            {
+                PackageContentAcquisition.TryDeleteOperationDirectory(
+                    operationDirectory);
+            }
         }
     }
 
@@ -829,6 +1294,62 @@ public class DiskPackageCache :
             }
         }
     }
+
+    private async Task<PackageCacheKeySnapshot>
+        SnapshotCacheKeysNoLockAsync(
+            CancellationToken cancellationToken)
+    {
+        HashSet<PackageCacheKey> canonicalKeys = [];
+        HashSet<string> nonCanonicalManagedKeys =
+            new(StringComparer.Ordinal);
+        foreach ((PackageCacheKey cacheKey, string _) in
+            EnumeratePackageTargets())
+        {
+            canonicalKeys.Add(cacheKey);
+        }
+
+        IReadOnlyList<PackageCacheTransactionJournal> journals =
+            await _committer.GetPendingTransactionsAsync(
+                    cancellationToken)
+                .ConfigureAwait(false);
+        foreach (PackageCacheTransactionJournal journal in journals)
+            canonicalKeys.Add(journal.GetCacheKey());
+
+        IReadOnlySet<string> metadataKeys =
+            await _metadataStore.ReadManagedKeysAsync(
+                cancellationToken)
+            .ConfigureAwait(false);
+        foreach (string metadataKey in metadataKeys)
+        {
+            if (!PackageCacheKey.TryParseRelativePath(
+                    metadataKey,
+                    out PackageCacheKey? cacheKey))
+            {
+                nonCanonicalManagedKeys.Add(metadataKey);
+                continue;
+            }
+
+            PackageCacheKey parsedKey = cacheKey!;
+            if (!string.Equals(
+                    metadataKey,
+                    parsedKey.MetadataKey,
+                    StringComparison.Ordinal))
+            {
+                nonCanonicalManagedKeys.Add(metadataKey);
+                continue;
+            }
+
+            canonicalKeys.Add(parsedKey);
+        }
+
+        return new PackageCacheKeySnapshot(
+            canonicalKeys,
+            nonCanonicalManagedKeys);
+    }
+
+    private sealed record PackageCacheKeySnapshot(
+        HashSet<PackageCacheKey> CanonicalKeys,
+        IReadOnlySet<string> NonCanonicalManagedKeys);
 
     private void RemoveEmptyScopeDirectories()
     {
@@ -898,10 +1419,21 @@ public class DiskPackageCache :
             "A pending cache transaction could not be recovered.",
             innerException: exception);
 
+    private static void ReportProgress(
+        IProgress<PackageProgress>? progress,
+        string packageId,
+        PackageProgressPhase phase)
+    {
+        progress?.Report(new PackageProgress
+        {
+            PackageId = packageId,
+            Phase = phase
+        });
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
-        _installLock.Dispose();
         GC.SuppressFinalize(this);
     }
 }

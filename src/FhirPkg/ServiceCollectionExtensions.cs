@@ -2,6 +2,7 @@
 
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
+using FhirPkg.Installation;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
@@ -86,6 +87,13 @@ public static class ServiceCollectionExtensions
             PackageInstallLimits installLimits = PackageInstallLimits.ResolveManager(options.InstallLimits);
             return new DiskPackageCache(options.CachePath, logger, timeProvider, installLimits);
         });
+        services.TryAddSingleton<IHardenedPackageCache>(sp =>
+            sp.GetRequiredService<IPackageCache>()
+                as IHardenedPackageCache
+            ?? throw new PackageInstallException(
+                PackageInstallErrorCode.UnsupportedCacheCapability,
+                PackageInstallStage.PolicyValidation,
+                "The configured package cache does not support hardened installation."));
 
         // Register IRegistryClient as a composite RedundantRegistryClient
         services.TryAddSingleton<IRegistryClient>(sp =>
@@ -139,13 +147,15 @@ public static class ServiceCollectionExtensions
             FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
             ILogger<FhirPackageManager> logger = sp.GetRequiredService<ILogger<FhirPackageManager>>();
             PackageInstallLimits installLimits = PackageInstallLimits.ResolveManager(options.InstallLimits);
+            IHttpClientFactory httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+            HttpClient httpClient = httpClientFactory.CreateClient("FhirPackages");
 
             // Only create in-memory resource cache when configured with a positive cache size
             MemoryResourceCache? memoryCache = options.ResourceCacheSize > 0
                 ? new MemoryResourceCache(options.ResourceCacheSize, options.ResourceCacheSafeMode)
                 : null;
 
-            return new FhirPackageManager(
+            return FhirPackageManager.CreateWithHttpClient(
                 cache,
                 registryClient,
                 versionResolver,
@@ -154,8 +164,17 @@ public static class ServiceCollectionExtensions
                 options,
                 logger,
                 memoryCache,
-                installLimits);
+                installLimits,
+                httpClient);
         });
+
+        services.TryAddSingleton<IHardenedFhirPackageManager>(sp =>
+            sp.GetRequiredService<IFhirPackageManager>()
+                as IHardenedFhirPackageManager
+            ?? throw new PackageInstallException(
+                PackageInstallErrorCode.UnsupportedManagerCapability,
+                PackageInstallStage.PolicyValidation,
+                "The configured package manager does not support hardened installation sources."));
 
         return services;
     }

@@ -135,6 +135,24 @@ public class InstallOptions
 }
 
 /// <summary>
+/// Options for manager-owned URI and stream package sources.
+/// </summary>
+public class PackageSourceInstallOptions : InstallOptions
+{
+    /// <summary>
+    /// Optional per-call override for handling an invalid existing cache
+    /// target. When omitted, the manager-level policy is used.
+    /// </summary>
+    public CorruptCacheBehavior? CorruptCacheBehavior { get; set; }
+
+    /// <summary>Optional expected SHA-256 checksum in hexadecimal form.</summary>
+    public string? ExpectedSha256 { get; set; }
+
+    /// <summary>Optional expected SHA-1 checksum in hexadecimal form.</summary>
+    public string? ExpectedSha1 { get; set; }
+}
+
+/// <summary>
 /// Options controlling how project dependency restoration is performed.
 /// Extends <see cref="InstallOptions"/> with conflict resolution and lock file settings.
 /// </summary>

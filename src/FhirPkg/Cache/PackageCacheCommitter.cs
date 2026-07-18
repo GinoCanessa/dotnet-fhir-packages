@@ -433,6 +433,39 @@ internal sealed class PackageCacheCommitter
         }
     }
 
+    internal async Task RecoverAsync(
+        PackageCacheKey cacheKey,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(cacheKey);
+        PackageCacheTransactionJournal? journal =
+            await _journalStore.ReadAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        if (journal is not null)
+            await RecoverAsync(journal).ConfigureAwait(false);
+    }
+
+    internal async Task<IReadOnlyList<PackageCacheTransactionJournal>>
+        GetPendingTransactionsAsync(
+            CancellationToken cancellationToken) =>
+        await _journalStore.ReadAllAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+    internal async Task<bool> HasPendingTransactionAsync(
+        PackageCacheKey cacheKey,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(cacheKey);
+        PackageCacheTransactionJournal? journal =
+            await _journalStore.ReadAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        return journal is not null;
+    }
+
     private async Task RecoverAsync(PackageCacheTransactionJournal journal)
     {
         PackageCacheKey cacheKey = journal.GetCacheKey();

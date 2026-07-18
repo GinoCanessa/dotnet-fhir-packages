@@ -29,7 +29,9 @@ namespace FhirPkg;
 /// diagnostics at Debug, Information, Warning, and Error levels.
 /// </para>
 /// </remarks>
-public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
+public sealed class FhirPackageManager :
+    IHardenedFhirPackageManager,
+    IDisposable
 {
     private readonly IPackageCache _cache;
     private readonly IRegistryClient _registryClient;
@@ -41,6 +43,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
     private readonly PackageInstallLimits _managerInstallLimits;
     private readonly ILogger<FhirPackageManager> _logger;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly HttpClient _httpClient;
     private readonly HttpClient? _ownedHttpClient;
     private bool _disposed;
 
@@ -93,6 +96,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         {
             Timeout = options.HttpTimeout
         };
+        _httpClient = _ownedHttpClient;
 
         // Build registry client chain
         _registryClient = RegistryClientFactory.BuildRegistryClient(options, _ownedHttpClient, factory);
@@ -155,6 +159,57 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ILogger<FhirPackageManager> logger,
         MemoryResourceCache? memoryCache,
         PackageInstallLimits managerInstallLimits)
+        : this(
+            cache,
+            registryClient,
+            versionResolver,
+            dependencyResolver,
+            packageIndexer,
+            options,
+            logger,
+            memoryCache,
+            managerInstallLimits,
+            CreateDirectHttpClient(options),
+            ownsHttpClient: true)
+    {
+    }
+
+    internal static FhirPackageManager CreateWithHttpClient(
+        IPackageCache cache,
+        IRegistryClient registryClient,
+        IVersionResolver versionResolver,
+        IDependencyResolver dependencyResolver,
+        IPackageIndexer packageIndexer,
+        FhirPackageManagerOptions options,
+        ILogger<FhirPackageManager> logger,
+        MemoryResourceCache? memoryCache,
+        PackageInstallLimits managerInstallLimits,
+        HttpClient httpClient) =>
+        new(
+            cache,
+            registryClient,
+            versionResolver,
+            dependencyResolver,
+            packageIndexer,
+            options,
+            logger,
+            memoryCache,
+            managerInstallLimits,
+            httpClient,
+            ownsHttpClient: false);
+
+    private FhirPackageManager(
+        IPackageCache cache,
+        IRegistryClient registryClient,
+        IVersionResolver versionResolver,
+        IDependencyResolver dependencyResolver,
+        IPackageIndexer packageIndexer,
+        FhirPackageManagerOptions options,
+        ILogger<FhirPackageManager> logger,
+        MemoryResourceCache? memoryCache,
+        PackageInstallLimits managerInstallLimits,
+        HttpClient httpClient,
+        bool ownsHttpClient)
     {
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(registryClient);
@@ -164,6 +219,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(managerInstallLimits);
+        ArgumentNullException.ThrowIfNull(httpClient);
         managerInstallLimits.Validate();
 
         _cache = cache;
@@ -176,6 +232,8 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         _logger = logger;
         _loggerFactory = NullLoggerFactory.Instance;
         _memoryCache = memoryCache;
+        _httpClient = httpClient;
+        _ownedHttpClient = ownsHttpClient ? httpClient : null;
     }
 
     /// <inheritdoc />
@@ -191,8 +249,138 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             _options,
             _managerInstallLimits,
             options);
+        _ = RequireHardenedCache();
 
         return await InstallDirectiveAsync(directive, policy, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(packageUri);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ResolvedPackageInstallPolicy policy =
+            ResolvedPackageInstallPolicy.Resolve(
+                _options,
+                _managerInstallLimits,
+                options);
+        IHardenedPackageCache hardenedCache = RequireHardenedCache();
+        PackageIdentityExpectation expectation =
+            PackageIdentityValidator.CreateExpectation(
+                expectedReference,
+                expectedReference.FhirDirective);
+        ValidatePackageUri(packageUri);
+
+        return await ExecuteUriSourceAsync(
+                packageUri,
+                expectedReference.Name,
+                policy.Progress,
+                async (Stream stream, long? contentLength) =>
+                    await InstallExpectedSourceAsync(
+                            hardenedCache,
+                            expectation,
+                            stream,
+                            contentLength,
+                            options,
+                            policy,
+                            reportFailure: false,
+                            cancellationToken)
+                        .ConfigureAwait(false),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(packageStream);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ResolvedPackageInstallPolicy policy =
+            ResolvedPackageInstallPolicy.Resolve(
+                _options,
+                _managerInstallLimits,
+                options);
+        IHardenedPackageCache hardenedCache = RequireHardenedCache();
+        PackageIdentityExpectation expectation =
+            PackageIdentityValidator.CreateExpectation(
+                expectedReference,
+                expectedReference.FhirDirective);
+        return await InstallExpectedSourceAsync(
+                hardenedCache,
+                expectation,
+                packageStream,
+                reportedContentLength: null,
+                options,
+                policy,
+                reportFailure: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<PackageRecord> ImportAsync(
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(packageUri);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ResolvedPackageInstallPolicy policy =
+            ResolvedPackageInstallPolicy.Resolve(
+                _options,
+                _managerInstallLimits,
+                options);
+        IHardenedPackageCache hardenedCache = RequireHardenedCache();
+        ValidatePackageUri(packageUri);
+        return await ExecuteUriSourceAsync(
+                packageUri,
+                "package import",
+                policy.Progress,
+                async (Stream stream, long? contentLength) =>
+                    await ImportSourceAsync(
+                            hardenedCache,
+                            stream,
+                            contentLength,
+                            options,
+                            policy,
+                            reportFailure: false,
+                            cancellationToken)
+                        .ConfigureAwait(false),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<PackageRecord> ImportAsync(
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(packageStream);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ResolvedPackageInstallPolicy policy =
+            ResolvedPackageInstallPolicy.Resolve(
+                _options,
+                _managerInstallLimits,
+                options);
+        IHardenedPackageCache hardenedCache = RequireHardenedCache();
+        return await ImportSourceAsync(
+                hardenedCache,
+                packageStream,
+                reportedContentLength: null,
+                options,
+                policy,
+                reportFailure: true,
+                cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -210,6 +398,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             _options,
             _managerInstallLimits,
             options);
+        _ = RequireHardenedCache();
 
         if (directiveList.Count == 0)
             return [];
@@ -233,6 +422,7 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             _options,
             _managerInstallLimits,
             effectiveOptions);
+        _ = RequireHardenedCache();
 
         _logger.LogInformation("RestoreAsync starting for project at '{ProjectPath}'.", projectPath);
 
@@ -480,7 +670,310 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
                 "CorruptCacheBehavior is not a supported value.");
         }
 
+        if (options.HttpTimeout <= TimeSpan.Zero
+            || options.HttpTimeout.TotalMilliseconds > int.MaxValue)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPolicy,
+                PackageInstallStage.PolicyValidation,
+                "HttpTimeout must be finite, positive, and no greater than Int32.MaxValue milliseconds.");
+        }
+
+        if (options.MaxRedirects <= 0)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPolicy,
+                PackageInstallStage.PolicyValidation,
+                "MaxRedirects must be greater than zero.");
+        }
+
         return PackageInstallLimits.ResolveManager(options.InstallLimits);
+    }
+
+    private static HttpClient CreateDirectHttpClient(
+        FhirPackageManagerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        HttpClientHandler handler = new()
+        {
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = options.MaxRedirects
+        };
+        return new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = options.HttpTimeout
+        };
+    }
+
+    private IHardenedPackageCache RequireHardenedCache()
+    {
+        if (_cache is IHardenedPackageCache hardenedCache)
+            return hardenedCache;
+
+        throw new PackageInstallException(
+            PackageInstallErrorCode.UnsupportedCacheCapability,
+            PackageInstallStage.CacheInspection,
+            "The configured package cache does not advertise the hardened installation contract.");
+    }
+
+    private async Task<PackageRecord> InstallExpectedSourceAsync(
+        IHardenedPackageCache hardenedCache,
+        PackageIdentityExpectation expectation,
+        Stream packageStream,
+        long? reportedContentLength,
+        PackageSourceInstallOptions? options,
+        ResolvedPackageInstallPolicy policy,
+        bool reportFailure,
+        CancellationToken cancellationToken)
+    {
+        string directive = expectation.Reference.FhirDirective;
+        try
+        {
+            ReportProgress(
+                policy.Progress,
+                expectation.Reference.Name,
+                PackageProgressPhase.Acquiring);
+            PackageRecord record = await hardenedCache.InstallAsync(
+                    expectation.Reference,
+                    packageStream,
+                    CreateSourceCacheOptions(
+                        expectation,
+                        reportedContentLength,
+                        options,
+                        policy),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (policy.IncludeDependencies)
+            {
+                await InstallDependenciesAsync(
+                        record,
+                        policy,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            ReportProgress(
+                policy.Progress,
+                expectation.Reference.Name,
+                PackageProgressPhase.Complete);
+            return record;
+        }
+        catch (PackageInstallException)
+        {
+            if (reportFailure)
+            {
+                ReportProgress(
+                    policy.Progress,
+                    expectation.Reference.Name,
+                    PackageProgressPhase.Failed);
+            }
+
+            throw;
+        }
+    }
+
+    private async Task<PackageRecord> ImportSourceAsync(
+        IHardenedPackageCache hardenedCache,
+        Stream packageStream,
+        long? reportedContentLength,
+        PackageSourceInstallOptions? options,
+        ResolvedPackageInstallPolicy policy,
+        bool reportFailure,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            ReportProgress(
+                policy.Progress,
+                "package import",
+                PackageProgressPhase.Acquiring);
+            PackageRecord record = await hardenedCache.ImportAsync(
+                    packageStream,
+                    CreateSourceCacheOptions(
+                        expectation: null,
+                        reportedContentLength,
+                        options,
+                        policy),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (policy.IncludeDependencies)
+            {
+                await InstallDependenciesAsync(
+                        record,
+                        policy,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            ReportProgress(
+                policy.Progress,
+                record.Reference.Name,
+                PackageProgressPhase.Complete);
+            return record;
+        }
+        catch (PackageInstallException)
+        {
+            if (reportFailure)
+            {
+                ReportProgress(
+                    policy.Progress,
+                    "package import",
+                    PackageProgressPhase.Failed);
+            }
+
+            throw;
+        }
+    }
+
+    private static InstallCacheOptions CreateSourceCacheOptions(
+        PackageIdentityExpectation? expectation,
+        long? reportedContentLength,
+        PackageSourceInstallOptions? options,
+        ResolvedPackageInstallPolicy policy) =>
+        new()
+        {
+            OverwriteExisting = policy.OverwriteExisting,
+            VerifyChecksum = policy.VerifyChecksums,
+            Limits = policy.Limits,
+            ReportedContentLength = reportedContentLength,
+            ExpectedSha256Sum = options?.ExpectedSha256,
+            ExpectedShaSum = options?.ExpectedSha1,
+            IdentityExpectation = expectation,
+            CorruptCacheBehavior = policy.CorruptCacheBehavior,
+            Progress = policy.Progress
+        };
+
+    private async Task<PackageRecord> ExecuteUriSourceAsync(
+        Uri packageUri,
+        string progressPackageId,
+        IProgress<PackageProgress>? progress,
+        Func<Stream, long?, Task<PackageRecord>> install,
+        CancellationToken cancellationToken)
+    {
+        ReportProgress(
+            progress,
+            progressPackageId,
+            PackageProgressPhase.Downloading);
+        try
+        {
+            await using HttpPackageStream packageStream =
+                await OpenHttpPackageStreamAsync(
+                        packageUri,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            return await install(
+                    packageStream,
+                    packageStream.ContentLength)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            ReportProgress(
+                progress,
+                progressPackageId,
+                PackageProgressPhase.Failed);
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                "The package URI did not complete before the configured timeout.",
+                innerException: exception);
+        }
+        catch (OperationCanceledException)
+        {
+            ReportProgress(
+                progress,
+                progressPackageId,
+                PackageProgressPhase.Failed);
+            throw;
+        }
+        catch (PackageInstallException)
+        {
+            ReportProgress(
+                progress,
+                progressPackageId,
+                PackageProgressPhase.Failed);
+            throw;
+        }
+        catch (HttpRequestException exception)
+        {
+            ReportProgress(
+                progress,
+                progressPackageId,
+                PackageProgressPhase.Failed);
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                "The package URI could not be acquired.",
+                innerException: exception);
+        }
+        catch (IOException exception)
+        {
+            ReportProgress(
+                progress,
+                progressPackageId,
+                PackageProgressPhase.Failed);
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                "The package URI could not be acquired.",
+                innerException: exception);
+        }
+    }
+
+    private async Task<HttpPackageStream> OpenHttpPackageStreamAsync(
+        Uri packageUri,
+        CancellationToken cancellationToken)
+    {
+        CancellationTokenSource timeoutSource =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+        timeoutSource.CancelAfter(_options.HttpTimeout);
+        HttpResponseMessage? response = null;
+        bool completed = false;
+        try
+        {
+            using HttpRequestMessage request = new(
+                HttpMethod.Get,
+                packageUri);
+            response = await _httpClient.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    timeoutSource.Token)
+                .ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            Stream content = await response.Content.ReadAsStreamAsync(
+                    timeoutSource.Token)
+                .ConfigureAwait(false);
+            HttpPackageStream result = new(
+                content,
+                response,
+                timeoutSource,
+                response.Content.Headers.ContentLength);
+            completed = true;
+            return result;
+        }
+        finally
+        {
+            if (!completed)
+            {
+                response?.Dispose();
+                timeoutSource.Dispose();
+            }
+        }
+    }
+
+    private static void ValidatePackageUri(Uri packageUri)
+    {
+        if (!packageUri.IsAbsoluteUri
+            || (packageUri.Scheme != Uri.UriSchemeHttp
+                && packageUri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                "Package URIs must be absolute HTTP or HTTPS URIs.");
+        }
     }
 
     private async Task<PackageRecord?> InstallDirectiveAsync(
@@ -672,15 +1165,13 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         string directive,
         CancellationToken cancellationToken)
     {
-        if (_cache is not IHardenedPackageCacheCore hardenedCache)
-            return;
-
-        PackageCacheInspection inspection =
+        IHardenedPackageCache hardenedCache = RequireHardenedCache();
+        HardenedPackageCacheInspection inspection =
             await hardenedCache.InspectAsync(
                     cacheKey.DisplayReference,
                     cancellationToken)
                 .ConfigureAwait(false);
-        if (inspection.State == PackageCacheInspectionState.Corrupt
+        if (inspection.State == HardenedPackageCacheState.Corrupt
             && (policy.CorruptCacheBehavior == CorruptCacheBehavior.Strict
                 || !inspection.IsRepairable))
         {
@@ -759,50 +1250,6 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
                 cancellationToken)
             .ConfigureAwait(false);
         ResolvedDirective resolvedDirective = request.Source.ResolvedDirective;
-        await using PackageContentAcquisition acquiredContent =
-            await PackageContentAcquirer.AcquireAsync(
-                    downloadResult.Content,
-                    GetAcquisitionCacheRoot(),
-                    request.Policy.Limits,
-                    downloadResult.ContentLength,
-                    resolvedDirective.Sha256Sum,
-                    resolvedDirective.ShaSum,
-                    request.Policy.VerifyChecksums,
-                    request.Directive,
-                    cancellationToken)
-            .ConfigureAwait(false);
-
-        if (request.Freshness == PackageInstallFreshness.RefreshableAlias
-            && !request.Policy.OverwriteExisting
-            && cachedRecord is not null
-            && existingMetadata?.ArchiveSha256 is string cachedArchiveSha256
-            && string.Equals(
-                cachedArchiveSha256,
-                acquiredContent.Sha256,
-                StringComparison.OrdinalIgnoreCase))
-        {
-            await RefreshAliasMetadataAsync(
-                    request.CacheKey,
-                    existingMetadata,
-                    sourcePublicationDate,
-                    acquiredContent.Sha256,
-                    cancellationToken)
-                .ConfigureAwait(false);
-
-            _logger.LogInformation(
-                "Mutable alias {CacheKey} has unchanged archive content.",
-                request.CacheKey.MetadataKey);
-            ReportProgress(
-                request.Policy.Progress,
-                cacheReference.Name,
-                PackageProgressPhase.Complete);
-            return cachedRecord;
-        }
-
-        ReportProgress(
-            request.Policy.Progress,
-            cacheReference.Name,
-            PackageProgressPhase.Extracting);
 
         InstallCacheOptions installCacheOptions = new InstallCacheOptions
         {
@@ -814,19 +1261,19 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             ExpectedSha256Sum = resolvedDirective.Sha256Sum,
             ExpectedShaSum = resolvedDirective.ShaSum,
             SourcePublicationDate = sourcePublicationDate,
-            ArchiveSha256 = acquiredContent.Sha256,
-            AcquiredContent = acquiredContent,
             IdentityExpectation = request.IdentityExpectation,
-            CorruptCacheBehavior = request.Policy.CorruptCacheBehavior
+            CorruptCacheBehavior = request.Policy.CorruptCacheBehavior,
+            SkipIfArchiveUnchanged =
+                request.Freshness == PackageInstallFreshness.RefreshableAlias,
+            Progress = request.Policy.Progress
         };
 
         PackageRecord record;
         try
         {
-            await using FileStream archiveStream = acquiredContent.OpenArchiveRead();
             record = await _cache.InstallAsync(
                     cacheReference,
-                    archiveStream,
+                    downloadResult.Content,
                     installCacheOptions,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -1070,38 +1517,6 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         }
     }
 
-    private async Task RefreshAliasMetadataAsync(
-        PackageCacheKey cacheKey,
-        CacheMetadataEntry existingMetadata,
-        DateTimeOffset? sourcePublicationDate,
-        string archiveSha256,
-        CancellationToken cancellationToken)
-    {
-        CacheMetadataEntry refreshedMetadata = existingMetadata with
-        {
-            SourcePublicationDate = sourcePublicationDate
-                ?? existingMetadata.SourcePublicationDate,
-            ArchiveSha256 = archiveSha256
-        };
-
-        try
-        {
-            await _cache.UpdateMetadataAsync(
-                    cacheKey.DisplayReference,
-                    refreshedMetadata,
-                    cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (UnauthorizedAccessException exception)
-        {
-            throw CommitFailure(cacheKey.DisplayReference.FhirDirective, exception);
-        }
-        catch (IOException exception)
-        {
-            throw CommitFailure(cacheKey.DisplayReference.FhirDirective, exception);
-        }
-    }
-
     private static PackageInstallFreshness GetFreshness(VersionType versionType) =>
         versionType switch
         {
@@ -1110,24 +1525,6 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             VersionType.LocalBuild => PackageInstallFreshness.LocalAuthoritative,
             _ => PackageInstallFreshness.Immutable
         };
-
-    private string GetAcquisitionCacheRoot()
-    {
-        if (!string.IsNullOrWhiteSpace(_cache.CacheDirectory))
-            return _cache.CacheDirectory;
-
-        if (!string.IsNullOrWhiteSpace(_options.CachePath))
-            return _options.CachePath;
-
-        string? configuredCacheRoot =
-            Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER");
-        return !string.IsNullOrWhiteSpace(configuredCacheRoot)
-            ? configuredCacheRoot
-            : Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".fhir",
-                "packages");
-    }
 
     private static DateTimeOffset? NormalizePublicationDate(DateTime? publicationDate)
     {
@@ -1411,6 +1808,125 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             BytesDownloaded = bytesDownloaded,
             TotalBytes = totalBytes
         });
+    }
+
+    private sealed class HttpPackageStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly HttpResponseMessage _response;
+        private readonly CancellationTokenSource _timeoutSource;
+        private int _disposed;
+
+        internal HttpPackageStream(
+            Stream inner,
+            HttpResponseMessage response,
+            CancellationTokenSource timeoutSource,
+            long? contentLength)
+        {
+            ArgumentNullException.ThrowIfNull(inner);
+            ArgumentNullException.ThrowIfNull(response);
+            ArgumentNullException.ThrowIfNull(timeoutSource);
+            _inner = inner;
+            _response = response;
+            _timeoutSource = timeoutSource;
+            ContentLength = contentLength;
+        }
+
+        internal long? ContentLength { get; }
+
+        public override bool CanRead => _inner.CanRead;
+
+        public override bool CanSeek => _inner.CanSeek;
+
+        public override bool CanWrite => false;
+
+        public override long Length => _inner.Length;
+
+        public override long Position
+        {
+            get => _inner.Position;
+            set => _inner.Position = value;
+        }
+
+        public override void Flush() => _inner.Flush();
+
+        public override int Read(
+            byte[] buffer,
+            int offset,
+            int count)
+        {
+            _timeoutSource.Token.ThrowIfCancellationRequested();
+            return _inner.Read(buffer, offset, count);
+        }
+
+        public override async Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+        {
+            using CancellationTokenSource linkedSource =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    _timeoutSource.Token);
+            return await _inner.ReadAsync(
+                    buffer,
+                    offset,
+                    count,
+                    linkedSource.Token)
+                .ConfigureAwait(false);
+        }
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            using CancellationTokenSource linkedSource =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    _timeoutSource.Token);
+            return await _inner.ReadAsync(
+                    buffer,
+                    linkedSource.Token)
+                .ConfigureAwait(false);
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            _inner.Seek(offset, origin);
+
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
+
+        public override void Write(
+            byte[] buffer,
+            int offset,
+            int count) =>
+            throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing
+                && Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                _inner.Dispose();
+                _response.Dispose();
+                _timeoutSource.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                await _inner.DisposeAsync().ConfigureAwait(false);
+                _response.Dispose();
+                _timeoutSource.Dispose();
+            }
+
+            GC.SuppressFinalize(this);
+        }
     }
 
     private static readonly JsonSerializerOptions s_jsonOptions = new()

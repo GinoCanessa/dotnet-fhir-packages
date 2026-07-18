@@ -11,7 +11,11 @@ managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
   (`packages.fhir.org`), secondary registry, CI builds (`build.fhir.org`), HL7
   website, NPM registries, and custom/private registries with automatic fallback.
 - **Local disk cache** — stores packages in the standard `~/.fhir/packages`
-  layout, compatible with other FHIR tooling.
+  layout with validated reads, transactional replacement, crash recovery, and
+  same-identity coordination across SDK processes.
+- **Hardened package sources** — safely installs expected-identity or
+  manifest-discovered packages from caller-owned streams and absolute
+  HTTP/HTTPS URIs under finite compressed/archive limits.
 - **Dependency resolution** — resolves full transitive dependency closures with
   conflict strategies, lock-file support, and circular-dependency detection.
 - **FHIR-aware versioning** — understands pre-release hierarchies, wildcards,
@@ -72,6 +76,24 @@ using var manager = new FhirPackageManager();
 var record = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 Console.WriteLine($"Installed to {record?.ContentPath}");
 
+// Install caller-owned content from its current stream position.
+// The manager leaves the stream open.
+await using FileStream packageStream = File.OpenRead("./package.tgz");
+PackageRecord direct = await manager.InstallAsync(
+    new PackageReference("example.package", "1.0.0"),
+    packageStream,
+    new PackageSourceInstallOptions
+    {
+        ExpectedSha256 = "..."
+    },
+    cancellationToken);
+
+// Or discover the validated identity from a URI package manifest.
+PackageRecord imported = await manager.ImportAsync(
+    new Uri("https://packages.example.test/package.tgz"),
+    options: null,
+    cancellationToken);
+
 // Search registries
 var results = await manager.SearchAsync(
     new PackageSearchCriteria { Name = "hl7.fhir.us", FhirVersion = "R4" });
@@ -97,6 +119,20 @@ services.AddFhirPackageManagement(options =>
 
 // Then inject IFhirPackageManager wherever needed
 ```
+
+`FhirPackageManager` implements `IHardenedFhirPackageManager`, and the default
+`DiskPackageCache` implements `IHardenedPackageCache`. Custom cache
+implementations must advertise the hardened capability before any manager
+install source is read. URI requests use the configured `HttpClient`,
+`ResponseHeadersRead`, redirect policy, and a timeout covering the response
+body copy. Network allow-list, proxy, and credential policy remain application
+responsibilities.
+
+Package acquisition and extraction are finite by default and can be tightened
+with `FhirPackageManagerOptions.InstallLimits`, per-call `InstallLimits`, or the
+`FHIRPKG_MAX_*` environment variables. Cache coordination applies to SDK users
+of the same cache root; external tools that ignore `.fhirpkg/locks` are outside
+that coordination boundary.
 
 ## Prerequisites
 

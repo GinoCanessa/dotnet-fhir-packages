@@ -228,7 +228,8 @@ public class PackageInstallLimitsTests : IDisposable
     [Fact]
     public async Task PerCallLimits_TightenCompressedAcquisition()
     {
-        Mock<IPackageCache> cache = new Mock<IPackageCache>();
+        Mock<IHardenedPackageCache> cache =
+            new Mock<IHardenedPackageCache>();
         Mock<IRegistryClient> registry = new Mock<IRegistryClient>();
         ResolvedDirective resolved = new ResolvedDirective
         {
@@ -253,6 +254,26 @@ public class PackageInstallLimitsTests : IDisposable
                 It.IsAny<PackageReference>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(false);
+        cache.Setup(instance => instance.InspectAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new HardenedPackageCacheInspection
+            {
+                State = HardenedPackageCacheState.Missing
+            });
+        cache.Setup(instance => instance.InstallAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<Stream>(),
+                It.Is<InstallCacheOptions?>(options =>
+                    options != null
+                    && options.Limits != null
+                    && options.Limits.MaxCompressedBytes == 3),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new PackageInstallException(
+                PackageInstallErrorCode.CompressedSizeLimitExceeded,
+                PackageInstallStage.Acquisition,
+                "Compressed package exceeds the configured limit.",
+                resolved.Reference.FhirDirective));
 
         FhirPackageManagerOptions managerOptions = new FhirPackageManagerOptions
         {
@@ -261,7 +282,10 @@ public class PackageInstallLimitsTests : IDisposable
                 MaxCompressedBytes = 10
             }
         };
-        using FhirPackageManager manager = CreateManager(managerOptions, registry, cache);
+        using FhirPackageManager manager = CreateManager(
+            managerOptions,
+            registry,
+            cache.Object);
 
         PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(
             () => manager.InstallAsync(
@@ -280,19 +304,18 @@ public class PackageInstallLimitsTests : IDisposable
             It.IsAny<PackageReference>(),
             It.IsAny<Stream>(),
             It.IsAny<InstallCacheOptions?>(),
-            It.IsAny<CancellationToken>()), Times.Never);
+            It.IsAny<CancellationToken>()), Times.Once);
     }
 
     private static FhirPackageManager CreateManager(
         FhirPackageManagerOptions options,
         Mock<IRegistryClient>? registry = null,
-        Mock<IPackageCache>? cache = null)
+        IPackageCache? cache = null)
     {
-        Mock<IPackageCache> effectiveCache = cache ?? new Mock<IPackageCache>();
         Mock<IRegistryClient> effectiveRegistry = registry ?? new Mock<IRegistryClient>();
 
         return new FhirPackageManager(
-            effectiveCache.Object,
+            cache ?? new Mock<IPackageCache>().Object,
             effectiveRegistry.Object,
             new Mock<IVersionResolver>().Object,
             new Mock<IDependencyResolver>().Object,

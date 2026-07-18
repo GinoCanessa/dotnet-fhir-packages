@@ -176,74 +176,25 @@ internal sealed class PackageCacheJournalStore
         foreach (string path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            PackageCacheTransactionJournal journal;
-            try
-            {
-                await using FileStream stream = new FileStream(
-                    path,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    16_384,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                journal =
-                    await JsonSerializer
-                        .DeserializeAsync<PackageCacheTransactionJournal>(
-                            stream,
-                            s_jsonOptions,
-                            cancellationToken)
-                        .ConfigureAwait(false)
-                    ?? throw PackageCacheTransactionJournal.InvalidJournal(
-                        "A cache transaction journal was empty.");
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (PackageInstallException)
-            {
-                throw;
-            }
-            catch (JsonException exception)
-            {
-                throw PackageCacheTransactionJournal.InvalidJournal(
-                    "A cache transaction journal contains invalid JSON.",
-                    exception);
-            }
-            catch (NotSupportedException exception)
-            {
-                throw PackageCacheTransactionJournal.InvalidJournal(
-                    "A cache transaction journal has an unsupported shape.",
-                    exception);
-            }
-            catch (UnauthorizedAccessException exception)
-            {
-                throw PackageCacheTransactionJournal.InvalidJournal(
-                    "A cache transaction journal could not be read.",
-                    exception);
-            }
-            catch (IOException exception)
-            {
-                throw PackageCacheTransactionJournal.InvalidJournal(
-                    "A cache transaction journal could not be read.",
-                    exception);
-            }
-
-            ValidateJournal(journal);
-            PackageCacheKey cacheKey = journal.GetCacheKey();
-            if (!string.Equals(
-                    Path.GetFileName(path),
-                    $"{cacheKey.LockHash}.json",
-                    StringComparison.Ordinal))
-            {
-                throw PackageCacheTransactionJournal.InvalidJournal(
-                    "A cache transaction journal has an invalid file name.");
-            }
-
-            journals.Add(journal);
+            journals.Add(
+                await ReadPathAsync(path, cancellationToken)
+                    .ConfigureAwait(false));
         }
 
         return journals;
+    }
+
+    internal async Task<PackageCacheTransactionJournal?> ReadAsync(
+        PackageCacheKey cacheKey,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(cacheKey);
+        string path = GetJournalPath(cacheKey);
+        if (!File.Exists(path))
+            return null;
+
+        return await ReadPathAsync(path, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     internal void Delete(PackageCacheTransactionJournal journal)
@@ -434,5 +385,76 @@ internal sealed class PackageCacheJournalStore
                     "A transaction journal has an unexpected artifact path.");
             }
         }
+    }
+
+    private async Task<PackageCacheTransactionJournal> ReadPathAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        PackageCacheTransactionJournal journal;
+        try
+        {
+            await using FileStream stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                16_384,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            journal =
+                await JsonSerializer
+                    .DeserializeAsync<PackageCacheTransactionJournal>(
+                        stream,
+                        s_jsonOptions,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                ?? throw PackageCacheTransactionJournal.InvalidJournal(
+                    "A cache transaction journal was empty.");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (PackageInstallException)
+        {
+            throw;
+        }
+        catch (JsonException exception)
+        {
+            throw PackageCacheTransactionJournal.InvalidJournal(
+                "A cache transaction journal contains invalid JSON.",
+                exception);
+        }
+        catch (NotSupportedException exception)
+        {
+            throw PackageCacheTransactionJournal.InvalidJournal(
+                "A cache transaction journal has an unsupported shape.",
+                exception);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw PackageCacheTransactionJournal.InvalidJournal(
+                "A cache transaction journal could not be read.",
+                exception);
+        }
+        catch (IOException exception)
+        {
+            throw PackageCacheTransactionJournal.InvalidJournal(
+                "A cache transaction journal could not be read.",
+                exception);
+        }
+
+        ValidateJournal(journal);
+        PackageCacheKey journalKey = journal.GetCacheKey();
+        if (!string.Equals(
+                Path.GetFileName(path),
+                $"{journalKey.LockHash}.json",
+                StringComparison.Ordinal))
+        {
+            throw PackageCacheTransactionJournal.InvalidJournal(
+                "A cache transaction journal has an invalid file name.");
+        }
+
+        return journal;
     }
 }

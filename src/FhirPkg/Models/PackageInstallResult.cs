@@ -26,4 +26,21 @@ public record PackageInstallResult
 
     /// <summary>Installation stage associated with <see cref="ErrorCode"/>.</summary>
     public PackageInstallStage? ErrorStage { get; init; }
+
+    /// <summary>
+    /// Returns a stable typed failure description suitable for human-readable
+    /// diagnostics, or <c>null</c> when no failure information is present.
+    /// </summary>
+    public string? GetFailureDescription()
+    {
+        if (ErrorCode is null)
+            return ErrorMessage;
+
+        string category = ErrorStage is PackageInstallStage stage
+            ? $"{ErrorCode}/{stage}"
+            : ErrorCode.ToString()!;
+        return string.IsNullOrWhiteSpace(ErrorMessage)
+            ? category
+            : $"[{category}] {ErrorMessage}";
+    }
 }

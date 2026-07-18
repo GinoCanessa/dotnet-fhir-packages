@@ -31,6 +31,8 @@ internal static class JsonOutput
             Directive = result.Directive,
             Status = result.Status.ToString(),
             result.ErrorMessage,
+            result.ErrorCode,
+            result.ErrorStage,
             Package = result.Package is { } pkg
                 ? new { pkg.Reference.Name, pkg.Reference.Version, pkg.DirectoryPath, pkg.SizeBytes }
                 : null
@@ -50,6 +52,8 @@ internal static class JsonOutput
                 Directive = r.Directive,
                 Status = r.Status.ToString(),
                 r.ErrorMessage,
+                r.ErrorCode,
+                r.ErrorStage,
                 Package = r.Package is { } pkg
                     ? new { pkg.Reference.Name, pkg.Reference.Version, pkg.DirectoryPath, pkg.SizeBytes }
                     : null

@@ -27,9 +27,11 @@ internal static class ConsoleOutput
 
         AnsiConsole.MarkupLine($"  {Markup.Escape(result.Directive),-40} {statusMarkup}");
 
-        if (result.ErrorMessage is not null)
+        string? failureDescription = result.GetFailureDescription();
+        if (failureDescription is not null)
         {
-            AnsiConsole.MarkupLine($"    [red]{Markup.Escape(result.ErrorMessage)}[/]");
+            AnsiConsole.MarkupLine(
+                $"    [red]{Markup.Escape(failureDescription)}[/]");
         }
 
         if (result.Package is { } pkg)

@@ -21,11 +21,22 @@ namespace FhirPkg.Tests;
 [Collection("EnvironmentVariable")]
 public class FhirPackageManagerTests
 {
-    private readonly Mock<IPackageCache> _cacheMock = new();
+    private readonly Mock<IHardenedPackageCache> _cacheMock = new();
     private readonly Mock<IRegistryClient> _registryMock = new();
     private readonly Mock<IVersionResolver> _versionResolverMock = new();
     private readonly Mock<IDependencyResolver> _dependencyResolverMock = new();
     private readonly Mock<IPackageIndexer> _indexerMock = new();
+
+    public FhirPackageManagerTests()
+    {
+        _cacheMock.Setup(cache => cache.InspectAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new HardenedPackageCacheInspection
+            {
+                State = HardenedPackageCacheState.Missing
+            });
+    }
 
     private FhirPackageManager CreateManager(FhirPackageManagerOptions? options = null)
     {
@@ -204,7 +215,6 @@ public class FhirPackageManagerTests
                 It.IsAny<ResolvedDirective>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(downloadResult);
-
         _cacheMock.Setup(c => c.InstallAsync(
                 It.IsAny<PackageReference>(),
                 It.IsAny<Stream>(),
@@ -268,6 +278,18 @@ public class FhirPackageManagerTests
                 It.IsAny<ResolvedDirective>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(downloadResult);
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<Stream>(),
+                It.Is<InstallCacheOptions?>(options =>
+                    options != null
+                    && options.ExpectedSha256Sum == resolvedDirective.Sha256Sum),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new PackageInstallException(
+                PackageInstallErrorCode.ChecksumMismatch,
+                PackageInstallStage.ChecksumValidation,
+                "Checksum mismatch.",
+                resolvedDirective.Reference.FhirDirective));
 
         using FhirPackageManager manager = CreateManager();
 
@@ -391,7 +413,8 @@ public class FhirPackageManagerTests
         result.ShouldBe(installedRecord);
         installedReference.ShouldBe(new PackageReference("example.package", "current"));
         capturedOptions.ShouldNotBeNull();
-        capturedOptions!.ArchiveSha256.ShouldNotBeNullOrWhiteSpace();
+        capturedOptions!.ArchiveSha256.ShouldBeNull();
+        capturedOptions.SkipIfArchiveUnchanged.ShouldBeTrue();
         capturedOptions.SourcePublicationDate.ShouldBe(
             new DateTimeOffset(resolvedDirective.PublicationDate.Value));
     }
@@ -586,11 +609,6 @@ public class FhirPackageManagerTests
                     ["example.package#current"] = metadataEntry
                 }
             });
-        _cacheMock.Setup(cache => cache.UpdateMetadataAsync(
-                aliasReference,
-                It.IsAny<CacheMetadataEntry>(),
-                It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
         _registryMock.Setup(registry => registry.ResolveAsync(
                 It.IsAny<PackageDirective>(),
                 It.IsAny<VersionResolveOptions?>(),
@@ -604,6 +622,15 @@ public class FhirPackageManagerTests
                 Content = new MemoryStream(content),
                 ContentType = "application/gzip"
             });
+        InstallCacheOptions? capturedOptions = null;
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                aliasReference,
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<PackageReference, Stream, InstallCacheOptions?, CancellationToken>(
+                (_, _, options, _) => capturedOptions = options)
+            .ReturnsAsync(cachedRecord);
 
         using FhirPackageManager manager = CreateManager();
 
@@ -612,11 +639,13 @@ public class FhirPackageManagerTests
             cancellationToken: TestContext.Current.CancellationToken);
 
         result.ShouldBe(cachedRecord);
+        capturedOptions.ShouldNotBeNull();
+        capturedOptions!.SkipIfArchiveUnchanged.ShouldBeTrue();
         _cacheMock.Verify(cache => cache.InstallAsync(
             It.IsAny<PackageReference>(),
             It.IsAny<Stream>(),
             It.IsAny<InstallCacheOptions?>(),
-            It.IsAny<CancellationToken>()), Times.Never);
+            It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -822,6 +851,19 @@ public class FhirPackageManagerTests
                 It.IsAny<InstallCacheOptions?>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(rootRecord);
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                It.Is<PackageReference>(reference => reference.Name == "dependency.package"),
+                It.IsAny<Stream>(),
+                It.Is<InstallCacheOptions?>(options =>
+                    options != null
+                    && options.Limits != null
+                    && options.Limits.MaxCompressedBytes == 3),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new PackageInstallException(
+                PackageInstallErrorCode.CompressedSizeLimitExceeded,
+                PackageInstallStage.Acquisition,
+                "Compressed package exceeds the configured limit.",
+                dependencyResolved.Reference.FhirDirective));
         FhirPackageManagerOptions managerOptions = new FhirPackageManagerOptions
         {
             InstallLimits = new PackageInstallLimits
@@ -848,7 +890,7 @@ public class FhirPackageManagerTests
             It.IsAny<PackageReference>(),
             It.IsAny<Stream>(),
             It.IsAny<InstallCacheOptions?>(),
-            It.IsAny<CancellationToken>()), Times.Once);
+            It.IsAny<CancellationToken>()), Times.Exactly(2));
     }
 
     [Fact]
@@ -906,6 +948,19 @@ public class FhirPackageManagerTests
                     ContentType = "application/gzip",
                     ContentLength = 4
                 });
+            _cacheMock.Setup(cache => cache.InstallAsync(
+                    It.IsAny<PackageReference>(),
+                    It.IsAny<Stream>(),
+                    It.Is<InstallCacheOptions?>(options =>
+                        options != null
+                        && options.Limits != null
+                        && options.Limits.MaxCompressedBytes == 3),
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new PackageInstallException(
+                    PackageInstallErrorCode.CompressedSizeLimitExceeded,
+                    PackageInstallStage.Acquisition,
+                    "Compressed package exceeds the configured limit.",
+                    resolvedDirective.Reference.FhirDirective));
             FhirPackageManagerOptions managerOptions = new FhirPackageManagerOptions
             {
                 InstallLimits = new PackageInstallLimits
@@ -936,7 +991,7 @@ public class FhirPackageManagerTests
                 It.IsAny<PackageReference>(),
                 It.IsAny<Stream>(),
                 It.IsAny<InstallCacheOptions?>(),
-                It.IsAny<CancellationToken>()), Times.Never);
+                It.IsAny<CancellationToken>()), Times.Once);
         }
         finally
         {

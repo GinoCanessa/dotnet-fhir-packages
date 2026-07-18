@@ -51,5 +51,8 @@ public enum PackageInstallErrorCode
     CommitFailed,
 
     /// <summary>The manager implementation does not support the requested capability.</summary>
-    UnsupportedManagerCapability
+    UnsupportedManagerCapability,
+
+    /// <summary>The configured cache does not implement the hardened capability.</summary>
+    UnsupportedCacheCapability
 }

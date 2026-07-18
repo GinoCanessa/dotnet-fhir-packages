@@ -2,6 +2,7 @@
 
 using FhirPkg.Models;
 using FhirPkg.Registry;
+using FhirPkg.Installation;
 
 namespace FhirPkg;
 
@@ -119,4 +120,82 @@ public interface IFhirPackageManager
         string tarballPath,
         RegistryEndpoint registry,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Installs URI content under an explicit expected identity.</summary>
+    Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (this is IHardenedFhirPackageManager hardenedManager)
+        {
+            return hardenedManager.InstallAsync(
+                expectedReference,
+                packageUri,
+                options,
+                cancellationToken);
+        }
+
+        throw UnsupportedManagerCapability();
+    }
+
+    /// <summary>Installs caller-owned stream content under an expected identity.</summary>
+    Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (this is IHardenedFhirPackageManager hardenedManager)
+        {
+            return hardenedManager.InstallAsync(
+                expectedReference,
+                packageStream,
+                options,
+                cancellationToken);
+        }
+
+        throw UnsupportedManagerCapability();
+    }
+
+    /// <summary>Imports URI content using its validated manifest identity.</summary>
+    Task<PackageRecord> ImportAsync(
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (this is IHardenedFhirPackageManager hardenedManager)
+        {
+            return hardenedManager.ImportAsync(
+                packageUri,
+                options,
+                cancellationToken);
+        }
+
+        throw UnsupportedManagerCapability();
+    }
+
+    /// <summary>Imports caller-owned stream content using its validated manifest identity.</summary>
+    Task<PackageRecord> ImportAsync(
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (this is IHardenedFhirPackageManager hardenedManager)
+        {
+            return hardenedManager.ImportAsync(
+                packageStream,
+                options,
+                cancellationToken);
+        }
+
+        throw UnsupportedManagerCapability();
+    }
+
+    private static PackageInstallException UnsupportedManagerCapability() =>
+        new(
+            PackageInstallErrorCode.UnsupportedManagerCapability,
+            PackageInstallStage.PolicyValidation,
+            "The package manager does not support hardened URI or stream installation.");
 }

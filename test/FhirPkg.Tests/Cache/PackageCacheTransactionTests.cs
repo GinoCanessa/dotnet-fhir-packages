@@ -1337,11 +1337,22 @@ public sealed class PackageCacheTransactionTests : IDisposable
         if (!Directory.Exists(operationsRoot))
             return;
 
-        Directory.EnumerateFileSystemEntries(
+        string[] directoryNames =
+            ["staging", "transactions", "backup", "quarantine"];
+        foreach (string directoryName in directoryNames)
+        {
+            string directory = Path.Combine(
                 operationsRoot,
-                "*",
-                SearchOption.AllDirectories)
-            .ShouldBeEmpty();
+                directoryName);
+            if (!Directory.Exists(directory))
+                continue;
+
+            Directory.EnumerateFileSystemEntries(
+                    directory,
+                    "*",
+                    SearchOption.AllDirectories)
+                .ShouldBeEmpty();
+        }
     }
 
     private sealed class ThrowOnceObserver : IPackageCacheFaultObserver

@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Security.Cryptography;
+using FhirPkg.Cache;
 
 namespace FhirPkg.Installation;
 
@@ -24,7 +25,58 @@ internal static class PackageContentAcquirer
         string? expectedSha1 = null,
         bool verifyChecksums = true,
         string? directive = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        await AcquireCoreAsync(
+                source,
+                cacheRoot,
+                limits,
+                reportedContentLength,
+                expectedSha256,
+                expectedSha1,
+                verifyChecksums,
+                directive,
+                coordinator: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    internal static async Task<PackageContentAcquisition> AcquireAsync(
+        Stream source,
+        string cacheRoot,
+        PackageInstallLimits limits,
+        long? reportedContentLength,
+        string? expectedSha256,
+        string? expectedSha1,
+        bool verifyChecksums,
+        string? directive,
+        PackageCacheCoordinator coordinator,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(coordinator);
+        return await AcquireCoreAsync(
+                source,
+                cacheRoot,
+                limits,
+                reportedContentLength,
+                expectedSha256,
+                expectedSha1,
+                verifyChecksums,
+                directive,
+                coordinator,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<PackageContentAcquisition> AcquireCoreAsync(
+        Stream source,
+        string cacheRoot,
+        PackageInstallLimits limits,
+        long? reportedContentLength,
+        string? expectedSha256,
+        string? expectedSha1,
+        bool verifyChecksums,
+        string? directive,
+        PackageCacheCoordinator? coordinator,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
@@ -53,6 +105,12 @@ internal static class PackageContentAcquirer
             StagingDirectoryName);
         string operationDirectory = Path.Combine(stagingRoot, operationId);
         string archivePath = Path.Combine(operationDirectory, ArchiveFileName);
+        PackageCacheLease? operationOwner = coordinator is null
+            ? null
+            : await coordinator.AcquireOperationOwnerAsync(
+                    operationId,
+                    cancellationToken)
+                .ConfigureAwait(false);
         bool completed = false;
 
         try
@@ -133,7 +191,8 @@ internal static class PackageContentAcquirer
                 archivePath,
                 actualLength,
                 actualSha256,
-                actualSha1);
+                actualSha1,
+                operationOwner);
             completed = true;
             return result;
         }
@@ -152,7 +211,10 @@ internal static class PackageContentAcquirer
         finally
         {
             if (!completed)
+            {
                 PackageContentAcquisition.TryDeleteOperationDirectory(operationDirectory);
+                operationOwner?.Dispose();
+            }
         }
     }
 
@@ -239,7 +301,8 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
         string archivePath,
         long actualLength,
         string sha256,
-        string? sha1)
+        string? sha1,
+        PackageCacheLease? operationOwner = null)
     {
         OperationId = operationId;
         OperationDirectory = operationDirectory;
@@ -247,7 +310,10 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
         ActualLength = actualLength;
         Sha256 = sha256;
         Sha1 = sha1;
+        _operationOwner = operationOwner;
     }
+
+    private readonly PackageCacheLease? _operationOwner;
 
     internal string OperationId { get; }
 
@@ -272,7 +338,15 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
 
     public ValueTask DisposeAsync()
     {
-        TryDeleteOperationDirectory(OperationDirectory);
+        try
+        {
+            TryDeleteOperationDirectory(OperationDirectory);
+        }
+        finally
+        {
+            _operationOwner?.Dispose();
+        }
+
         return ValueTask.CompletedTask;
     }
 

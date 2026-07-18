@@ -76,7 +76,7 @@ public class CacheIntegrationTests : IntegrationTestBase
     }
 
     [Fact]
-    public async Task Install_AlreadyExists_ThrowsByDefault()
+    public async Task Install_AlreadyExists_ReturnsWinnerWithoutReadingSource()
     {
         DiskPackageCache cache = CreateCache();
         PackageReference reference = "test.package#1.0.0";
@@ -85,9 +85,15 @@ public class CacheIntegrationTests : IntegrationTestBase
         await cache.InstallAsync(reference, tarball1, ct: TestContext.Current.CancellationToken);
 
         using Stream tarball2 = CreateTestTarball("test.package", "1.0.0");
-        Func<Task<PackageRecord>> act = () => cache.InstallAsync(reference, tarball2);
+        long initialPosition = tarball2.Position;
 
-        await Should.ThrowAsync<InvalidOperationException>(act);
+        PackageRecord winner = await cache.InstallAsync(
+            reference,
+            tarball2,
+            ct: TestContext.Current.CancellationToken);
+
+        winner.Reference.ShouldBe(reference);
+        tarball2.Position.ShouldBe(initialPosition);
     }
 
     [Fact]

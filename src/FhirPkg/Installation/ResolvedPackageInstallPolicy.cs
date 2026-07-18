@@ -42,11 +42,27 @@ internal sealed record ResolvedPackageInstallPolicy
         PackageInstallLimits limits = PackageInstallLimits.ResolvePerCall(
             managerLimits,
             effectiveOptions.InstallLimits);
+        CorruptCacheBehavior corruptCacheBehavior =
+            managerOptions.CorruptCacheBehavior;
+        if (effectiveOptions is PackageSourceInstallOptions sourceOptions
+            && sourceOptions.CorruptCacheBehavior
+                is CorruptCacheBehavior sourceBehavior)
+        {
+            if (!Enum.IsDefined(sourceBehavior))
+            {
+                throw new PackageInstallException(
+                    PackageInstallErrorCode.InvalidPolicy,
+                    PackageInstallStage.PolicyValidation,
+                    "CorruptCacheBehavior is not a supported value.");
+            }
+
+            corruptCacheBehavior = sourceBehavior;
+        }
 
         return new ResolvedPackageInstallPolicy
         {
             Limits = limits,
-            CorruptCacheBehavior = managerOptions.CorruptCacheBehavior,
+            CorruptCacheBehavior = corruptCacheBehavior,
             VerifyChecksums = managerOptions.VerifyChecksums,
             IncludeDependencies = effectiveOptions.IncludeDependencies,
             OverwriteExisting = effectiveOptions.OverwriteExisting,

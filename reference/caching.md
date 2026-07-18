@@ -22,6 +22,12 @@ Each package version occupies its own directory within the cache, named with the
 ```
 ~/.fhir/packages/
 ├── packages.ini                          # Cache metadata (optional)
+├── .fhirpkg/                             # FhirPkg-owned hidden state
+│   ├── locks/                            # persistent identity/global/operation lock files
+│   ├── staging/                          # bounded compressed and expanded operation data
+│   ├── transactions/                     # durable transaction journals
+│   ├── backup/                           # prior valid generations during replacement
+│   └── quarantine/                       # prior corrupt artifacts during repair
 ├── hl7.fhir.r4.core#4.0.1/
 │   └── package/
 │       ├── package.json                  # Package manifest
@@ -42,6 +48,9 @@ Each package version occupies its own directory within the cache, named with the
 **Key conventions:**
 
 - Directory names use `#` as the separator (FHIR-style directive)
+- FhirPkg uses a reversible lowercase-safe encoding when identity characters
+  are unsafe for portable paths/INI keys; `PackageRecord.Reference` preserves
+  the requested display identity
 - All package contents reside within a `package/` subdirectory
 - Only `.json` files at the `package/` level are treated as FHIR resources (not subdirectories)
 - CI builds use `current` as the version component (e.g., `hl7.fhir.us.core#current`)
@@ -73,6 +82,11 @@ hl7.fhir.us.core#6.1.0 = 1048576
 | `[cache]` | Cache format version |
 | `[packages]` | Directive → download datetime (`YYYYMMDDHHmmss`) |
 | `[package-sizes]` | Directive → expanded size in bytes |
+| `[package-source-publication-dates]` | Mutable-source publication timestamp |
+| `[package-archive-sha256]` | SHA-256 of the installed compressed archive |
+
+FhirPkg writes `packages.ini` atomically under the cache-wide mutation lock and
+preserves unrelated/unknown sections.
 
 ## Lock File (`fhirpkg.lock.json`)
 
@@ -113,10 +127,9 @@ flowchart TD
     K --> L{CI date > Cache date?}
     L -->|Yes| J
     L -->|No| M[Use Cached ✓]
-    B -->|dev| N{In Cache?}
+    B -->|dev| N{Valid local cache entry?}
     N -->|Yes| O[Use Cached ✓]
-    N -->|No| P[Fall back to 'current']
-    P --> I
+    N -->|No| P[Report unavailable]
 ```
 
 ### Exact Versions
@@ -142,35 +155,38 @@ flowchart TD
 
 ### Dev Versions
 
-- Check local cache first
-- If not in cache, fall back to `current` resolution (CI build)
+- Local-only and authoritative
+- A valid local cache entry is returned even when overwrite was requested
+- If not in cache, no registry or CI fallback is attempted
 
 ## Installation Process
 
-When a package is downloaded, it goes through these steps:
+When a package is installed through FhirPkg, it goes through these steps:
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Temp as Temp Directory
+    participant Stage as Cache-local staging
     participant Cache as Cache Directory
 
-    Client->>Client: Download tarball (.tgz)
-    Client->>Temp: Extract to temporary location
-    Client->>Temp: Validate package structure
-    Note over Temp: Ensure package/ subdirectory exists<br/>Move files into package/ if needed
-    Client->>Temp: Generate index (if needed)
-    Client->>Cache: Atomic move to cache<br/>{name}#{version}/
-    Note over Cache: On Windows cross-volume:<br/>copy then delete
+    Client->>Cache: Acquire identity lease
+    Client->>Stage: Bounded copy + incremental hashes
+    Client->>Stage: Bounded extraction and portable-path validation
+    Client->>Stage: Validate complete layout, manifest, and identity
+    Client->>Cache: Acquire short global mutation lease
+    Client->>Cache: Write durable journal
+    Client->>Cache: Same-volume generation rename/promotion
+    Client->>Cache: Atomically replace packages.ini
+    Client->>Cache: Complete journal / remove obsolete artifact
 ```
 
 ### Package Normalization
 
-Some packages may not follow the expected structure (e.g., missing the `package/` subdirectory). During installation:
-
-1. Check if `package/` directory exists
-2. If not, create it and move all top-level files into `package/`
-3. This handles incorrectly formatted packages
+Standard archives must contain all materialized content under `package/` and
+exactly one regular `package/package.json`. A narrowly defined legacy layout is
+accepted only when there is one root `package.json`, no `package/` subtree or
+wrapper directory, and no mixed/second manifest. Legacy normalization occurs
+only after the complete archive shape has passed validation.
 
 ### Index Generation
 
@@ -190,20 +206,35 @@ Clients discover resources within cached packages by:
 
 ## Cache Eviction
 
-Packages can be removed from cache by deleting the directory:
-
-```
-rm -rf ~/.fhir/packages/hl7.fhir.us.core#6.1.0/
-```
-
-Or programmatically through the cache client's delete methods. When deleting, also update any metadata files (`packages.ini`, lock files).
+Use `IPackageCache.RemoveAsync`, `IFhirPackageManager.RemoveAsync`, or their
+clear methods. These operations coordinate with installs, journal the mutation,
+recover after interruption, and update metadata. Manual directory deletion is
+outside the SDK coordination contract and may leave corrupt targets or stale
+metadata. Persistent files under `.fhirpkg/locks` are intentionally retained.
 
 ## Concurrent Access
 
-- **Thread safety:** Implementations use locks or concurrent collections for safe multi-threaded access to the package index
-- **Atomic installation:** Packages are extracted to a temporary directory and then atomically moved to the cache to prevent partial installations
-- **Parallel indexing:** The CodeGen implementation uses parallel processing for initial cache indexing, bounded by `ProcessorCount - 1`
-- **Cross-volume awareness:** On Windows, if the temp directory and cache are on different volumes, a copy+delete is used instead of a move
+FhirPkg coordinates SDK users of one cache root across threads, manager/cache
+instances, and processes:
+
+- identity-specific `SemaphoreSlim` and persistent OS file locks serialize
+  install, overwrite, repair, remove, and SDK reads for one canonical identity;
+- unrelated identities acquire, hash, validate, and extract concurrently;
+- a separate global lock covers only promotion, metadata, remove, and clear
+  mutations;
+- known-identity waiters revalidate after locking and return the winner without
+  reading their source unless overwrite was requested;
+- discovery imports may each perform bounded staging before identity is known,
+  then converge after locking;
+- process termination releases OS ownership; the next identity owner recovers
+  its durable journal before abandoned staging cleanup; and
+- `ClearAsync` has snapshot semantics, so installs begun outside its snapshot
+  may finish afterward.
+
+These guarantees apply only to SDK operations that honor `.fhirpkg/locks`.
+External tools and callers directly using a previously returned raw path are
+not locked. During a two-rename replacement, such a raw-path caller may briefly
+observe the target absent, but never a mixed generation.
 
 ## Disk Cache vs. In-Memory Cache
 

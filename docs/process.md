@@ -33,10 +33,13 @@ Re-check cache with exact version ──── hit ──▶ return cached Packa
 Download tarball
   │
   ▼
-Verify SHA-1 checksum
+Bound acquisition + SHA-256/SHA-1 verification
   │
   ▼
-Extract to cache
+Validate archive, layout, manifest, and identity
+  │
+  ▼
+Transactionally commit to cache
   │
   ▼
 (Optionally) install dependencies
@@ -94,10 +97,12 @@ The SDK checks the local disk cache **before** contacting any registry. The cach
 is stored in the standard FHIR tooling layout (default `~/.fhir/packages`,
 configurable via `CachePath` or the `PACKAGE_CACHE_FOLDER` environment variable).
 
-A package is considered installed when the directory
-`{cacheRoot}/{name}#{version}/package/` exists. If the directive already specifies
-an exact version and the package is cached, `InstallAsync` returns the cached
-`PackageRecord` immediately — no network traffic is generated.
+A package is considered installed only when the target and `package/` directory
+are real directories, `package/package.json` is a real regular file, the
+manifest is readable, and its exact or alias identity matches the cache key. If
+the directive already specifies an exact version and this validation succeeds,
+`InstallAsync` returns the cached `PackageRecord` immediately — no network
+traffic is generated.
 
 ### Cache Structure
 
@@ -117,8 +122,9 @@ an exact version and the package is cached, `InstallAsync` returns the cached
 └── …
 ```
 
-`packages.ini` tracks installation metadata (install timestamp, package size, and
-file count) in a simple INI-section-per-package format.
+`packages.ini` tracks installation time, package size, mutable-source
+publication time, and compressed archive SHA-256 while preserving unrelated
+sections.
 
 ## 3 — Version Resolution
 
@@ -183,74 +189,100 @@ After resolution, the cache is checked **again** with the now-exact version (the
 original directive may have been a wildcard or `latest`). If the exact version is
 already cached, the download is skipped.
 
-## 4 — Download
+## 4 — Source Acquisition
 
-If the resolved version is not in the cache, the SDK downloads the package
-tarball.
+Directive downloads, direct URI installs, caller streams, and discovery imports
+all enter the same install contract.
 
-The `RedundantRegistryClient.DownloadAsync` method sends an HTTP `GET` request to
-the `TarballUri` from the resolved directive. The response is returned as a
-`PackageDownloadResult` containing a `Stream` (the raw `.tgz` content) and an
-optional `ContentLength`.
+- Directive downloads use the registry chain and pass the response stream
+  directly to the coordinated cache.
+- URI methods accept absolute HTTP/HTTPS only and use the manager's configured
+  `HttpClient` with `ResponseHeadersRead`. `HttpTimeout` covers response headers
+  and the complete body copy; `MaxRedirects` configures automatic redirects.
+- Caller streams are consumed from their current position and remain open.
+- Expected-identity installs acquire the identity lock before reading source
+  bytes. A waiter therefore returns the winning valid cache entry without
+  consuming its source unless overwrite was requested.
+- Discovery imports must stage enough bounded content to validate the manifest
+  before the identity is known, so concurrent discovery calls may each consume
+  their source and then converge on one cache entry.
 
-HTTP behavior is governed by `FhirPackageManagerOptions`:
+Content is copied incrementally to
+`{cacheRoot}/.fhirpkg/staging/{operationId}/archive.tgz`. A reported
+`Content-Length` above policy is rejected before body copy; actual bytes are
+counted independently with overflow-safe accounting. SHA-256 is always computed
+and SHA-1 is computed when requested. Caller streams are never rewound.
 
-| Option | Default | Effect |
-|--------|---------|--------|
-| `HttpTimeout` | 30 s | Per-request timeout |
-| `MaxRedirects` | 5 | Maximum HTTP redirect hops |
+## 5 — Limits, Integrity, and Validation
 
-If the primary registry fails, the redundant client automatically retries the
-download against the next registry in the chain.
+Installation has finite defaults and can be tightened at manager or call scope:
 
-## 5 — Checksum Verification
+| Limit | Default | Environment variable |
+|-------|---------|----------------------|
+| Compressed bytes | 100 MiB | `FHIRPKG_MAX_COMPRESSED_BYTES` |
+| Expanded bytes | 1 GiB | `FHIRPKG_MAX_EXPANDED_BYTES` |
+| One entry | 128 MiB | `FHIRPKG_MAX_ENTRY_BYTES` |
+| Archive entries | 50,000 | `FHIRPKG_MAX_ARCHIVE_ENTRIES` |
+| Normalized path length | 1,024 | `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH` |
+| Path depth | 32 | `FHIRPKG_MAX_ARCHIVE_DEPTH` |
 
-When `VerifyChecksums` is enabled (the default) and the registry provided a
-`ShaSum`, the downloaded stream is buffered into memory and its SHA-1 hash is
-computed. If the hash does not match the expected value, an
-`InvalidOperationException` is thrown and the package is **not** installed. This
-prevents corrupted or tampered packages from entering the cache.
+Checksum failures and policy/archive/identity failures are reported as typed
+`PackageInstallException` values; cancellation remains
+`OperationCanceledException`.
 
-## 6 — Extraction and Installation
+Before any live-cache mutation, the extractor:
 
-After verification, the tarball is extracted into the disk cache through
-`DiskPackageCache.InstallAsync`. This is a multi-step atomic operation:
+1. bounds raw tar metadata and regular-file expansion;
+2. accepts only regular files and directories after safely consuming tar
+   metadata records;
+3. canonicalizes both slash styles and rejects rooted, traversal, control,
+   reserved-device, trailing-dot/space, overlong, and colliding paths;
+4. rejects duplicate, case/Unicode collision, and file-directory ancestor
+   conflicts before later writes;
+5. validates the complete standard or legacy package layout;
+6. reads the sole real regular `package.json`; and
+7. validates exact or allowed alias identity against the requested cache key,
+   or derives a canonical identity for import.
 
-### Step-by-step
+## 6 — Transactional Cache Commit and Process Coordination
 
-1. **Create a temporary directory** — `{cacheRoot}/.tmp-{guid}/` is created to
-   hold the extraction output. No changes are made to the live cache at this
-   point.
+Acquisition, extraction, and validation remain under the cache root so final
+promotion is a same-volume rename, never copy promotion. The SDK coordinates
+through:
 
-2. **Extract the tarball** — `TarballExtractor.ExtractAsync` decompresses the
-   gzip stream, reads each tar entry, sanitizes file paths (removing leading `./`
-   or `/`), validates against **path traversal attacks** (any entry that would
-   escape the destination directory throws an `InvalidOperationException`), and
-   writes the files to the temporary directory.
+- a process-wide keyed `SemaphoreSlim` per cache root and canonical identity;
+- persistent OS lock files in `.fhirpkg/locks` (process termination releases
+  ownership);
+- an operation-owner lock for each staging directory; and
+- a short global lock for final promotion, metadata replacement, remove, and
+  clear mutations.
 
-3. **Normalize structure** — FHIR tarballs contain a `package/` subdirectory by
-   convention. `NormalizePackageStructure` ensures this layout exists — if files
-   were extracted at the root level they are moved into `package/`.
+Lock order is identity first, then global. Different identities can acquire,
+hash, and extract concurrently. Every SDK cache read holds the identity lease
+through validation/open/read, so it observes the old or new valid generation.
+A caller using a previously returned raw path outside the SDK may briefly see
+that target absent between replacement renames, but cannot see mixed content.
 
-4. **Read the manifest** — the package manifest (`package/package.json`) is
-   deserialized from the extracted content to build the `PackageRecord`.
+Windows and Linux use `FileStream.Lock`; macOS uses non-blocking native
+`flock` because managed file locking is unsupported there. Durable replacement
+attempts `F_FULLFSYNC`/`fsync` on macOS and treats documented unsupported
+directory-sync errors (`EINVAL`/`ENOTSUP`, plus `ENOTTY` for `F_FULLFSYNC`) as a
+platform durability limitation while still surfacing real I/O errors.
 
-5. **Atomic move** — the temporary directory is moved to its final location at
-   `{cacheRoot}/{name}#{version}/`. On Windows, if the source and destination are
-   on different volumes, a copy-then-delete fallback is used. Because the live
-   cache directory only appears once the move is complete, concurrent readers
-   never see a partially-extracted package.
+Final mutations use durable journals in `.fhirpkg/transactions` and hidden
+backup/quarantine artifacts. Journal states cover preparation, old-generation
+movement, new promotion, metadata commit, completion, and durable rollback.
+Atomic journal and `packages.ini` replacement flushes the file and performs the
+strongest supported directory synchronization. Recovery runs after the next
+identity acquisition and before cleanup. Cancellation is honored immediately
+before destructive work; once renames begin, forward completion or rollback is
+non-cancellable.
 
-6. **Update metadata** — `packages.ini` is updated with the installation
-   timestamp, directory size, and file count.
-
-7. **Build PackageRecord** — a `PackageRecord` is constructed from the manifest,
-   an existing `.index.json` (if present), and the computed metadata.
-
-### Thread Safety
-
-A `SemaphoreSlim` serializes concurrent calls to `InstallAsync` on the same cache
-instance, ensuring that two parallel installs of the same package do not race.
+`ListPackagesAsync` recovers pending journal identities before enumeration.
+`ClearAsync` snapshots visible and journal identities under the global lock,
+then processes that snapshot in canonical identity order. An install that begins
+outside the snapshot may complete after clear; a represented package cannot be
+missed or resurrected by clear.
 
 ## 7 — Dependency Installation
 

@@ -70,6 +70,63 @@ internal sealed class PackageCacheMetadataStore
             : null;
     }
 
+    internal async Task<IReadOnlySet<string>> ReadManagedKeysAsync(
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini =
+            await IniParser.ParseFileAsync(
+                    _metadataPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        HashSet<string> keys = new(StringComparer.Ordinal);
+        foreach (string sectionName in s_managedSections)
+        {
+            if (!ini.TryGetValue(
+                    sectionName,
+                    out IReadOnlyDictionary<string, string>? section))
+            {
+                continue;
+            }
+
+            keys.UnionWith(section.Keys);
+        }
+
+        return keys;
+    }
+
+    internal async Task RemoveManagedKeysAsync(
+        IReadOnlyCollection<string> keys,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(keys);
+        if (keys.Count == 0 || !File.Exists(_metadataPath))
+            return;
+
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini =
+            await IniParser.ParseFileAsync(
+                    _metadataPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        Dictionary<string, Dictionary<string, string>> sections =
+            CreateMutableSections(ini);
+        EnsureStandardSections(sections);
+        bool changed = false;
+        foreach (string sectionName in s_managedSections)
+        {
+            foreach (string key in keys)
+                changed |= sections[sectionName].Remove(key);
+        }
+
+        if (!changed)
+            return;
+
+        await WriteSectionsAsync(
+                sections,
+                mutation: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     internal async Task<bool> EntryMatchesAsync(
         PackageCacheKey cacheKey,
         CacheMetadataEntry? expected,

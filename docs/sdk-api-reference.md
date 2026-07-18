@@ -8,9 +8,11 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
 ## Table of Contents
 
 - [Core Interface — IFhirPackageManager](#core-interface--ifhirpackagemanager)
+- [Hardened Manager Sources](#hardened-manager-sources)
 - [Options](#options)
   - [FhirPackageManagerOptions](#fhirpackagemanageroptions)
   - [InstallOptions](#installoptions)
+  - [PackageSourceInstallOptions](#packagesourceinstalloptions)
   - [RestoreOptions](#restoreoptions)
   - [VersionResolveOptions](#versionresolveoptions)
 - [Models](#models)
@@ -33,6 +35,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
 - [Enumerations](#enumerations)
 - [Cache](#cache)
   - [IPackageCache](#ipackagecache)
+  - [IHardenedPackageCache](#ihardenedpackagecache)
   - [DiskPackageCache](#diskpackagecache)
   - [MemoryResourceCache](#memoryresourcecache)
 - [Registry](#registry)
@@ -99,6 +102,28 @@ public interface IFhirPackageManager
         string tarballPath,
         RegistryEndpoint registry,
         CancellationToken cancellationToken = default);
+
+    Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken);
+
+    Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken);
+
+    Task<PackageRecord> ImportAsync(
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken);
+
+    Task<PackageRecord> ImportAsync(
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken);
 }
 ```
 
@@ -231,6 +256,47 @@ new FhirPackageManager(
 `FhirPackageManager` implements `IDisposable` to release the internal `HttpClient`
 when used outside of DI.
 
+## Hardened Manager Sources
+
+`FhirPackageManager` implements `IHardenedFhirPackageManager`. The four URI and
+stream methods shown above are also binary-compatible default methods on
+`IFhirPackageManager`: they dispatch to the capability when available and
+otherwise throw `PackageInstallException` with
+`UnsupportedManagerCapability` before reading the source.
+
+- Expected-identity methods validate the manifest against
+  `expectedReference`. Exact versions and the mutable `current`,
+  `current$branch`, and local `dev` aliases are supported; selectors such as
+  `latest`, wildcards, and ranges are rejected.
+- Import methods discover the canonical identity only after bounded archive and
+  manifest validation.
+- Caller streams are consumed from their current position and remain open.
+- URI sources must be absolute HTTP/HTTPS URIs. The configured `HttpClient`
+  uses `ResponseHeadersRead`; `HttpTimeout` covers header acquisition and body
+  staging. Redirect limits are configured by `MaxRedirects`.
+- Network allow-list, proxy, DNS, and credential policy are application
+  responsibilities.
+- All four modes use the same limits, checksum validation, archive validation,
+  cache repair, transactional commit, dependency, progress, and cancellation
+  pipeline as directive installation.
+
+```csharp
+await using FileStream source = File.OpenRead("package.tgz");
+PackageRecord installed = await manager.InstallAsync(
+    new PackageReference("example.package", "1.0.0"),
+    source,
+    new PackageSourceInstallOptions
+    {
+        ExpectedSha256 = "..."
+    },
+    cancellationToken);
+
+PackageRecord discovered = await manager.ImportAsync(
+    new Uri("https://packages.example.test/package.tgz"),
+    options: null,
+    cancellationToken);
+```
+
 ---
 
 ## Options
@@ -243,6 +309,8 @@ Top-level configuration for the SDK. See the
 ```csharp
 public class FhirPackageManagerOptions
 {
+    public PackageInstallLimits InstallLimits { get; set; }
+    public CorruptCacheBehavior CorruptCacheBehavior { get; set; }  // default: Repair
     public string? CachePath { get; set; }                          // default: null → PACKAGE_CACHE_FOLDER env var → ~/.fhir/packages
     public List<RegistryEndpoint> Registries { get; set; }          // default: []
     public bool IncludeCiBuilds { get; set; }                       // default: true
@@ -264,6 +332,7 @@ Controls behavior of `InstallAsync` and `InstallManyAsync`.
 ```csharp
 public class InstallOptions
 {
+    public PackageInstallLimits? InstallLimits { get; set; }
     public bool IncludeDependencies { get; set; }           // default: false
     public bool OverwriteExisting { get; set; }             // default: false
     public FhirRelease? PreferredFhirRelease { get; set; }  // default: null
@@ -271,6 +340,31 @@ public class InstallOptions
     public IProgress<PackageProgress>? Progress { get; set; } // default: null
 }
 ```
+
+### PackageSourceInstallOptions
+
+Extends `InstallOptions` for URI and stream sources.
+
+```csharp
+public class PackageSourceInstallOptions : InstallOptions
+{
+    public CorruptCacheBehavior? CorruptCacheBehavior { get; set; }
+    public string? ExpectedSha256 { get; set; }
+    public string? ExpectedSha1 { get; set; }
+}
+```
+
+The nullable corruption policy overrides the manager-level repair/strict
+setting for that URI or stream operation. Hardened custom caches receive the
+resolved value through public `InstallCacheOptions` before source consumption.
+
+`PackageInstallLimits` has finite defaults: 100 MiB compressed, 1 GiB expanded,
+128 MiB per entry, 50,000 entries, normalized path length 1,024, and depth 32.
+Per-call values may only tighten manager limits. Unspecified manager values can
+be configured with `FHIRPKG_MAX_COMPRESSED_BYTES`,
+`FHIRPKG_MAX_EXPANDED_BYTES`, `FHIRPKG_MAX_ENTRY_BYTES`,
+`FHIRPKG_MAX_ARCHIVE_ENTRIES`, `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH`, and
+`FHIRPKG_MAX_ARCHIVE_DEPTH`.
 
 ### RestoreOptions
 
@@ -824,11 +918,39 @@ public interface IPackageCache
 ```csharp
 public class InstallCacheOptions
 {
-    public bool OverwriteExisting { get; set; }   // default: false
+    public bool OverwriteExisting { get; set; }    // default: false
     public bool VerifyChecksum { get; set; }       // default: true
+    public PackageInstallLimits? Limits { get; set; }
+    public long? ReportedContentLength { get; set; }
+    public string? ExpectedSha256Sum { get; set; }
     public string? ExpectedShaSum { get; set; }
+    public DateTimeOffset? SourcePublicationDate { get; set; }
+    public string? ArchiveSha256 { get; set; }
+    public CorruptCacheBehavior CorruptCacheBehavior { get; set; }
+    public bool SkipIfArchiveUnchanged { get; set; }
+    public IProgress<PackageProgress>? Progress { get; set; }
 }
 ```
+
+### IHardenedPackageCache
+
+`IHardenedPackageCache : IPackageCache` advertises bounded acquisition,
+validated identities, transactional replacement, recovery, and SDK process
+coordination. It adds path-neutral inspection and manifest-discovery import:
+
+```csharp
+Task<HardenedPackageCacheInspection> InspectAsync(
+    PackageReference reference,
+    CancellationToken cancellationToken = default);
+
+Task<PackageRecord> ImportAsync(
+    Stream tarballStream,
+    InstallCacheOptions? options = null,
+    CancellationToken cancellationToken = default);
+```
+
+The manager rejects an injected `IPackageCache` that does not implement this
+capability with `UnsupportedCacheCapability` before source access.
 
 ### DiskPackageCache
 
@@ -857,10 +979,24 @@ var cache = new DiskPackageCache("/my/cache");
 
 Key behaviors:
 
-- **Atomic installation** — extracts to a temporary directory, then atomically
-  moves into place.
-- **Thread-safe** — uses a `SemaphoreSlim` for write operations.
-- **Metadata** — tracked in `packages.ini` (download time, package size).
+- **Validated reads** — a hit requires a real package directory, real regular
+  `package/package.json`, readable manifest, and matching exact/alias identity.
+- **Corruption policy** — `Repair` stages and validates a replacement before
+  quarantining corrupt content; `Strict` throws typed `CorruptCache` before
+  replacement source access. Read signatures that cannot diagnose return
+  false/null or omit corrupt entries.
+- **Transactional installation/removal** — cache-local staging, journals,
+  same-volume renames, atomic metadata replacement, rollback, and deterministic
+  recovery protect valid and corrupt generations.
+- **Process coordination** — keyed in-process semaphores and persistent OS lock
+  files under `.fhirpkg/locks`; unrelated identities stage concurrently and a
+  short global lock serializes promotion and metadata.
+- **Hidden state** — `.fhirpkg/staging`, `.fhirpkg/transactions`,
+  `.fhirpkg/backup`, `.fhirpkg/quarantine`, and `.fhirpkg/locks` are SDK-owned.
+- **Raw path caveat** — SDK reads wait through replacement. A caller retaining
+  a previously returned `ContentPath` and accessing it outside the SDK may
+  briefly observe the target absent between replacement renames, never mixed
+  generations.
 
 ### MemoryResourceCache
 
