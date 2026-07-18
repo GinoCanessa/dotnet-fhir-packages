@@ -524,6 +524,16 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             ? PackageCacheKey.Create(requestedReference)
             : null;
 
+        if (requestedCacheKey is not null)
+        {
+            await ThrowIfCacheCorruptAsync(
+                    requestedCacheKey,
+                    policy,
+                    directive,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         if (freshness == PackageInstallFreshness.LocalAuthoritative)
         {
             PackageCacheKey localKey = requestedCacheKey!;
@@ -656,12 +666,46 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
         }
     }
 
+    private async Task ThrowIfCacheCorruptAsync(
+        PackageCacheKey cacheKey,
+        ResolvedPackageInstallPolicy policy,
+        string directive,
+        CancellationToken cancellationToken)
+    {
+        if (_cache is not IHardenedPackageCacheCore hardenedCache)
+            return;
+
+        PackageCacheInspection inspection =
+            await hardenedCache.InspectAsync(
+                    cacheKey.DisplayReference,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        if (inspection.State == PackageCacheInspectionState.Corrupt
+            && (policy.CorruptCacheBehavior == CorruptCacheBehavior.Strict
+                || !inspection.IsRepairable))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.CorruptCache,
+                PackageInstallStage.CacheInspection,
+                $"Cached package '{cacheKey.DisplayReference.FhirDirective}' is corrupt: " +
+                $"{inspection.CorruptionReason}",
+                directive);
+        }
+    }
+
     private async Task<PackageRecord> InstallResolvedAsync(
         PackageInstallRequest request,
         CancellationToken cancellationToken)
     {
         PackageReference cacheReference = request.CacheKey.DisplayReference;
         ResolvedDirective resolved = request.Source.ResolvedDirective;
+        await ThrowIfCacheCorruptAsync(
+                request.CacheKey,
+                request.Policy,
+                request.Directive,
+                cancellationToken)
+            .ConfigureAwait(false);
+
         bool isInstalled = await IsInstalledAsync(request.CacheKey, cancellationToken).ConfigureAwait(false);
         PackageRecord? cachedRecord = isInstalled
             ? await GetCachedPackageAsync(request.CacheKey, cancellationToken).ConfigureAwait(false)
@@ -772,7 +816,8 @@ public sealed class FhirPackageManager : IFhirPackageManager, IDisposable
             SourcePublicationDate = sourcePublicationDate,
             ArchiveSha256 = acquiredContent.Sha256,
             AcquiredContent = acquiredContent,
-            IdentityExpectation = request.IdentityExpectation
+            IdentityExpectation = request.IdentityExpectation,
+            CorruptCacheBehavior = request.Policy.CorruptCacheBehavior
         };
 
         PackageRecord record;

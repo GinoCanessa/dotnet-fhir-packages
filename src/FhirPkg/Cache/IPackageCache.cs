@@ -21,7 +21,8 @@ public interface IPackageCache : IDisposable
 
     /// <summary>
     /// Checks if a specific package version is installed in the cache.
-    /// A package is considered installed if its content directory (package/) exists.
+    /// A package is installed only when its cache directory, content directory,
+    /// readable manifest, and manifest identity are valid.
     /// </summary>
     /// <param name="reference">The package identity to check.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -192,4 +193,7 @@ public class InstallCacheOptions
     internal PackageContentAcquisition? AcquiredContent { get; set; }
 
     internal PackageIdentityExpectation? IdentityExpectation { get; set; }
+
+    internal CorruptCacheBehavior CorruptCacheBehavior { get; set; } =
+        CorruptCacheBehavior.Repair;
 }

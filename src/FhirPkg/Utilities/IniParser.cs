@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Text;
+using FhirPkg.Cache;
 
 namespace FhirPkg.Utilities;
 
@@ -201,5 +202,44 @@ public static class IniParser
             Directory.CreateDirectory(directory);
 
         await File.WriteAllTextAsync(filePath, Serialize(sections), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Atomically writes an INI file by flushing a sibling temporary file and
+    /// replacing the destination with a same-volume durable rename.
+    /// </summary>
+    public static async Task WriteFileAtomicallyAsync(
+        string filePath,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> sections,
+        CancellationToken ct = default)
+    {
+        await WriteFileAtomicallyAsync(
+                filePath,
+                sections,
+                SystemPackageCacheFileOperations.Instance,
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    internal static async Task WriteFileAtomicallyAsync(
+        string filePath,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> sections,
+        IPackageCacheFileOperations fileOperations,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(filePath);
+        ArgumentNullException.ThrowIfNull(sections);
+        ArgumentNullException.ThrowIfNull(fileOperations);
+
+        byte[] content = new UTF8Encoding(
+                encoderShouldEmitUTF8Identifier: false,
+                throwOnInvalidBytes: true)
+            .GetBytes(Serialize(sections));
+        await PackageCacheDurableFileWriter.WriteAsync(
+                filePath,
+                content,
+                fileOperations,
+                ct)
+            .ConfigureAwait(false);
     }
 }

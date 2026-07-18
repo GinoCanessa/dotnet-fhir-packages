@@ -78,14 +78,24 @@ internal static class PackageIdentityValidator
         ArgumentException.ThrowIfNullOrWhiteSpace(manifestPath);
         ArgumentNullException.ThrowIfNull(expectation);
 
-        PackageIdentityExpectation normalizedExpectation =
-            ValidateExpectation(expectation, directive);
-
         PackageManifest manifest = await ReadManifestAsync(
                 manifestPath,
                 directive,
                 cancellationToken)
             .ConfigureAwait(false);
+        return ValidateExpected(manifest, expectation, directive);
+    }
+
+    internal static PackageIdentityValidationResult ValidateExpected(
+        PackageManifest manifest,
+        PackageIdentityExpectation expectation,
+        string? directive)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(expectation);
+
+        PackageIdentityExpectation normalizedExpectation =
+            ValidateExpectation(expectation, directive);
         PackageReference manifestReference = ValidateManifestIdentity(
             manifest,
             directive);
@@ -122,6 +132,22 @@ internal static class PackageIdentityValidator
             expectedKey);
     }
 
+    internal static PackageIdentityValidationResult Discover(
+        PackageManifest manifest,
+        string? directive)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+
+        PackageReference manifestReference = ValidateManifestIdentity(
+            manifest,
+            directive);
+        PackageCacheKey cacheKey = PackageCacheKey.Create(manifestReference);
+        return new PackageIdentityValidationResult(
+            manifest,
+            manifestReference,
+            cacheKey);
+    }
+
     internal static async Task<PackageIdentityValidationResult> DiscoverAsync(
         string manifestPath,
         string? directive,
@@ -134,14 +160,7 @@ internal static class PackageIdentityValidator
                 directive,
                 cancellationToken)
             .ConfigureAwait(false);
-        PackageReference manifestReference = ValidateManifestIdentity(
-            manifest,
-            directive);
-        PackageCacheKey cacheKey = PackageCacheKey.Create(manifestReference);
-        return new PackageIdentityValidationResult(
-            manifest,
-            manifestReference,
-            cacheKey);
+        return Discover(manifest, directive);
     }
 
     private static async Task<PackageManifest> ReadManifestAsync(

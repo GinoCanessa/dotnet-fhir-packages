@@ -1,47 +1,24 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
-using System.Globalization;
 using System.Text.Json;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
 using FhirPkg.Models;
-using FhirPkg.Utilities;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FhirPkg.Cache;
 
 /// <summary>
-/// Disk-based FHIR package cache implementation.
-/// By default, the cache root is resolved as follows: an explicit path passed to
-/// the constructor takes priority; if <c>null</c>, the <c>PACKAGE_CACHE_FOLDER</c>
-/// environment variable is used when set; otherwise falls back to <c>~/.fhir/packages</c>.
-/// Provides thread-safe installation with atomic directory moves and
-/// concurrent-safe reads via a <see cref="SemaphoreSlim"/> for write operations.
+/// Disk-based FHIR package cache with validated reads and transactional writes.
 /// </summary>
-/// <remarks>
-/// <para>
-/// The cache stores each package version in a directory named <c>{name}#{version}</c>,
-/// with all content under a <c>package/</c> subdirectory. Metadata is tracked in a
-/// <c>packages.ini</c> file at the cache root.
-/// </para>
-/// <para>
-/// Tarballs are staged and validated beneath the cache root before promotion.
-/// Replacement keeps a backup of the prior package until content and metadata commit,
-/// and restores that backup when promotion or metadata update fails.
-/// </para>
-/// </remarks>
-public class DiskPackageCache : IPackageCache, IDisposable
+public class DiskPackageCache :
+    IPackageCache,
+    IHardenedPackageCacheCore,
+    IDisposable
 {
     private const string PackageSubdirectory = "package";
-    private const string ManifestFileName = "package.json";
     private const string IndexFileName = ".index.json";
-    private const string MetadataFileName = "packages.ini";
-    private const string MetadataDateFormat = "yyyyMMddHHmmss";
-    private const string SourcePublicationDatesSection = "package-source-publication-dates";
-    private const string ArchiveSha256Section = "package-archive-sha256";
-    private const string OperationsDirectoryName = ".fhirpkg";
-    private const string BackupDirectoryName = "backup";
 
     private static readonly JsonSerializerOptions s_jsonOptions = new()
     {
@@ -54,21 +31,20 @@ public class DiskPackageCache : IPackageCache, IDisposable
     private readonly ILogger _logger;
     private readonly TimeProvider _timeProvider;
     private readonly PackageInstallLimits _installLimits;
+    private readonly PackageCacheValidator _validator;
+    private readonly PackageCacheMetadataStore _metadataStore;
+    private readonly PackageCacheCommitter _committer;
 
     /// <inheritdoc />
     public string CacheDirectory { get; }
 
     /// <summary>
-    /// Creates a new <see cref="DiskPackageCache"/> using the specified or default cache directory.
+    /// Creates a disk package cache using the supplied or default cache root.
     /// </summary>
-    /// <param name="cacheDirectory">
-    /// Full path to the cache directory. If <c>null</c>, the <c>PACKAGE_CACHE_FOLDER</c>
-    /// environment variable is used when set; otherwise defaults to
-    /// <c>~/.fhir/packages</c> (or <c>%USERPROFILE%\.fhir\packages</c> on Windows).
-    /// </param>
-    /// <param name="logger">Optional logger for diagnostics.</param>
-    /// <param name="timeProvider">Optional time provider; defaults to <see cref="TimeProvider.System"/>.</param>
-    public DiskPackageCache(string? cacheDirectory = null, ILogger<DiskPackageCache>? logger = null, TimeProvider? timeProvider = null)
+    public DiskPackageCache(
+        string? cacheDirectory = null,
+        ILogger<DiskPackageCache>? logger = null,
+        TimeProvider? timeProvider = null)
         : this(
             cacheDirectory,
             logger,
@@ -82,8 +58,27 @@ public class DiskPackageCache : IPackageCache, IDisposable
         ILogger<DiskPackageCache>? logger,
         TimeProvider? timeProvider,
         PackageInstallLimits installLimits)
+        : this(
+            cacheDirectory,
+            logger,
+            timeProvider,
+            installLimits,
+            SystemPackageCacheFileOperations.Instance,
+            NullPackageCacheFaultObserver.Instance)
+    {
+    }
+
+    internal DiskPackageCache(
+        string? cacheDirectory,
+        ILogger<DiskPackageCache>? logger,
+        TimeProvider? timeProvider,
+        PackageInstallLimits installLimits,
+        IPackageCacheFileOperations fileOperations,
+        IPackageCacheFaultObserver faultObserver)
     {
         ArgumentNullException.ThrowIfNull(installLimits);
+        ArgumentNullException.ThrowIfNull(fileOperations);
+        ArgumentNullException.ThrowIfNull(faultObserver);
         installLimits.Validate();
 
         _logger = logger ?? NullLogger<DiskPackageCache>.Instance;
@@ -91,49 +86,73 @@ public class DiskPackageCache : IPackageCache, IDisposable
         _installLimits = PackageInstallLimits.ResolvePerCall(
             installLimits,
             requestedLimits: null);
-        CacheDirectory = cacheDirectory
+        CacheDirectory = Path.GetFullPath(
+            cacheDirectory
             ?? Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER")
             ?? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                Environment.GetFolderPath(
+                    Environment.SpecialFolder.UserProfile),
                 ".fhir",
-                "packages");
+                "packages"));
 
         Directory.CreateDirectory(CacheDirectory);
+        _validator = new PackageCacheValidator(CacheDirectory);
+        _metadataStore = new PackageCacheMetadataStore(
+            CacheDirectory,
+            fileOperations,
+            faultObserver);
+        PackageCacheJournalStore journalStore = new(
+            CacheDirectory,
+            fileOperations,
+            faultObserver);
+        _committer = new PackageCacheCommitter(
+            CacheDirectory,
+            _validator,
+            _metadataStore,
+            journalStore,
+            fileOperations,
+            faultObserver);
     }
 
     /// <inheritdoc />
-    public Task<bool> IsInstalledAsync(PackageReference reference, CancellationToken ct = default)
+    public async Task<bool> IsInstalledAsync(
+        PackageReference reference,
+        CancellationToken ct = default)
     {
-        ct.ThrowIfCancellationRequested();
-        string contentPath = GetContentPath(reference);
-        return Task.FromResult(Directory.Exists(contentPath));
+        PackageCacheInspection inspection = await InspectAsync(reference, ct)
+            .ConfigureAwait(false);
+        return inspection.State == PackageCacheInspectionState.Valid;
     }
 
     /// <inheritdoc />
-    public async Task<PackageRecord?> GetPackageAsync(PackageReference reference, CancellationToken ct = default)
+    public async Task<PackageRecord?> GetPackageAsync(
+        PackageReference reference,
+        CancellationToken ct = default)
     {
-        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
-        string contentPath = GetContentPath(reference);
-        if (!Directory.Exists(contentPath))
-            return null;
-
-        PackageManifest? manifest = await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false);
-        if (manifest is null)
-            return null;
-
-        string directoryPath = GetPackageDirectoryPath(reference);
-        CacheMetadata metadata = await GetMetadataAsync(ct).ConfigureAwait(false);
-        metadata.Packages.TryGetValue(cacheKey.MetadataKey, out CacheMetadataEntry? entry);
-
-        return new PackageRecord
+        await _installLock.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            Reference = reference,
-            DirectoryPath = directoryPath,
-            ContentPath = contentPath,
-            Manifest = manifest,
-            InstalledAt = entry?.DownloadDateTime,
-            SizeBytes = entry?.SizeBytes
-        };
+            await RecoverNoLockAsync(ct).ConfigureAwait(false);
+            PackageCacheInspection inspection =
+                await _validator.InspectAsync(reference, ct)
+                    .ConfigureAwait(false);
+            if (inspection.State != PackageCacheInspectionState.Valid)
+                return null;
+
+            CacheMetadataEntry? entry =
+                await _metadataStore.GetEntryAsync(
+                        inspection.CacheKey,
+                        ct)
+                    .ConfigureAwait(false);
+            return CreateRecord(
+                inspection.CacheKey.DisplayReference,
+                inspection,
+                entry);
+        }
+        finally
+        {
+            _installLock.Release();
+        }
     }
 
     /// <inheritdoc />
@@ -142,52 +161,54 @@ public class DiskPackageCache : IPackageCache, IDisposable
         string? versionFilter = null,
         CancellationToken ct = default)
     {
-        ct.ThrowIfCancellationRequested();
-
-        if (!Directory.Exists(CacheDirectory))
-            return [];
-
-        // Read metadata once for all packages instead of per-directory
-        CacheMetadata metadata = await GetMetadataAsync(ct).ConfigureAwait(false);
-        List<PackageRecord> results = new List<PackageRecord>();
-
-        foreach ((PackageCacheKey cacheKey, string directoryPath) in EnumeratePackageDirectories())
+        await _installLock.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            ct.ThrowIfCancellationRequested();
-
-            PackageReference reference = cacheKey.CanonicalReference;
-
-            // Apply filters
-            if (packageIdFilter is not null
-                && !reference.Name.StartsWith(packageIdFilter, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            if (versionFilter is not null
-                && !string.Equals(reference.Version, versionFilter, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            string contentPath = GetContentPath(reference);
-            if (!Directory.Exists(contentPath))
-                continue;
-
-            PackageManifest? manifest = await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false);
-            if (manifest is null)
-                continue;
-
-            metadata.Packages.TryGetValue(cacheKey.MetadataKey, out CacheMetadataEntry? entry);
-
-            results.Add(new PackageRecord
+            await RecoverNoLockAsync(ct).ConfigureAwait(false);
+            CacheMetadata metadata = await _metadataStore.ReadAsync(ct)
+                .ConfigureAwait(false);
+            List<PackageRecord> results = [];
+            foreach ((
+                PackageCacheKey cacheKey,
+                string _) in EnumeratePackageTargets())
             {
-                Reference = reference,
-                DirectoryPath = directoryPath,
-                ContentPath = contentPath,
-                Manifest = manifest,
-                InstalledAt = entry?.DownloadDateTime,
-                SizeBytes = entry?.SizeBytes
-            });
-        }
+                ct.ThrowIfCancellationRequested();
+                PackageReference reference = cacheKey.CanonicalReference;
+                if (packageIdFilter is not null
+                    && !reference.Name.StartsWith(
+                        packageIdFilter,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
-        return results;
+                if (versionFilter is not null
+                    && !string.Equals(
+                        reference.Version,
+                        versionFilter,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                PackageCacheInspection inspection =
+                    await _validator.InspectAsync(cacheKey, ct)
+                        .ConfigureAwait(false);
+                if (inspection.State != PackageCacheInspectionState.Valid)
+                    continue;
+
+                metadata.Packages.TryGetValue(
+                    cacheKey.MetadataKey,
+                    out CacheMetadataEntry? entry);
+                results.Add(CreateRecord(reference, inspection, entry));
+            }
+
+            return results;
+        }
+        finally
+        {
+            _installLock.Release();
+        }
     }
 
     /// <inheritdoc />
@@ -198,11 +219,23 @@ public class DiskPackageCache : IPackageCache, IDisposable
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(tarballStream);
-
         if (!reference.HasVersion)
-            throw new ArgumentException("PackageReference must have a version for installation.", nameof(reference));
+        {
+            throw new ArgumentException(
+                "PackageReference must have a version for installation.",
+                nameof(reference));
+        }
 
         options ??= new InstallCacheOptions();
+        if (!Enum.IsDefined(options.CorruptCacheBehavior))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPolicy,
+                PackageInstallStage.PolicyValidation,
+                "CorruptCacheBehavior is not a supported value.",
+                reference.FhirDirective);
+        }
+
         PackageIdentityExpectation identityExpectation =
             options.IdentityExpectation is null
                 ? PackageIdentityValidator.CreateExpectation(
@@ -223,12 +256,18 @@ public class DiskPackageCache : IPackageCache, IDisposable
                 reference.FhirDirective);
         }
 
-        PackageInstallLimits effectiveLimits = PackageInstallLimits.ResolvePerCall(
-            _installLimits,
-            options.Limits);
+        await InspectInstallTargetAsync(
+                cacheKey,
+                options,
+                ct)
+            .ConfigureAwait(false);
+
+        PackageInstallLimits effectiveLimits =
+            PackageInstallLimits.ResolvePerCall(
+                _installLimits,
+                options.Limits);
         PackageContentAcquisition? acquiredContent = options.AcquiredContent;
         bool ownsAcquiredContent = false;
-
         try
         {
             if (acquiredContent is null)
@@ -247,201 +286,129 @@ public class DiskPackageCache : IPackageCache, IDisposable
                 ownsAcquiredContent = true;
             }
 
-            string targetDirectory = cacheKey.GetPackageDirectoryPath(CacheDirectory);
-            string operationRoot = Path.Combine(
-                CacheDirectory,
-                OperationsDirectoryName);
-            string backupRoot = Path.Combine(
-                operationRoot,
-                BackupDirectoryName);
             string stagingDirectory = Path.Combine(
                 acquiredContent.OperationDirectory,
                 "expanded");
-            string backupDirectory = Path.Combine(
-                backupRoot,
-                $"{cacheKey.LockHash}-{acquiredContent.OperationId}");
+            PackageManifest manifest;
+            string stagedContentPath;
+            try
+            {
+                await using FileStream archiveStream =
+                    acquiredContent.OpenArchiveRead();
+                ArchiveExtractionMetrics metrics =
+                    await TarballExtractor.ExtractAsync(
+                            archiveStream,
+                            stagingDirectory,
+                            effectiveLimits,
+                            reference.FhirDirective,
+                            ct)
+                        .ConfigureAwait(false);
+                _logger.LogDebug(
+                    "Extracted {EntryCount} entries and {ExpandedBytes} bytes for {Directive}.",
+                    metrics.EntryCount,
+                    metrics.ExpandedBytes,
+                    reference.FhirDirective);
 
+                PackageArchiveInventory inventory = metrics.Inventory
+                    ?? throw InvalidArchive(
+                        reference,
+                        "Package archive inventory was not produced.");
+                PackageArchiveLayoutResult layout =
+                    TarballExtractor.ValidateAndNormalizePackageStructure(
+                        stagingDirectory,
+                        inventory,
+                        reference.FhirDirective);
+                PackageIdentityValidationResult identity =
+                    await PackageIdentityValidator.ValidateExpectedAsync(
+                            layout.ManifestPath,
+                            identityExpectation,
+                            reference.FhirDirective,
+                            ct)
+                        .ConfigureAwait(false);
+                if (!identity.CacheKey.Equals(cacheKey))
+                {
+                    throw new PackageInstallException(
+                        PackageInstallErrorCode.InvalidPackageIdentity,
+                        PackageInstallStage.IdentityValidation,
+                        "Validated package identity does not match the cache target.",
+                        reference.FhirDirective);
+                }
+
+                manifest = identity.Manifest;
+                stagedContentPath = layout.ContentPath;
+            }
+            catch (PackageInstallException)
+            {
+                throw;
+            }
+            catch (InvalidDataException exception)
+            {
+                throw InvalidArchive(reference, exception);
+            }
+            catch (InvalidOperationException exception)
+            {
+                throw InvalidArchive(reference, exception);
+            }
+
+            long sizeBytes = CalculateDirectorySize(stagedContentPath);
+            CacheMetadataEntry entry = new()
+            {
+                DownloadDateTime =
+                    _timeProvider.GetUtcNow().UtcDateTime,
+                SizeBytes = sizeBytes,
+                SourcePublicationDate = options.SourcePublicationDate,
+                ArchiveSha256 = options.ArchiveSha256
+                    ?? acquiredContent.Sha256
+            };
+
+            PackageCacheInspection committedInspection;
             await _installLock.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                bool targetExists = Directory.Exists(targetDirectory);
-                if (targetExists && !options.OverwriteExisting)
+                await RecoverNoLockAsync(ct).ConfigureAwait(false);
+                PackageCacheInspection currentInspection =
+                    await _validator.InspectAsync(cacheKey, ct)
+                        .ConfigureAwait(false);
+                ThrowIfInstallCannotReplace(
+                    cacheKey,
+                    currentInspection,
+                    options);
+                await _committer.CommitInstallAsync(
+                        cacheKey,
+                        currentInspection,
+                        stagingDirectory,
+                        acquiredContent.OperationId,
+                        entry,
+                        ct)
+                    .ConfigureAwait(false);
+                committedInspection = await _validator.InspectAsync(
+                        cacheKey,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (committedInspection.State
+                    != PackageCacheInspectionState.Valid)
                 {
                     throw new PackageInstallException(
                         PackageInstallErrorCode.CommitFailed,
                         PackageInstallStage.Commit,
-                        $"Package {reference.FhirDirective} is already installed. " +
-                        "Set OverwriteExisting to true to overwrite.",
+                        "The committed package is not readable.",
                         reference.FhirDirective);
-                }
-
-                Directory.CreateDirectory(backupRoot);
-                string? targetParent = Path.GetDirectoryName(targetDirectory);
-                if (targetParent is not null)
-                    Directory.CreateDirectory(targetParent);
-
-                bool commitSucceeded = false;
-                try
-                {
-                    string stagedContentPath;
-                    PackageManifest manifest;
-                    try
-                    {
-                        await using FileStream archiveStream =
-                            acquiredContent.OpenArchiveRead();
-                        ArchiveExtractionMetrics metrics =
-                            await TarballExtractor.ExtractAsync(
-                                    archiveStream,
-                                    stagingDirectory,
-                                    effectiveLimits,
-                                    reference.FhirDirective,
-                                    ct)
-                                .ConfigureAwait(false);
-                        _logger.LogDebug(
-                            "Extracted {EntryCount} entries and {ExpandedBytes} bytes for {Directive}.",
-                            metrics.EntryCount,
-                            metrics.ExpandedBytes,
-                            reference.FhirDirective);
-
-                        PackageArchiveInventory inventory = metrics.Inventory
-                            ?? throw new PackageInstallException(
-                                PackageInstallErrorCode.InvalidArchive,
-                                PackageInstallStage.ArchiveValidation,
-                                "Package archive inventory was not produced.",
-                                reference.FhirDirective);
-                        PackageArchiveLayoutResult layout =
-                            TarballExtractor.ValidateAndNormalizePackageStructure(
-                                stagingDirectory,
-                                inventory,
-                                reference.FhirDirective);
-                        PackageIdentityValidationResult identity =
-                            await PackageIdentityValidator.ValidateExpectedAsync(
-                                    layout.ManifestPath,
-                                    identityExpectation,
-                                    reference.FhirDirective,
-                                    ct)
-                                .ConfigureAwait(false);
-
-                        if (!identity.CacheKey.Equals(cacheKey))
-                        {
-                            throw new PackageInstallException(
-                                PackageInstallErrorCode.InvalidPackageIdentity,
-                                PackageInstallStage.IdentityValidation,
-                                "Validated package identity does not match the cache target.",
-                                reference.FhirDirective);
-                        }
-
-                        stagedContentPath = layout.ContentPath;
-                        manifest = identity.Manifest;
-                    }
-                    catch (PackageInstallException)
-                    {
-                        throw;
-                    }
-                    catch (InvalidDataException exception)
-                    {
-                        throw InvalidArchive(reference, exception);
-                    }
-                    catch (InvalidOperationException exception)
-                    {
-                        throw InvalidArchive(reference, exception);
-                    }
-
-                    long sizeBytes = CalculateDirectorySize(stagedContentPath);
-                    CacheMetadataEntry entry = new CacheMetadataEntry
-                    {
-                        DownloadDateTime = _timeProvider.GetUtcNow().UtcDateTime,
-                        SizeBytes = sizeBytes,
-                        SourcePublicationDate = options.SourcePublicationDate,
-                        ArchiveSha256 = options.ArchiveSha256
-                            ?? acquiredContent.Sha256
-                    };
-                    MetadataFileSnapshot metadataBefore =
-                        await CaptureMetadataFileNoLockAsync(ct)
-                            .ConfigureAwait(false);
-
-                    ct.ThrowIfCancellationRequested();
-
-                    bool backupCreated = false;
-                    bool replacementPromoted = false;
-                    try
-                    {
-                        if (targetExists)
-                        {
-                            Directory.Move(targetDirectory, backupDirectory);
-                            backupCreated = true;
-                        }
-
-                        Directory.Move(stagingDirectory, targetDirectory);
-                        replacementPromoted = true;
-                        await UpdateMetadataNoLockAsync(
-                                reference,
-                                entry,
-                                CancellationToken.None)
-                            .ConfigureAwait(false);
-                        commitSucceeded = true;
-                    }
-                    catch (UnauthorizedAccessException exception)
-                    {
-                        await RollbackInstallNoLockAsync(
-                                reference,
-                                targetDirectory,
-                                backupDirectory,
-                                backupCreated,
-                                replacementPromoted,
-                                metadataBefore)
-                            .ConfigureAwait(false);
-                        throw CommitFailure(reference, exception);
-                    }
-                    catch (IOException exception)
-                    {
-                        await RollbackInstallNoLockAsync(
-                                reference,
-                                targetDirectory,
-                                backupDirectory,
-                                backupCreated,
-                                replacementPromoted,
-                                metadataBefore)
-                            .ConfigureAwait(false);
-                        throw CommitFailure(reference, exception);
-                    }
-
-                    TryDeleteDirectory(
-                        backupDirectory,
-                        "backup directory after successful package replacement");
-
-                    string contentPath = Path.Combine(
-                        targetDirectory,
-                        PackageSubdirectory);
-                    return new PackageRecord
-                    {
-                        Reference = reference,
-                        DirectoryPath = targetDirectory,
-                        ContentPath = contentPath,
-                        Manifest = manifest,
-                        InstalledAt = entry.DownloadDateTime,
-                        SizeBytes = sizeBytes
-                    };
-                }
-                finally
-                {
-                    TryDeleteDirectory(
-                        stagingDirectory,
-                        "expanded staging directory after package installation");
-
-                    if (!commitSucceeded && !Directory.Exists(targetDirectory))
-                    {
-                        TryRestoreBackup(
-                            backupDirectory,
-                            targetDirectory,
-                            "backup directory during final rollback");
-                    }
                 }
             }
             finally
             {
                 _installLock.Release();
             }
+
+            return new PackageRecord
+            {
+                Reference = reference,
+                DirectoryPath = committedInspection.TargetPath,
+                ContentPath = committedInspection.ContentPath!,
+                Manifest = manifest,
+                InstalledAt = entry.DownloadDateTime,
+                SizeBytes = sizeBytes
+            };
         }
         finally
         {
@@ -451,24 +418,42 @@ public class DiskPackageCache : IPackageCache, IDisposable
     }
 
     /// <inheritdoc />
-    public async Task<bool> RemoveAsync(PackageReference reference, CancellationToken ct = default)
+    public async Task<bool> RemoveAsync(
+        PackageReference reference,
+        CancellationToken ct = default)
     {
-        string directoryPath = GetPackageDirectoryPath(reference);
-        if (!Directory.Exists(directoryPath))
-            return false;
-
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
         await _installLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (!Directory.Exists(directoryPath))
+            await RecoverNoLockAsync(ct).ConfigureAwait(false);
+            PackageCacheInspection inspection =
+                await _validator.InspectAsync(cacheKey, ct)
+                    .ConfigureAwait(false);
+            if (inspection.State == PackageCacheInspectionState.Missing)
+            {
+                CacheMetadataEntry? staleEntry =
+                    await _metadataStore.GetEntryAsync(cacheKey, ct)
+                        .ConfigureAwait(false);
+                if (staleEntry is not null)
+                {
+                    await _metadataStore.SetEntryAsync(
+                            cacheKey,
+                            entry: null,
+                            mutation: null,
+                            ct)
+                        .ConfigureAwait(false);
+                }
+
                 return false;
+            }
 
-            Directory.Delete(directoryPath, recursive: true);
-
-            // Remove from metadata
-            await RemoveFromMetadataNoLockAsync(reference, ct).ConfigureAwait(false);
-
-            return true;
+            return await _committer.RemoveAsync(
+                    cacheKey,
+                    inspection,
+                    Guid.NewGuid().ToString("N"),
+                    ct)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -482,39 +467,32 @@ public class DiskPackageCache : IPackageCache, IDisposable
         await _installLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (!Directory.Exists(CacheDirectory))
-                return 0;
-
+            await RecoverNoLockAsync(ct).ConfigureAwait(false);
+            List<(PackageCacheKey Key, string Path)> targets =
+                EnumeratePackageTargets().ToList();
             int count = 0;
-
-            List<(PackageCacheKey Key, string DirectoryPath)> packageDirectories =
-                EnumeratePackageDirectories().ToList();
-
-            foreach ((PackageCacheKey _, string directoryPath) in packageDirectories)
+            foreach ((PackageCacheKey cacheKey, string _) in targets)
             {
                 ct.ThrowIfCancellationRequested();
-                try
-                {
-                    Directory.Delete(directoryPath, recursive: true);
+                PackageCacheInspection inspection =
+                    await _validator.InspectAsync(cacheKey, ct)
+                        .ConfigureAwait(false);
+                if (inspection.State == PackageCacheInspectionState.Missing)
+                    continue;
+
+                bool removed = await _committer.RemoveAsync(
+                        cacheKey,
+                        inspection,
+                        Guid.NewGuid().ToString("N"),
+                        ct)
+                    .ConfigureAwait(false);
+                if (removed)
                     count++;
-                }
-                catch (IOException)
-                {
-                    // Skip directories that cannot be deleted (in use, permissions, etc.)
-                }
             }
 
-            foreach (string scopeDirectory in Directory.GetDirectories(CacheDirectory, "@*"))
-            {
-                if (!Directory.EnumerateFileSystemEntries(scopeDirectory).Any())
-                    Directory.Delete(scopeDirectory);
-            }
-
-            // Clear metadata file
-            string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
-            if (File.Exists(metadataPath))
-                File.Delete(metadataPath);
-
+            RemoveEmptyScopeDirectories();
+            await _metadataStore.ClearManagedEntriesAsync(ct)
+                .ConfigureAwait(false);
             return count;
         }
         finally
@@ -524,28 +502,55 @@ public class DiskPackageCache : IPackageCache, IDisposable
     }
 
     /// <inheritdoc />
-    public async Task<PackageManifest?> ReadManifestAsync(PackageReference reference, CancellationToken ct = default)
+    public async Task<PackageManifest?> ReadManifestAsync(
+        PackageReference reference,
+        CancellationToken ct = default)
     {
-        string contentPath = GetContentPath(reference);
-        if (!Directory.Exists(contentPath))
-            return null;
-
-        return await ReadManifestFromPathAsync(contentPath, ct).ConfigureAwait(false);
+        PackageCacheInspection inspection = await InspectAsync(reference, ct)
+            .ConfigureAwait(false);
+        return inspection.State == PackageCacheInspectionState.Valid
+            ? inspection.Manifest
+            : null;
     }
 
     /// <inheritdoc />
-    public async Task<PackageIndex?> GetIndexAsync(PackageReference reference, CancellationToken ct = default)
+    public async Task<PackageIndex?> GetIndexAsync(
+        PackageReference reference,
+        CancellationToken ct = default)
     {
-        string contentPath = GetContentPath(reference);
-        if (!Directory.Exists(contentPath))
-            return null;
+        await _installLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await RecoverNoLockAsync(ct).ConfigureAwait(false);
+            PackageCacheInspection inspection =
+                await _validator.InspectAsync(reference, ct)
+                    .ConfigureAwait(false);
+            if (inspection.State != PackageCacheInspectionState.Valid)
+                return null;
 
-        string indexPath = Path.Combine(contentPath, IndexFileName);
-        if (!File.Exists(indexPath))
-            return null;
+            string indexPath = Path.Combine(
+                inspection.ContentPath!,
+                IndexFileName);
+            if (!File.Exists(indexPath))
+                return null;
 
-        await using FileStream stream = File.OpenRead(indexPath);
-        return await JsonSerializer.DeserializeAsync<PackageIndex>(stream, s_jsonOptions, ct).ConfigureAwait(false);
+            await using FileStream stream = new FileStream(
+                indexPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                16_384,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            return await JsonSerializer.DeserializeAsync<PackageIndex>(
+                    stream,
+                    s_jsonOptions,
+                    ct)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _installLock.Release();
+        }
     }
 
     /// <inheritdoc />
@@ -556,36 +561,59 @@ public class DiskPackageCache : IPackageCache, IDisposable
     {
         ArgumentNullException.ThrowIfNull(relativePath);
 
-        string contentPath = GetContentPath(reference);
-        if (!Directory.Exists(contentPath))
-            return null;
+        await _installLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await RecoverNoLockAsync(ct).ConfigureAwait(false);
+            PackageCacheInspection inspection =
+                await _validator.InspectAsync(reference, ct)
+                    .ConfigureAwait(false);
+            if (inspection.State != PackageCacheInspectionState.Valid)
+                return null;
 
-        string filePath = Path.GetFullPath(Path.Combine(contentPath, relativePath));
+            string contentPath = inspection.ContentPath!;
+            string filePath = Path.GetFullPath(
+                Path.Combine(contentPath, relativePath));
+            string containment = Path.GetRelativePath(contentPath, filePath);
+            if (Path.IsPathRooted(containment)
+                || containment == ".."
+                || containment.StartsWith(
+                    $"..{Path.DirectorySeparatorChar}",
+                    StringComparison.Ordinal)
+                || containment.StartsWith(
+                    $"..{Path.AltDirectorySeparatorChar}",
+                    StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "Relative path must not traverse outside the package directory.",
+                    nameof(relativePath));
+            }
 
-        // Path traversal protection
-        if (!filePath.StartsWith(Path.GetFullPath(contentPath), StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("Relative path must not traverse outside the package directory.", nameof(relativePath));
+            if (!File.Exists(filePath))
+                return null;
 
-        if (!File.Exists(filePath))
-            return null;
-
-        return await File.ReadAllTextAsync(filePath, ct).ConfigureAwait(false);
+            return await File.ReadAllTextAsync(filePath, ct)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _installLock.Release();
+        }
     }
 
     /// <inheritdoc />
     public string? GetPackageContentPath(PackageReference reference)
     {
-        string contentPath = GetContentPath(reference);
-        return Directory.Exists(contentPath) ? contentPath : null;
-    }
-
-    /// <inheritdoc />
-    public async Task<CacheMetadata> GetMetadataAsync(CancellationToken ct = default)
-    {
-        await _installLock.WaitAsync(ct).ConfigureAwait(false);
+        _installLock.Wait();
         try
         {
-            return await GetMetadataNoLockAsync(ct).ConfigureAwait(false);
+            RecoverNoLockAsync(CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            PackageCacheInspection inspection = _validator.Inspect(reference);
+            return inspection.State == PackageCacheInspectionState.Valid
+                ? inspection.ContentPath
+                : null;
         }
         finally
         {
@@ -593,87 +621,15 @@ public class DiskPackageCache : IPackageCache, IDisposable
         }
     }
 
-    private async Task<CacheMetadata> GetMetadataNoLockAsync(CancellationToken ct)
-    {
-        ct.ThrowIfCancellationRequested();
-
-        string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
-
-        int cacheVersion = 3;
-        if (ini.TryGetValue("cache", out IReadOnlyDictionary<string, string>? cacheSection)
-            && cacheSection.TryGetValue("version", out string? versionStr)
-            && int.TryParse(versionStr, out int parsed))
-        {
-            cacheVersion = parsed;
-        }
-
-        Dictionary<string, CacheMetadataEntry> packages = new Dictionary<string, CacheMetadataEntry>(StringComparer.OrdinalIgnoreCase);
-
-        if (ini.TryGetValue("packages", out IReadOnlyDictionary<string, string>? packagesSection))
-        {
-            // Also try to get sizes
-            ini.TryGetValue("package-sizes", out IReadOnlyDictionary<string, string>? sizesSection);
-            ini.TryGetValue(SourcePublicationDatesSection, out IReadOnlyDictionary<string, string>? publicationDatesSection);
-            ini.TryGetValue(ArchiveSha256Section, out IReadOnlyDictionary<string, string>? archiveSha256Section);
-
-            foreach ((string? directive, string? dateStr) in packagesSection)
-            {
-                DateTime? downloadDate = null;
-                if (DateTime.TryParseExact(dateStr, MetadataDateFormat,
-                    CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTime dt))
-                {
-                    downloadDate = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
-                }
-
-                long? sizeBytes = null;
-                if (sizesSection is not null
-                    && sizesSection.TryGetValue(directive, out string? sizeStr)
-                    && long.TryParse(sizeStr, out long size))
-                {
-                    sizeBytes = size;
-                }
-
-                DateTimeOffset? sourcePublicationDate = null;
-                if (publicationDatesSection is not null
-                    && publicationDatesSection.TryGetValue(directive, out string? publicationDateText)
-                    && DateTimeOffset.TryParse(
-                        publicationDateText,
-                        CultureInfo.InvariantCulture,
-                        DateTimeStyles.RoundtripKind,
-                        out DateTimeOffset parsedPublicationDate))
-                {
-                    sourcePublicationDate = parsedPublicationDate;
-                }
-
-                string? archiveSha256 = null;
-                if (archiveSha256Section is not null)
-                    archiveSha256Section.TryGetValue(directive, out archiveSha256);
-
-                packages[directive] = new CacheMetadataEntry
-                {
-                    DownloadDateTime = downloadDate ?? DateTime.MinValue,
-                    SizeBytes = sizeBytes,
-                    SourcePublicationDate = sourcePublicationDate,
-                    ArchiveSha256 = archiveSha256
-                };
-            }
-        }
-
-        return new CacheMetadata
-        {
-            CacheVersion = cacheVersion,
-            Packages = packages
-        };
-    }
-
     /// <inheritdoc />
-    public async Task UpdateMetadataAsync(PackageReference reference, CacheMetadataEntry entry, CancellationToken ct = default)
+    public async Task<CacheMetadata> GetMetadataAsync(
+        CancellationToken ct = default)
     {
         await _installLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await UpdateMetadataNoLockAsync(reference, entry, ct).ConfigureAwait(false);
+            await RecoverNoLockAsync(ct).ConfigureAwait(false);
+            return await _metadataStore.ReadAsync(ct).ConfigureAwait(false);
         }
         finally
         {
@@ -681,340 +637,266 @@ public class DiskPackageCache : IPackageCache, IDisposable
         }
     }
 
-    private async Task UpdateMetadataNoLockAsync(
+    /// <inheritdoc />
+    public async Task UpdateMetadataAsync(
         PackageReference reference,
         CacheMetadataEntry entry,
-        CancellationToken ct)
+        CancellationToken ct = default)
     {
-        ct.ThrowIfCancellationRequested();
-
+        ArgumentNullException.ThrowIfNull(entry);
         PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
-        string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
-
-        // Build mutable copy of the INI structure
-        Dictionary<string, Dictionary<string, string>> sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
-        foreach ((string? key, IReadOnlyDictionary<string, string>? value) in ini)
-        {
-            sections[key] = new Dictionary<string, string>(value, StringComparer.OrdinalIgnoreCase);
-        }
-
-        // Ensure required sections exist
-        EnsureSection(sections, "cache", new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["version"] = "3" });
-        EnsureSection(sections, "urls");
-        EnsureSection(sections, "local");
-        EnsureSection(sections, "packages");
-        EnsureSection(sections, "package-sizes");
-        EnsureSection(sections, SourcePublicationDatesSection);
-        EnsureSection(sections, ArchiveSha256Section);
-
-        string directive = cacheKey.MetadataKey;
-        string dateStr = entry.DownloadDateTime.ToString(MetadataDateFormat, CultureInfo.InvariantCulture);
-
-        // Update the packages section
-        sections["packages"].Remove(directive);
-        sections["packages"][directive] = dateStr;
-
-        // Update the package-sizes section
-        sections["package-sizes"].Remove(directive);
-        if (entry.SizeBytes.HasValue)
-        {
-            sections["package-sizes"][directive] = entry.SizeBytes.Value.ToString(CultureInfo.InvariantCulture);
-        }
-
-        sections[SourcePublicationDatesSection].Remove(directive);
-        if (entry.SourcePublicationDate.HasValue)
-        {
-            sections[SourcePublicationDatesSection][directive] =
-                entry.SourcePublicationDate.Value.ToString("O", CultureInfo.InvariantCulture);
-        }
-
-        sections[ArchiveSha256Section].Remove(directive);
-        if (entry.ArchiveSha256 is not null)
-        {
-            sections[ArchiveSha256Section][directive] = entry.ArchiveSha256;
-        }
-
-        await IniParser.WriteFileAsync(metadataPath, sections.ToDictionary(
-            kvp => kvp.Key,
-            kvp => (IReadOnlyDictionary<string, string>)kvp.Value,
-            StringComparer.OrdinalIgnoreCase), ct).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Removes a package entry from the cache metadata file.
-    /// </summary>
-    private async Task RemoveFromMetadataNoLockAsync(
-        PackageReference reference,
-        CancellationToken ct)
-    {
-        ct.ThrowIfCancellationRequested();
-
-        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
-        string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
-        if (!File.Exists(metadataPath))
-            return;
-
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini = await IniParser.ParseFileAsync(metadataPath, ct).ConfigureAwait(false);
-        Dictionary<string, Dictionary<string, string>> sections = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
-        foreach ((string? key, IReadOnlyDictionary<string, string>? value) in ini)
-        {
-            sections[key] = new Dictionary<string, string>(value, StringComparer.OrdinalIgnoreCase);
-        }
-
-        string directive = cacheKey.MetadataKey;
-
-        if (sections.TryGetValue("packages", out Dictionary<string, string>? pkgSection))
-            pkgSection.Remove(directive);
-
-        if (sections.TryGetValue("package-sizes", out Dictionary<string, string>? sizeSection))
-            sizeSection.Remove(directive);
-
-        if (sections.TryGetValue(SourcePublicationDatesSection, out Dictionary<string, string>? publicationSection))
-            publicationSection.Remove(directive);
-
-        if (sections.TryGetValue(ArchiveSha256Section, out Dictionary<string, string>? archiveHashSection))
-            archiveHashSection.Remove(directive);
-
-        await IniParser.WriteFileAsync(metadataPath, sections.ToDictionary(
-            kvp => kvp.Key,
-            kvp => (IReadOnlyDictionary<string, string>)kvp.Value,
-            StringComparer.OrdinalIgnoreCase), ct).ConfigureAwait(false);
-    }
-
-    private async Task<MetadataFileSnapshot> CaptureMetadataFileNoLockAsync(
-        CancellationToken ct)
-    {
-        string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
-        if (!File.Exists(metadataPath))
-            return new MetadataFileSnapshot(false, null);
-
-        byte[] content = await File.ReadAllBytesAsync(metadataPath, ct)
-            .ConfigureAwait(false);
-        return new MetadataFileSnapshot(true, content);
-    }
-
-    private async Task RestoreMetadataFileNoLockAsync(
-        PackageReference reference,
-        MetadataFileSnapshot snapshot)
-    {
-        string metadataPath = Path.Combine(CacheDirectory, MetadataFileName);
+        await _installLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (snapshot.Existed)
-            {
-                await File.WriteAllBytesAsync(
-                        metadataPath,
-                        snapshot.Content!,
-                        CancellationToken.None)
+            await RecoverNoLockAsync(ct).ConfigureAwait(false);
+            await _metadataStore.SetEntryAsync(
+                    cacheKey,
+                    entry,
+                    mutation: null,
+                    ct)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _installLock.Release();
+        }
+    }
+
+    async Task<PackageCacheInspection>
+        IHardenedPackageCacheCore.InspectAsync(
+            PackageReference reference,
+            CancellationToken cancellationToken) =>
+        await InspectAsync(reference, cancellationToken)
+            .ConfigureAwait(false);
+
+    async Task<PackageIdentityValidationResult>
+        IHardenedPackageCacheCore.DiscoverIdentityAsync(
+            string manifestPath,
+            string? directive,
+            CancellationToken cancellationToken) =>
+        await PackageIdentityValidator.DiscoverAsync(
+                manifestPath,
+                directive,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    internal async Task<PackageCacheInspection> InspectAsync(
+        PackageReference reference,
+        CancellationToken cancellationToken = default)
+    {
+        await _installLock.WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            await RecoverNoLockAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return await _validator.InspectAsync(
+                    reference,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _installLock.Release();
+        }
+    }
+
+    private async Task InspectInstallTargetAsync(
+        PackageCacheKey cacheKey,
+        InstallCacheOptions options,
+        CancellationToken cancellationToken)
+    {
+        await _installLock.WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            await RecoverNoLockAsync(cancellationToken)
+                .ConfigureAwait(false);
+            PackageCacheInspection inspection =
+                await _validator.InspectAsync(
+                        cacheKey,
+                        cancellationToken)
                     .ConfigureAwait(false);
-            }
-            else if (File.Exists(metadataPath))
+            ThrowIfInstallCannotReplace(cacheKey, inspection, options);
+        }
+        finally
+        {
+            _installLock.Release();
+        }
+    }
+
+    private static void ThrowIfInstallCannotReplace(
+        PackageCacheKey cacheKey,
+        PackageCacheInspection inspection,
+        InstallCacheOptions options)
+    {
+        if (inspection.State == PackageCacheInspectionState.Corrupt
+            && (options.CorruptCacheBehavior == CorruptCacheBehavior.Strict
+                || !inspection.IsRepairable))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.CorruptCache,
+                PackageInstallStage.CacheInspection,
+                $"Cached package '{cacheKey.DisplayReference.FhirDirective}' is corrupt: " +
+                $"{inspection.CorruptionReason}",
+                cacheKey.DisplayReference.FhirDirective);
+        }
+
+        if (inspection.State == PackageCacheInspectionState.Valid
+            && !options.OverwriteExisting)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.CommitFailed,
+                PackageInstallStage.Commit,
+                $"Package {cacheKey.DisplayReference.FhirDirective} is already installed. " +
+                "Set OverwriteExisting to true to overwrite.",
+                cacheKey.DisplayReference.FhirDirective);
+        }
+    }
+
+    private async Task RecoverNoLockAsync(
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _committer.RecoverAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (PackageCacheInjectedFaultException)
+        {
+            throw;
+        }
+        catch (PackageInstallException)
+        {
+            throw;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw RecoveryFailure(exception);
+        }
+        catch (IOException exception)
+        {
+            throw RecoveryFailure(exception);
+        }
+    }
+
+    private IEnumerable<(PackageCacheKey Key, string Path)>
+        EnumeratePackageTargets()
+    {
+        if (!Directory.Exists(CacheDirectory))
+            yield break;
+
+        foreach (string path in Directory.EnumerateFileSystemEntries(
+            CacheDirectory))
+        {
+            string name = Path.GetFileName(path);
+            if (string.Equals(
+                name,
+                ".fhirpkg",
+                StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (PackageCacheKey.TryParseRelativePath(
+                name,
+                out PackageCacheKey? unscopedKey))
             {
-                File.Delete(metadataPath);
+                yield return (unscopedKey!, path);
+                continue;
+            }
+
+            if (!name.StartsWith('@')
+                || !Directory.Exists(path))
+            {
+                continue;
+            }
+
+            foreach (string scopedPath in
+                Directory.EnumerateFileSystemEntries(path))
+            {
+                string relativePath = Path.GetRelativePath(
+                    CacheDirectory,
+                    scopedPath);
+                if (PackageCacheKey.TryParseRelativePath(
+                    relativePath,
+                    out PackageCacheKey? scopedKey))
+                {
+                    yield return (scopedKey!, scopedPath);
+                }
             }
         }
-        catch (UnauthorizedAccessException exception)
+    }
+
+    private void RemoveEmptyScopeDirectories()
+    {
+        foreach (string scopePath in Directory.GetDirectories(
+            CacheDirectory,
+            "@*",
+            SearchOption.TopDirectoryOnly))
         {
-            _logger.LogWarning(
-                exception,
-                "Failed to restore metadata while rolling back {Directive}.",
-                reference.FhirDirective);
-        }
-        catch (IOException exception)
-        {
-            _logger.LogWarning(
-                exception,
-                "Failed to restore metadata while rolling back {Directive}.",
-                reference.FhirDirective);
+            if (!Directory.EnumerateFileSystemEntries(scopePath).Any())
+                Directory.Delete(scopePath);
         }
     }
 
-    private async Task RollbackInstallNoLockAsync(
+    private static PackageRecord CreateRecord(
         PackageReference reference,
-        string targetDirectory,
-        string backupDirectory,
-        bool backupCreated,
-        bool replacementPromoted,
-        MetadataFileSnapshot metadataBefore)
+        PackageCacheInspection inspection,
+        CacheMetadataEntry? entry) =>
+        new()
+        {
+            Reference = reference,
+            DirectoryPath = inspection.TargetPath,
+            ContentPath = inspection.ContentPath!,
+            Manifest = inspection.Manifest!,
+            InstalledAt = entry?.DownloadDateTime,
+            SizeBytes = entry?.SizeBytes
+        };
+
+    private static long CalculateDirectorySize(string path)
     {
-        bool targetRemoved = !replacementPromoted
-            || TryDeleteDirectory(
-                targetDirectory,
-                "new package target during rollback");
-
-        if (backupCreated && targetRemoved)
+        long total = 0;
+        foreach (FileInfo file in new DirectoryInfo(path)
+            .EnumerateFiles("*", SearchOption.AllDirectories))
         {
-            TryRestoreBackup(
-                backupDirectory,
-                targetDirectory,
-                "prior package target during rollback");
+            checked
+            {
+                total += file.Length;
+            }
         }
 
-        await RestoreMetadataFileNoLockAsync(reference, metadataBefore)
-            .ConfigureAwait(false);
-    }
-
-    private bool TryDeleteDirectory(string directoryPath, string purpose)
-    {
-        if (!Directory.Exists(directoryPath))
-            return true;
-
-        try
-        {
-            Directory.Delete(directoryPath, recursive: true);
-            return true;
-        }
-        catch (UnauthorizedAccessException exception)
-        {
-            _logger.LogWarning(
-                exception,
-                "Failed to delete {Purpose} at '{DirectoryPath}'.",
-                purpose,
-                directoryPath);
-            return false;
-        }
-        catch (IOException exception)
-        {
-            _logger.LogWarning(
-                exception,
-                "Failed to delete {Purpose} at '{DirectoryPath}'.",
-                purpose,
-                directoryPath);
-            return false;
-        }
-    }
-
-    private bool TryRestoreBackup(
-        string backupDirectory,
-        string targetDirectory,
-        string purpose)
-    {
-        if (!Directory.Exists(backupDirectory) || Directory.Exists(targetDirectory))
-            return false;
-
-        try
-        {
-            Directory.Move(backupDirectory, targetDirectory);
-            return true;
-        }
-        catch (UnauthorizedAccessException exception)
-        {
-            _logger.LogWarning(
-                exception,
-                "Failed to restore {Purpose} from '{BackupDirectory}'.",
-                purpose,
-                backupDirectory);
-            return false;
-        }
-        catch (IOException exception)
-        {
-            _logger.LogWarning(
-                exception,
-                "Failed to restore {Purpose} from '{BackupDirectory}'.",
-                purpose,
-                backupDirectory);
-            return false;
-        }
+        return total;
     }
 
     private static PackageInstallException InvalidArchive(
         PackageReference reference,
+        string message) =>
+        new(
+            PackageInstallErrorCode.InvalidArchive,
+            PackageInstallStage.ArchiveValidation,
+            message,
+            reference.FhirDirective);
+
+    private static PackageInstallException InvalidArchive(
+        PackageReference reference,
         Exception exception) =>
-        new PackageInstallException(
+        new(
             PackageInstallErrorCode.InvalidArchive,
             PackageInstallStage.ArchiveValidation,
             $"Package {reference.FhirDirective} contains an invalid archive.",
             reference.FhirDirective,
             exception);
 
-    private static PackageInstallException CommitFailure(
-        PackageReference reference,
+    private static PackageInstallException RecoveryFailure(
         Exception exception) =>
-        new PackageInstallException(
-            PackageInstallErrorCode.CommitFailed,
-            PackageInstallStage.Commit,
-            $"Package {reference.FhirDirective} could not be committed to the cache.",
-            reference.FhirDirective,
-            exception);
-
-    private sealed record MetadataFileSnapshot(bool Existed, byte[]? Content);
-
-    /// <summary>
-    /// Reads and deserializes package.json from the given content directory.
-    /// </summary>
-    private static async Task<PackageManifest?> ReadManifestFromPathAsync(string contentPath, CancellationToken ct)
-    {
-        string manifestPath = Path.Combine(contentPath, ManifestFileName);
-        if (!File.Exists(manifestPath))
-            return null;
-
-        await using FileStream stream = File.OpenRead(manifestPath);
-        return await JsonSerializer.DeserializeAsync<PackageManifest>(stream, s_jsonOptions, ct).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Gets the full path to a package's root directory in the cache.
-    /// </summary>
-    private string GetPackageDirectoryPath(PackageReference reference)
-        => PackageCacheKey.Create(reference).GetPackageDirectoryPath(CacheDirectory);
-
-    /// <summary>
-    /// Gets the full path to a package's content directory (package/ subfolder).
-    /// </summary>
-    private string GetContentPath(PackageReference reference)
-        => Path.Combine(GetPackageDirectoryPath(reference), PackageSubdirectory);
-
-    private IEnumerable<(PackageCacheKey Key, string DirectoryPath)> EnumeratePackageDirectories()
-    {
-        foreach (string directoryPath in Directory.GetDirectories(CacheDirectory))
-        {
-            string directoryName = Path.GetFileName(directoryPath);
-            if (directoryName.StartsWith('.'))
-                continue;
-
-            if (PackageCacheKey.TryParseRelativePath(directoryName, out PackageCacheKey? unscopedKey))
-            {
-                yield return (unscopedKey!, directoryPath);
-                continue;
-            }
-
-            if (!directoryName.StartsWith('@'))
-                continue;
-
-            foreach (string scopedDirectoryPath in Directory.GetDirectories(directoryPath))
-            {
-                string relativePath = Path.GetRelativePath(CacheDirectory, scopedDirectoryPath);
-                if (PackageCacheKey.TryParseRelativePath(relativePath, out PackageCacheKey? scopedKey))
-                    yield return (scopedKey!, scopedDirectoryPath);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Calculates the total size of all files in a directory tree.
-    /// </summary>
-    private static long CalculateDirectorySize(string path)
-    {
-        if (!Directory.Exists(path))
-            return 0;
-
-        return new DirectoryInfo(path)
-            .EnumerateFiles("*", SearchOption.AllDirectories)
-            .Sum(f => f.Length);
-    }
-
-    /// <summary>
-    /// Ensures a section exists in the INI structure, using defaults if not present.
-    /// </summary>
-    private static void EnsureSection(
-        Dictionary<string, Dictionary<string, string>> sections,
-        string sectionName,
-        Dictionary<string, string>? defaults = null)
-    {
-        if (!sections.ContainsKey(sectionName))
-            sections[sectionName] = defaults ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-    }
+        new(
+            PackageInstallErrorCode.CoordinationFailed,
+            PackageInstallStage.Coordination,
+            "A pending cache transaction could not be recovered.",
+            innerException: exception);
 
     /// <inheritdoc />
     public void Dispose()
