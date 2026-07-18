@@ -74,12 +74,49 @@ public class DiskPackageCache :
         ILogger<DiskPackageCache>? logger,
         TimeProvider? timeProvider,
         PackageInstallLimits installLimits,
+        IPackageCacheContentionObserver contentionObserver)
+        : this(
+            cacheDirectory,
+            logger,
+            timeProvider,
+            installLimits,
+            SystemPackageCacheFileOperations.Instance,
+            NullPackageCacheFaultObserver.Instance,
+            contentionObserver)
+    {
+    }
+
+    internal DiskPackageCache(
+        string? cacheDirectory,
+        ILogger<DiskPackageCache>? logger,
+        TimeProvider? timeProvider,
+        PackageInstallLimits installLimits,
         IPackageCacheFileOperations fileOperations,
         IPackageCacheFaultObserver faultObserver)
+        : this(
+            cacheDirectory,
+            logger,
+            timeProvider,
+            installLimits,
+            fileOperations,
+            faultObserver,
+            NullPackageCacheContentionObserver.Instance)
+    {
+    }
+
+    internal DiskPackageCache(
+        string? cacheDirectory,
+        ILogger<DiskPackageCache>? logger,
+        TimeProvider? timeProvider,
+        PackageInstallLimits installLimits,
+        IPackageCacheFileOperations fileOperations,
+        IPackageCacheFaultObserver faultObserver,
+        IPackageCacheContentionObserver contentionObserver)
     {
         ArgumentNullException.ThrowIfNull(installLimits);
         ArgumentNullException.ThrowIfNull(fileOperations);
         ArgumentNullException.ThrowIfNull(faultObserver);
+        ArgumentNullException.ThrowIfNull(contentionObserver);
         installLimits.Validate();
 
         _logger = logger ?? NullLogger<DiskPackageCache>.Instance;
@@ -113,7 +150,9 @@ public class DiskPackageCache :
             journalStore,
             fileOperations,
             faultObserver);
-        _coordinator = new PackageCacheCoordinator(CacheDirectory);
+        _coordinator = new PackageCacheCoordinator(
+            CacheDirectory,
+            contentionObserver);
     }
 
     /// <inheritdoc />

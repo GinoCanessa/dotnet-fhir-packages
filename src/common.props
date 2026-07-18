@@ -7,11 +7,12 @@
 		<TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
-		<VersionPrefix>$([System.DateTime]::Now.ToString("yyyy.MMdd.HHmm"))</VersionPrefix>
-		<Version>$(VersionPrefix)</Version>
+		<VersionPrefix Condition="'$(VersionPrefix)' == ''">$([System.DateTime]::Now.ToString("yyyy.MMdd.HHmm"))</VersionPrefix>
+		<Version Condition="'$(Version)' == ''">$(VersionPrefix)</Version>
+		<PackageVersion Condition="'$(PackageVersion)' == ''">$(Version)</PackageVersion>
 		<AssemblyName>$(AssemblyName.Replace(' ', '_'))</AssemblyName>
-		<AssemblyVersion>$([System.DateTime]::Now.ToString("0.yyyy.MMdd.HHmm"))</AssemblyVersion>
-		<FileVersion>$([System.DateTime]::Now.ToString("0.yyyy.MMdd.HHmm"))</FileVersion>
+		<AssemblyVersion Condition="'$(AssemblyVersion)' == ''">$([System.DateTime]::Now.ToString("0.yyyy.MMdd.HHmm"))</AssemblyVersion>
+		<FileVersion Condition="'$(FileVersion)' == ''">$([System.DateTime]::Now.ToString("0.yyyy.MMdd.HHmm"))</FileVersion>
 		<Authors>GinoCanessa</Authors>
 		<Company>Gino Canessa</Company>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>

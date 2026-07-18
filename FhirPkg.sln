@@ -32,6 +32,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "workflows", "workflows", "{
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FhirPkg.ProcessTestHost", "test\FhirPkg.ProcessTestHost\FhirPkg.ProcessTestHost.csproj", "{D29499B0-4711-4B00-933A-4D04E48AA02F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FhirPkg.Qualification", "test\FhirPkg.Qualification\FhirPkg.Qualification.csproj", "{E395AAC1-5822-4C11-A44B-5E15F59BB13E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -58,6 +60,10 @@ Global
 		{D29499B0-4711-4B00-933A-4D04E48AA02F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D29499B0-4711-4B00-933A-4D04E48AA02F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D29499B0-4711-4B00-933A-4D04E48AA02F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E395AAC1-5822-4C11-A44B-5E15F59BB13E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E395AAC1-5822-4C11-A44B-5E15F59BB13E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E395AAC1-5822-4C11-A44B-5E15F59BB13E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E395AAC1-5822-4C11-A44B-5E15F59BB13E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -68,6 +74,7 @@ Global
 		{C1000000-0000-0000-0000-000000000001} = {A2000000-0000-0000-0000-000000000001}
 		{C2000000-0000-0000-0000-000000000001} = {A2000000-0000-0000-0000-000000000001}
 		{D29499B0-4711-4B00-933A-4D04E48AA02F} = {A2000000-0000-0000-0000-000000000001}
+		{E395AAC1-5822-4C11-A44B-5E15F59BB13E} = {A2000000-0000-0000-0000-000000000001}
 		{3D76841E-C6E3-4B9B-B517-9256CEEF0C90} = {6AB6B541-E345-4292-977D-9EF0C95D7E2A}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution

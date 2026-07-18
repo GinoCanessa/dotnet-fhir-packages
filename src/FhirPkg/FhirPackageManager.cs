@@ -76,7 +76,31 @@ public sealed class FhirPackageManager :
         FhirPackageManagerOptions options,
         ILoggerFactory? loggerFactory,
         PackageInstallLimits managerInstallLimits)
+        : this(
+            options,
+            loggerFactory,
+            managerInstallLimits,
+            NullPackageCacheContentionObserver.Instance)
     {
+    }
+
+    internal static FhirPackageManager CreateWithContentionObserver(
+        FhirPackageManagerOptions options,
+        IPackageCacheContentionObserver contentionObserver,
+        ILoggerFactory? loggerFactory = null) =>
+        new(
+            options,
+            loggerFactory,
+            ResolveManagerLimits(options),
+            contentionObserver);
+
+    private FhirPackageManager(
+        FhirPackageManagerOptions options,
+        ILoggerFactory? loggerFactory,
+        PackageInstallLimits managerInstallLimits,
+        IPackageCacheContentionObserver contentionObserver)
+    {
+        ArgumentNullException.ThrowIfNull(contentionObserver);
         _options = options;
         _managerInstallLimits = managerInstallLimits;
         ILoggerFactory factory = loggerFactory ?? NullLoggerFactory.Instance;
@@ -84,7 +108,12 @@ public sealed class FhirPackageManager :
         _logger = factory.CreateLogger<FhirPackageManager>();
 
         // Build cache
-        _cache = new DiskPackageCache(options.CachePath, null, null, managerInstallLimits);
+        _cache = new DiskPackageCache(
+            options.CachePath,
+            logger: null,
+            timeProvider: null,
+            installLimits: managerInstallLimits,
+            contentionObserver: contentionObserver);
 
         // Build HTTP client with configured timeout and redirect policy
         HttpClientHandler handler = new HttpClientHandler

@@ -1,13 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>
+    <TargetFramework>net10.0</TargetFramework>
     <LangVersion>14</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <OutputType>Exe</OutputType>
-    <RootNamespace>FhirPkg.ProcessTestHost</RootNamespace>
+    <RootNamespace>FhirPkg.Qualification</RootNamespace>
     <UsePublishedFhirPkg Condition="'$(UsePublishedFhirPkg)' == ''">false</UsePublishedFhirPkg>
   </PropertyGroup>
 
@@ -18,6 +18,23 @@
   <ItemGroup Condition="'$(UsePublishedFhirPkg)' == 'true'">
     <ProjectReference Remove="..\..\src\FhirPkg\FhirPkg.csproj" />
     <PackageReference Include="fhir-pkg-lib" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference
+      Include="..\FhirPkg.ProcessTestHost\FhirPkg.ProcessTestHost.csproj"
+      ReferenceOutputAssembly="false"
+      AdditionalProperties="UsePublishedFhirPkg=$(UsePublishedFhirPkg);FhirPkgQualificationPackageVersion=$(FhirPkgQualificationPackageVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="qualification-corpus.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Schemas\qualification-corpus.schema.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Schemas\qualification-report.schema.json" CopyToOutputDirectory="PreserveNewest" />
+    <AssemblyMetadata Include="FhirPkgQualificationMode" Value="$(UsePublishedFhirPkg)" />
+    <AssemblyMetadata
+      Include="FhirPkgQualificationPackageVersion"
+      Value="$(FhirPkgQualificationPackageVersion)" />
   </ItemGroup>
 
   <Target

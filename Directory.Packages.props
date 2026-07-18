@@ -18,6 +18,10 @@
     <PackageVersion Include="Microsoft.Extensions.Options" Version="10.0.9" />
     <PackageVersion Include="System.CommandLine" Version="2.*" />
     <PackageVersion Include="Spectre.Console" Version="0.*" />
+    <PackageVersion
+      Include="fhir-pkg-lib"
+      Version="[$(FhirPkgQualificationPackageVersion)]"
+      Condition="'$(UsePublishedFhirPkg)' == 'true' and '$(FhirPkgQualificationPackageVersion)' != ''" />
   </ItemGroup>
 
 </Project>

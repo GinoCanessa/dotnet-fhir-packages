@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GinoCanessa/dotnet-fhir-packages/qualification-report.schema.json",
+  "title": "FhirPkg local qualification report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "mode",
+    "validationOnly",
+    "corpusSha256",
+    "corpusHashAlgorithm",
+    "fhirPkgAssemblyVersion",
+    "framework",
+    "operatingSystem",
+    "startedUtc",
+    "completedUtc",
+    "success",
+    "artifacts",
+    "cases",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "mode": {
+      "enum": [
+        "source",
+        "published"
+      ]
+    },
+    "validationOnly": {
+      "type": "boolean"
+    },
+    "requestedPackageVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "packageVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fhirPkgAssemblyVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fhirPkgInformationalVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "corpusSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "corpusHashAlgorithm": {
+      "const": "canonical-json-sha256-v1"
+    },
+    "framework": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operatingSystem": {
+      "type": "string",
+      "minLength": 1
+    },
+    "startedUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "sourceUri",
+        "success"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "immutable",
+            "local",
+            "mutable"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceUri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "finalUri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "expectedSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "actualSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "hashMatch": {
+          "type": "boolean"
+        },
+        "compressedBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expandedBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "largestEntryBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "entryCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "publicationUtc": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "manifestName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifestVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifestDate": {
+          "type": "string",
+          "minLength": 1
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "failure": {
+          "$ref": "#/$defs/failure"
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "success",
+        "durationMilliseconds",
+        "details",
+        "failures"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "durationMilliseconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/detail"
+          }
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/failure"
+          }
+        }
+      }
+    },
+    "detail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exceptionType",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exceptionType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactCount",
+        "artifactFailures",
+        "caseCount",
+        "caseFailures"
+      ],
+      "properties": {
+        "artifactCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "artifactFailures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "caseCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "caseFailures": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -18,12 +18,25 @@ internal sealed class PackageCacheCoordinator
 
     private readonly string _cacheRoot;
     private readonly string _lockRoot;
+    private readonly IPackageCacheContentionObserver
+        _contentionObserver;
 
     internal PackageCacheCoordinator(string cacheRoot)
+        : this(
+            cacheRoot,
+            NullPackageCacheContentionObserver.Instance)
+    {
+    }
+
+    internal PackageCacheCoordinator(
+        string cacheRoot,
+        IPackageCacheContentionObserver contentionObserver)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
+        ArgumentNullException.ThrowIfNull(contentionObserver);
         _cacheRoot = Path.GetFullPath(cacheRoot);
         _lockRoot = Path.Combine(_cacheRoot, ".fhirpkg", "locks");
+        _contentionObserver = contentionObserver;
     }
 
     internal Task<PackageCacheLease> AcquireIdentityAsync(
@@ -130,12 +143,18 @@ internal sealed class PackageCacheCoordinator
             processLock.MarkSemaphoreHeld();
             stream = OpenLockFile(lockPath);
             int retryDelay = InitialRetryDelayMilliseconds;
+            int retryAttempt = 0;
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (PackageCacheFileLock.TryLock(stream))
                     return new PackageCacheLease(processLock, stream);
 
+                retryAttempt = checked(retryAttempt + 1);
+                _contentionObserver.OnRetry(
+                    new PackageCacheContentionEvent(
+                        logicalKey,
+                        retryAttempt));
                 await Task.Delay(retryDelay, cancellationToken)
                     .ConfigureAwait(false);
                 retryDelay = Math.Min(
@@ -180,11 +199,17 @@ internal sealed class PackageCacheCoordinator
             processLock.MarkSemaphoreHeld();
             stream = OpenLockFile(lockPath);
             int retryDelay = InitialRetryDelayMilliseconds;
+            int retryAttempt = 0;
             while (true)
             {
                 if (PackageCacheFileLock.TryLock(stream))
                     return new PackageCacheLease(processLock, stream);
 
+                retryAttempt = checked(retryAttempt + 1);
+                _contentionObserver.OnRetry(
+                    new PackageCacheContentionEvent(
+                        logicalKey,
+                        retryAttempt));
                 Thread.Sleep(retryDelay);
                 retryDelay = Math.Min(
                     retryDelay * 2,
@@ -324,6 +349,31 @@ internal sealed class PackageCacheCoordinator
             PackageInstallStage.Coordination,
             "The package cache coordination lock could not be acquired.",
             innerException: exception);
+}
+
+internal sealed record PackageCacheContentionEvent(
+    string LogicalKey,
+    int RetryAttempt);
+
+internal interface IPackageCacheContentionObserver
+{
+    void OnRetry(PackageCacheContentionEvent contentionEvent);
+}
+
+internal sealed class NullPackageCacheContentionObserver :
+    IPackageCacheContentionObserver
+{
+    internal static NullPackageCacheContentionObserver Instance
+        { get; } = new();
+
+    private NullPackageCacheContentionObserver()
+    {
+    }
+
+    public void OnRetry(
+        PackageCacheContentionEvent contentionEvent)
+    {
+    }
 }
 
 internal sealed class PackageCacheProcessLockEntry : IDisposable

@@ -23,6 +23,8 @@ internal static class Program
             arguments.ProgressPath,
             arguments.PauseFault,
             arguments.ReleasePath);
+        FileContentionObserver contentionObserver = new(
+            arguments.ContentionPath);
         PackageInstallLimits limits =
             PackageInstallLimits.ResolveManager(
                 new PackageInstallLimits());
@@ -32,7 +34,8 @@ internal static class Program
             timeProvider: null,
             limits,
             SystemPackageCacheFileOperations.Instance,
-            observer);
+            observer,
+            contentionObserver);
 
         try
         {
@@ -41,6 +44,11 @@ internal static class Program
                 "install" => await InstallAsync(
                         cache,
                         arguments,
+                        cancellationSource.Token)
+                    .ConfigureAwait(false),
+                "manager-install" => await ManagerInstallAsync(
+                        arguments,
+                        contentionObserver,
                         cancellationSource.Token)
                     .ConfigureAwait(false),
                 "import" => await ImportAsync(
@@ -169,6 +177,52 @@ internal static class Program
         return HostResult.FromRecord(record, source.BytesRead);
     }
 
+    private static async Task<HostResult> ManagerInstallAsync(
+        HostArguments arguments,
+        IPackageCacheContentionObserver contentionObserver,
+        CancellationToken cancellationToken)
+    {
+        PackageReference reference = new(
+            arguments.PackageName
+                ?? throw new ArgumentException(
+                    "--name is required for manager-install."),
+            arguments.PackageVersion
+                ?? throw new ArgumentException(
+                    "--version is required for manager-install."));
+        await using FileStream file = new(
+            arguments.ArchivePath
+                ?? throw new ArgumentException(
+                    "--archive is required for manager-install."),
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+        await using CountingBarrierStream source = new(
+            file,
+            arguments.CounterPath,
+            arguments.BarrierPath,
+            arguments.ReleasePath);
+        using FhirPackageManager manager =
+            FhirPackageManager.CreateWithContentionObserver(
+                new FhirPackageManagerOptions
+                {
+                    CachePath = arguments.CachePath,
+                    ResourceCacheSize = 0
+                },
+                contentionObserver);
+        PackageRecord record = await manager.InstallAsync(
+                reference,
+                source,
+                new PackageSourceInstallOptions
+                {
+                    OverwriteExisting = arguments.Overwrite,
+                    Progress = new FileProgressReporter(
+                        arguments.ProgressPath)
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+        return HostResult.FromRecord(record, source.BytesRead);
+    }
+
     private static async Task<HostResult> RemoveAsync(
         DiskPackageCache cache,
         HostArguments arguments,
@@ -263,6 +317,7 @@ internal sealed record HostArguments
     internal string? BarrierPath { get; init; }
     internal string? ReleasePath { get; init; }
     internal string? ProgressPath { get; init; }
+    internal string? ContentionPath { get; init; }
     internal string? ResultPath { get; init; }
     internal string? PauseFault { get; init; }
     internal int? CancelAfterMilliseconds { get; init; }
@@ -322,6 +377,7 @@ internal sealed record HostArguments
             BarrierPath = GetOptional(values, "barrier"),
             ReleasePath = GetOptional(values, "release"),
             ProgressPath = GetOptional(values, "progress"),
+            ContentionPath = GetOptional(values, "contention"),
             ResultPath = GetOptional(values, "result"),
             PauseFault = GetOptional(values, "pause-fault"),
             CancelAfterMilliseconds = cancelAfter,
@@ -491,6 +547,23 @@ internal sealed class FileProgressReporter(string? path) :
         HostFile.AppendLine(
             fullPath,
             $"{value.Phase}|{value.PackageId}");
+    }
+}
+
+internal sealed class FileContentionObserver(string? path) :
+    IPackageCacheContentionObserver
+{
+    public void OnRetry(
+        PackageCacheContentionEvent contentionEvent)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        string fullPath = Path.GetFullPath(path);
+        HostFile.AppendLine(
+            fullPath,
+            $"retry|{contentionEvent.RetryAttempt}|" +
+            contentionEvent.LogicalKey);
     }
 }
 

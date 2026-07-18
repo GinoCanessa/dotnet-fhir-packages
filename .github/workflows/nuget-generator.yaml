@@ -1,34 +1,233 @@
-name: Publish dotnet generator
-# Basics from https://docs.microsoft.com/en-us/azure/dev-spaces/how-to/github-actions
+name: Publish fhir-pkg-lib
+
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: ['Tests']
-    types: [completed]
-    branches:
-    - main
+    inputs:
+      version:
+        description: Three-component NuGet version (for example, 2026.717.1608)
+        required: true
+        type: string
+      tag:
+        description: Matching release tag (v<version>)
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    environment: nuget.org
+    timeout-minutes: 120
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: |
-            10.0
-            9.0
-            8.0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.302
+            9.0.119
+            8.0.423
 
-    - name: Build and Publish
-      run: |
-        dotnet restore src/FhirPkg/FhirPkg.csproj
-        dotnet restore src/FhirPkg.Cli/FhirPkg.Cli.csproj
-        dotnet build -c Release ./src/FhirPkg/FhirPkg.csproj
-        dotnet build -c Release ./src/FhirPkg.Cli/FhirPkg.Cli.csproj
-        dotnet pack -c Release --no-build ./src/FhirPkg/FhirPkg.csproj -o ./nupkg
-        dotnet pack -c Release --no-build ./src/FhirPkg.Cli/FhirPkg.Cli.csproj -o ./nupkg
-        dotnet nuget push ./nupkg/*.nupkg --api-key ${{ secrets.GINOC_NUGET }} --source https://api.nuget.org/v3/index.json
+      - name: Validate release inputs and tag
+        id: release
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          ./.github/scripts/Test-ReleaseInputs.ps1 `
+            -Version $env:RELEASE_VERSION `
+            -Tag $env:RELEASE_TAG
+
+      - name: Restore library
+        run: dotnet restore src/FhirPkg/FhirPkg.csproj
+
+      - name: Pack release artifact once
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          $packageDirectory = Join-Path '${{ runner.temp }}' 'release-package'
+          New-Item -ItemType Directory -Force -Path $packageDirectory | Out-Null
+          dotnet pack src/FhirPkg/FhirPkg.csproj `
+            --configuration Release `
+            --no-restore `
+            --output $packageDirectory `
+            "-p:VersionPrefix=$env:RELEASE_VERSION" `
+            "-p:Version=$env:RELEASE_VERSION" `
+            "-p:PackageVersion=$env:RELEASE_VERSION" `
+            "-p:AssemblyVersion=0.$env:RELEASE_VERSION" `
+            "-p:FileVersion=0.$env:RELEASE_VERSION" `
+            "-p:RepositoryCommit=$env:RELEASE_COMMIT"
+
+      - name: Verify package metadata and pre-upload hash
+        id: package
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          $packagePath = Join-Path `
+            '${{ runner.temp }}/release-package' `
+            "fhir-pkg-lib.$env:RELEASE_VERSION.nupkg"
+          ./.github/scripts/Test-ReleasePackage.ps1 `
+            -PackagePath $packagePath `
+            -Version $env:RELEASE_VERSION `
+            -RepositoryCommit $env:RELEASE_COMMIT
+
+      - name: Restore qualification against exact local package
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          NUGET_PACKAGES: ${{ runner.temp }}/qualification-global-packages
+        run: |
+          $packageDirectory = '${{ runner.temp }}/release-package'
+          $escapedPackageDirectory =
+            [System.Security.SecurityElement]::Escape($packageDirectory)
+          $configPath = Join-Path '${{ runner.temp }}' 'qualification.NuGet.Config'
+          @(
+            '<?xml version="1.0" encoding="utf-8"?>',
+            '<configuration>',
+            '  <packageSources>',
+            '    <clear />',
+            "    <add key=`"release`" value=`"$escapedPackageDirectory`" />",
+            '    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />',
+            '  </packageSources>',
+            '  <packageSourceMapping>',
+            '    <packageSource key="release">',
+            '      <package pattern="fhir-pkg-lib" />',
+            '    </packageSource>',
+            '    <packageSource key="nuget.org">',
+            '      <package pattern="Microsoft.*" />',
+            '      <package pattern="NETStandard.*" />',
+            '      <package pattern="runtime.*" />',
+            '      <package pattern="System.*" />',
+            '    </packageSource>',
+            '  </packageSourceMapping>',
+            '</configuration>'
+          ) | Set-Content -Encoding utf8 $configPath
+
+          dotnet restore test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
+            --configfile $configPath `
+            --force `
+            --no-cache `
+            "-p:UsePublishedFhirPkg=true" `
+            "-p:FhirPkgQualificationPackageVersion=$env:RELEASE_VERSION"
+
+      - name: Verify package-mode restore
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          NUGET_PACKAGES: ${{ runner.temp }}/qualification-global-packages
+        run: |
+          $assetsPath = 'test/FhirPkg.Qualification/obj/project.assets.json'
+          $assets = Get-Content -Raw $assetsPath | ConvertFrom-Json
+          $libraryName = "fhir-pkg-lib/$env:RELEASE_VERSION"
+          $library = $assets.libraries.PSObject.Properties[$libraryName].Value
+          if ($null -eq $library -or $library.type -ne 'package')
+          {
+            throw "Qualification did not restore exact package '$libraryName'."
+          }
+
+          $projectLibraries = @(
+            $assets.libraries.PSObject.Properties |
+              Where-Object { $_.Value.type -eq 'project' })
+          if ($projectLibraries.Name -match '(^|/)FhirPkg/')
+          {
+            throw 'Qualification unexpectedly restored the FhirPkg project reference.'
+          }
+
+          $restoredPackage = Join-Path `
+            $env:NUGET_PACKAGES `
+            "fhir-pkg-lib/$env:RELEASE_VERSION/fhir-pkg-lib.$env:RELEASE_VERSION.nupkg"
+          $restoredHash =
+            (Get-FileHash -Algorithm SHA256 $restoredPackage).Hash.ToLowerInvariant()
+          if ($restoredHash -cne '${{ steps.package.outputs.sha256 }}')
+          {
+            throw 'The restored package bytes do not match the qualified release artifact.'
+          }
+
+      - name: Qualify exact local package
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          NUGET_PACKAGES: ${{ runner.temp }}/qualification-global-packages
+        run: |
+          $cache = Join-Path '${{ runner.temp }}' 'qualification-cache'
+          $report = Join-Path '${{ runner.temp }}' 'qualification-report.json'
+          dotnet run `
+            --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
+            --configuration Release `
+            --no-restore `
+            "-p:UsePublishedFhirPkg=true" `
+            "-p:FhirPkgQualificationPackageVersion=$env:RELEASE_VERSION" `
+            -- `
+            --cache $cache `
+            --output $report `
+            --corpus test/FhirPkg.Qualification/qualification-corpus.json
+
+      - name: Confirm artifact remained unchanged
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+          PREUPLOAD_SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          $packagePath = '${{ steps.package.outputs.package_path }}'
+          $currentHash = (Get-FileHash -Algorithm SHA256 $packagePath).Hash.ToLowerInvariant()
+          if ($currentHash -cne $env:PREUPLOAD_SHA256)
+          {
+            throw 'The qualified package changed after verification.'
+          }
+
+          $metadata = [ordered]@{
+            version = $env:RELEASE_VERSION
+            tag = $env:RELEASE_TAG
+            repositoryCommit = $env:RELEASE_COMMIT
+            feed = 'https://api.nuget.org/v3/index.json'
+            preUploadSha256 = $currentHash
+            sdkVersion = (dotnet --version).Trim()
+            sdkCommit = (
+              (dotnet --info |
+                Where-Object { $_ -match '^\s*Commit:\s+\S+' } |
+                Select-Object -First 1) -replace '^\s*Commit:\s+', ''
+            ).Trim()
+          }
+          $metadata |
+            ConvertTo-Json |
+            Set-Content -Encoding utf8 '${{ runner.temp }}/release-metadata.json'
+
+      - name: Upload exact pre-upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: fhir-pkg-lib-${{ inputs.version }}-pre-upload
+          path: ${{ steps.package.outputs.package_path }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload qualification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: fhir-pkg-lib-${{ inputs.version }}-qualification
+          path: |
+            ${{ runner.temp }}/qualification-report.json
+            ${{ runner.temp }}/release-metadata.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Push exact package to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
+        run: >-
+          dotnet nuget push
+          "${{ steps.package.outputs.package_path }}"
+          --api-key "$NUGET_API_KEY"
+          --source https://api.nuget.org/v3/index.json
+          --no-symbols
