@@ -3,6 +3,7 @@
 using System.Text.Json;
 using FhirPkg.Installation;
 using FhirPkg.Models;
+using FhirPkg.Utilities;
 
 namespace FhirPkg.Cache;
 
@@ -145,7 +146,7 @@ internal sealed class PackageCacheJournalStore
         byte[] content = JsonSerializer.SerializeToUtf8Bytes(
             journal,
             s_jsonOptions);
-        await PackageCacheDurableFileWriter.WriteAsync(
+        await DurableFileWriter.WriteAsync(
                 journalPath,
                 content,
                 _fileOperations,

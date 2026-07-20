@@ -46,6 +46,71 @@ public sealed class PackageCacheCoordinatorTests
     }
 
     [Fact]
+    public async Task SameFileMutation_WaitsUntilLeaseIsReleased()
+    {
+        using TestDirectory directory = new();
+        PackageCacheCoordinator firstCoordinator =
+            new(directory.Path);
+        PackageCacheCoordinator secondCoordinator =
+            new(directory.Path);
+        string filePath = Path.Combine(
+            directory.Path,
+            "fhirpkg.lock.json");
+        await using PackageCacheLease first =
+            await firstCoordinator.AcquireFileMutationAsync(
+                filePath,
+                TestContext.Current.CancellationToken);
+
+        Task<PackageCacheLease> waiting =
+            secondCoordinator.AcquireFileMutationAsync(
+                filePath,
+                TestContext.Current.CancellationToken);
+        await Task.Delay(
+            TimeSpan.FromMilliseconds(75),
+            TestContext.Current.CancellationToken);
+        waiting.IsCompleted.ShouldBeFalse();
+
+        await first.DisposeAsync();
+        await using PackageCacheLease second =
+            await waiting.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task FileMutationsUseOneProcessCoordinationDomain()
+    {
+        using TestDirectory directory = new();
+        PackageCacheCoordinator firstCoordinator =
+            new(directory.Path);
+        PackageCacheCoordinator secondCoordinator =
+            new(directory.Path);
+        await using PackageCacheLease first =
+            await firstCoordinator.AcquireFileMutationAsync(
+                Path.Combine(
+                    directory.Path,
+                    "first.lock.json"),
+                TestContext.Current.CancellationToken);
+
+        Task<PackageCacheLease> waiting =
+            secondCoordinator.AcquireFileMutationAsync(
+                Path.Combine(
+                    directory.Path,
+                    "second.lock.json"),
+                TestContext.Current.CancellationToken);
+        await Task.Delay(
+            TimeSpan.FromMilliseconds(75),
+            TestContext.Current.CancellationToken);
+        waiting.IsCompleted.ShouldBeFalse();
+
+        await first.DisposeAsync();
+        await using PackageCacheLease second =
+            await waiting.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task DifferentIdentities_AcquireConcurrently()
     {
         using TestDirectory directory = new();

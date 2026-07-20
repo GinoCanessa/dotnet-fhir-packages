@@ -40,6 +40,14 @@ public record PackageClosure
     public IReadOnlyList<PackageReference> InstallOrder { get; init; } = [];
 
     /// <summary>
+    /// Complete active dependency-first replay order. Unlike
+    /// <see cref="InstallOrder"/>, this includes already-cached nodes and
+    /// preserves mutable installation aliases separately from exact
+    /// <see cref="Resolved"/> identities.
+    /// </summary>
+    public IReadOnlyList<PackageReference> ReplayOrder { get; init; } = [];
+
+    /// <summary>
     /// Alias dependencies that must be installed before their exact manifest
     /// identity and transitive dependencies can be resolved.
     /// </summary>

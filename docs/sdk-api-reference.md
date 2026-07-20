@@ -155,11 +155,13 @@ var results = await manager.InstallManyAsync(
 
 Reads a `package.json` manifest from `projectPath`, resolves the full transitive
 dependency closure, installs all resolved packages, and optionally writes a lock
-file.
+file. A current schema-v2 lock can bypass graph resolution only when its exact
+root directives and complete resolution-policy identity match this request.
 
 ```csharp
 var closure = await manager.RestoreAsync("./my-ig", new RestoreOptions
 {
+    LockFilePath = "./locks/fhirpkg.lock.json",
     ConflictStrategy = ConflictResolutionStrategy.HighestWins,
     WriteLockFile = true,
 });
@@ -388,11 +390,18 @@ Extends `InstallOptions` with dependency-resolution settings.
 ```csharp
 public class RestoreOptions : InstallOptions
 {
+    public string? LockFilePath { get; set; }                         // default: <project>/fhirpkg.lock.json
     public ConflictResolutionStrategy ConflictStrategy { get; set; } // default: HighestWins
     public bool WriteLockFile { get; set; }                          // default: true
     public int MaxDepth { get; set; }                                // default: 20
 }
 ```
+
+Relative `LockFilePath` values are resolved against the project directory;
+absolute values are unchanged. `WriteLockFile = false` prevents replacement
+but does not disable reading a current lock. `OverwriteExisting` controls cache
+replacement only and does not invalidate an otherwise current lock. The
+filename `.fhirpkg-restore.lock` is reserved for restore coordination.
 
 ### VersionResolveOptions
 
@@ -658,6 +667,7 @@ public record PackageClosure
     public required IReadOnlyDictionary<string, string> Missing { get; init; }
     public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; }
     public IReadOnlyList<PackageReference> InstallOrder { get; init; }
+    public IReadOnlyList<PackageReference> ReplayOrder { get; init; }
     public IReadOnlyList<PackageReference> BootstrapInstallOrder { get; init; }
     public bool InstallOrderIsComplete { get; init; }
     public bool IsComplete { get; }  // true when Missing and Failures are empty
@@ -666,6 +676,9 @@ public record PackageClosure
 
 `Resolved` always carries selected exact manifest identities. `InstallOrder`
 may preserve a mutable CI alias as the cache/install reference.
+`ReplayOrder` is the complete dependency-first plan, including cached nodes,
+used to persist a lock that can replay mutable aliases without losing their
+exact expected identities.
 `BootstrapInstallOrder` identifies CI aliases whose exact identity or
 authoritative dependency metadata is only available after installation; the
 manager installs those aliases and re-resolves before installing the final
@@ -694,19 +707,49 @@ public sealed record DependencyResolutionFailure
 
 ### PackageLockFile
 
-Lock file for deterministic restores.
+Schema-versioned input and output for deterministic restores.
 
 ```csharp
 public record PackageLockFile
 {
-    public required DateTime Updated { get; init; }
-    public required IReadOnlyDictionary<string, string> Dependencies { get; init; }
-    public IReadOnlyDictionary<string, string>? Missing { get; init; }
+   public const int CurrentSchemaVersion = 2;
 
-    public static PackageLockFile Load(string path);
-    public void Save(string path);
+   public int SchemaVersion { get; init; }
+   public required DateTime Updated { get; init; }
+   public string? RootPackage { get; init; }
+   public IReadOnlyList<string>? Roots { get; init; }
+   public PackageLockPolicy? Policy { get; init; }
+   public required IReadOnlyDictionary<string, string> Dependencies { get; init; }
+   public IReadOnlyList<string>? InstallOrder { get; init; }
+   public IReadOnlyDictionary<string, string>? Missing { get; init; }
+   public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; }
+
+   public static PackageLockFile Load(string path);
+   public static Task<PackageLockFile> LoadAsync(
+       string path,
+       CancellationToken cancellationToken = default);
+   public void Save(string path);
+   public Task SaveAsync(
+       string path,
+       CancellationToken cancellationToken = default);
+}
+
+public sealed record PackageLockPolicy
+{
+   public required ConflictResolutionStrategy ConflictStrategy { get; init; }
+   public required bool AllowPreRelease { get; init; }
+   public FhirRelease? PreferredFhirRelease { get; init; }
+   public required int MaxDepth { get; init; }
+   public required string VersionFixupHash { get; init; }
 }
 ```
+
+Schema-v1 files remain readable but are always stale because they cannot prove
+root or policy identity. Unknown future schemas throw `NotSupportedException`.
+Saving serializes fully before a durable same-directory atomic replacement;
+cancellation or pre-commit failure preserves the prior bytes. Manager restore
+also serializes writers for a requested lock path across processes and
+revalidates the project manifest immediately before replacement.
 
 ### PackageSearchCriteria
 

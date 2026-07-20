@@ -122,6 +122,7 @@ If your project contains a `package.json` with FHIR dependencies:
 ```csharp
 var closure = await manager.RestoreAsync("./my-ig-project", new RestoreOptions
 {
+    LockFilePath = "./locks/fhirpkg.lock.json",
     ConflictStrategy = ConflictResolutionStrategy.HighestWins,
     WriteLockFile = true,
     MaxDepth = 20,

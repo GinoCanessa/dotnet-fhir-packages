@@ -85,6 +85,25 @@ internal sealed class FhirSemVerRange
         return false;
     }
 
+    internal bool HasSatisfyingVersionAtOrBelow(
+        FhirSemVer ceiling,
+        bool allowPreRelease)
+    {
+        ArgumentNullException.ThrowIfNull(ceiling);
+
+        foreach (RangeAlternative alternative in _alternatives)
+        {
+            if (alternative.HasSatisfyingVersionAtOrBelow(
+                    ceiling,
+                    allowPreRelease))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static RangeAlternative ParseAlternative(string alternative, string fullExpression)
     {
         IReadOnlyList<string> rawTerms = SplitOnWhitespace(alternative);
@@ -328,6 +347,113 @@ internal sealed class FhirSemVerRange
     private static FormatException InvalidExpression(string expression) =>
         new($"Invalid semantic version range: '{expression}'.");
 
+    private static void AddCandidate(
+        List<FhirSemVer> candidates,
+        FhirSemVer candidate)
+    {
+        if (!candidates.Contains(candidate))
+            candidates.Add(candidate);
+    }
+
+    private static void AddNumericCandidates(
+        List<FhirSemVer> candidates,
+        int major,
+        int minor,
+        int patch,
+        bool allowPreRelease)
+    {
+        AddCandidate(
+            candidates,
+            FhirSemVer.CreateExact(
+                major,
+                minor,
+                patch));
+        if (!allowPreRelease)
+            return;
+
+        if (FhirSemVer.TryParse(
+                $"{major}.{minor}.{patch}--",
+                out FhirSemVer? minimumPrerelease))
+        {
+            AddCandidate(
+                candidates,
+                minimumPrerelease);
+        }
+    }
+
+    private static void AddSuccessorCandidates(
+        List<FhirSemVer> candidates,
+        FhirSemVer operand,
+        bool allowPreRelease)
+    {
+        if (operand.IsPreRelease)
+        {
+            string prerelease = operand.PreRelease!;
+            int suffixStart = prerelease.Length;
+            while (suffixStart > 0
+                   && char.IsAsciiDigit(
+                       prerelease[suffixStart - 1]))
+            {
+                suffixStart--;
+            }
+
+            string numericSuffix =
+                prerelease[suffixStart..];
+            string successorPrerelease =
+                numericSuffix.Length == 0
+                    ? $"{prerelease}-"
+                    : $"{prerelease}-{numericSuffix}";
+            if (FhirSemVer.TryParse(
+                    $"{operand.Major}.{operand.Minor}.{operand.Patch}-{successorPrerelease}",
+                    out FhirSemVer? successor))
+            {
+                AddCandidate(
+                    candidates,
+                    successor);
+            }
+
+            AddNumericCandidates(
+                candidates,
+                operand.Major,
+                operand.Minor,
+                operand.Patch,
+                allowPreRelease);
+            return;
+        }
+
+        if (operand.Patch < int.MaxValue)
+        {
+            AddNumericCandidates(
+                candidates,
+                operand.Major,
+                operand.Minor,
+                operand.Patch + 1,
+                allowPreRelease);
+            return;
+        }
+
+        if (operand.Minor < int.MaxValue)
+        {
+            AddNumericCandidates(
+                candidates,
+                operand.Major,
+                operand.Minor + 1,
+                0,
+                allowPreRelease);
+            return;
+        }
+
+        if (operand.Major < int.MaxValue)
+        {
+            AddNumericCandidates(
+                candidates,
+                operand.Major + 1,
+                0,
+                0,
+                allowPreRelease);
+        }
+    }
+
     private enum ConstraintOperator
     {
         Equal,
@@ -377,6 +503,57 @@ internal sealed class FhirSemVerRange
             }
 
             return true;
+        }
+
+        internal bool HasSatisfyingVersionAtOrBelow(
+            FhirSemVer ceiling,
+            bool allowPreRelease)
+        {
+            List<FhirSemVer> candidates = [];
+            AddCandidate(
+                candidates,
+                ceiling);
+            AddNumericCandidates(
+                candidates,
+                0,
+                0,
+                0,
+                allowPreRelease);
+
+            foreach (Constraint constraint in _constraints)
+            {
+                FhirSemVer operand = constraint.Operand;
+                if (!operand.IsWildcard
+                    && (allowPreRelease
+                        || !operand.IsPreRelease))
+                {
+                    AddCandidate(
+                        candidates,
+                        operand);
+                }
+
+                AddNumericCandidates(
+                    candidates,
+                    operand.Major,
+                    operand.Minor,
+                    operand.Patch,
+                    allowPreRelease);
+                if (constraint.Operator
+                    == ConstraintOperator.GreaterThan)
+                {
+                    AddSuccessorCandidates(
+                        candidates,
+                        operand,
+                        allowPreRelease);
+                }
+            }
+
+            return candidates.Any(
+                candidate =>
+                    candidate <= ceiling
+                    && (allowPreRelease
+                        || !candidate.IsPreRelease)
+                    && IsSatisfiedBy(candidate));
         }
     }
 }

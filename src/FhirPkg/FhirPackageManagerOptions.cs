@@ -169,6 +169,13 @@ public class PackageSourceInstallOptions : InstallOptions
 public class RestoreOptions : InstallOptions
 {
     /// <summary>
+    /// Optional lock file path. Relative paths are resolved against the project
+    /// directory. When omitted, <c>fhirpkg.lock.json</c> in the project
+    /// directory is used.
+    /// </summary>
+    public string? LockFilePath { get; set; }
+
+    /// <summary>
     /// Strategy for resolving version conflicts when multiple dependencies require
     /// different versions of the same package. Default: <see cref="ConflictResolutionStrategy.HighestWins"/>.
     /// </summary>

@@ -502,10 +502,15 @@ public sealed class FhirPackageManager :
             effectiveOptions);
         _ = RequireHardenedCache();
 
-        _logger.LogInformation("RestoreAsync starting for project at '{ProjectPath}'.", projectPath);
+        string fullProjectPath = Path.GetFullPath(projectPath);
+        _logger.LogInformation(
+            "RestoreAsync starting for project at '{ProjectPath}'.",
+            fullProjectPath);
 
         // Step 1: Read project manifest (package.json)
-        string manifestPath = Path.Combine(projectPath, ManifestFileName);
+        string manifestPath = Path.Combine(
+            fullProjectPath,
+            ManifestFileName);
         if (!File.Exists(manifestPath))
         {
             throw new FileNotFoundException(
@@ -516,21 +521,59 @@ public sealed class FhirPackageManager :
         PackageManifest manifest = JsonSerializer.Deserialize<PackageManifest>(manifestJson, s_jsonOptions)
             ?? throw new InvalidOperationException($"Failed to deserialize manifest at '{manifestPath}'.");
 
+        string lockFilePath = ResolveLockFilePath(
+            fullProjectPath,
+            effectiveOptions.LockFilePath);
+        await using PackageCacheLease? lockFileLease =
+            effectiveOptions.WriteLockFile
+                ? await AcquireLockFileLeaseAsync(
+                        lockFilePath,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : null;
+        if (lockFileLease is not null)
+        {
+            string leasedManifestJson =
+                await File.ReadAllTextAsync(
+                        manifestPath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (!string.Equals(
+                    manifestJson,
+                    leasedManifestJson,
+                    StringComparison.Ordinal))
+            {
+                manifestJson = leasedManifestJson;
+                manifest =
+                    JsonSerializer.Deserialize<PackageManifest>(
+                        manifestJson,
+                        s_jsonOptions)
+                    ?? throw new InvalidOperationException(
+                        $"Failed to deserialize manifest at '{manifestPath}'.");
+            }
+        }
+
         _logger.LogDebug("Read manifest: {Name}@{Version} with {DepCount} dependencies.",
             manifest.Name, manifest.Version, manifest.Dependencies?.Count ?? 0);
 
         // Step 2: Check for existing lock file
-        string lockFilePath = Path.Combine(projectPath, LockFileName);
         PackageClosure closure;
 
-        if (File.Exists(lockFilePath) && !installPolicy.OverwriteExisting)
+        if (File.Exists(lockFilePath))
         {
             _logger.LogDebug("Found existing lock file at '{LockFilePath}'.", lockFilePath);
 
-            PackageLockFile lockFile = await ReadLockFileAsync(lockFilePath, cancellationToken).ConfigureAwait(false);
+            PackageLockFile lockFile =
+                await PackageLockFile.LoadAsync(
+                        lockFilePath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
 
-            // Verify lock file is not stale (all manifest dependencies are in the lock file)
-            if (IsLockFileCurrent(manifest, lockFile))
+            if (IsLockFileCurrent(
+                    manifest,
+                    lockFile,
+                    installPolicy,
+                    _fixupPolicy))
             {
                 _logger.LogInformation("Lock file is current. Restoring from lock file.");
                 closure = await _dependencyResolver.RestoreFromLockFileAsync(lockFile, cancellationToken)
@@ -580,10 +623,39 @@ public sealed class FhirPackageManager :
             .ConfigureAwait(false);
 
         // Step 5: Write lock file if configured
-        if (effectiveOptions.WriteLockFile)
+        if (effectiveOptions.WriteLockFile && closure.IsComplete)
         {
-            await WriteLockFileAsync(lockFilePath, closure, cancellationToken).ConfigureAwait(false);
+            PackageLockFile lockFile = CreateLockFile(
+                manifest,
+                closure,
+                installPolicy,
+                _fixupPolicy);
+            await lockFile.SaveAsync(
+                    lockFilePath,
+                    async commitCancellationToken =>
+                    {
+                        string currentManifestJson =
+                            await File.ReadAllTextAsync(
+                                    manifestPath,
+                                    commitCancellationToken)
+                                .ConfigureAwait(false);
+                        if (!string.Equals(
+                                manifestJson,
+                                currentManifestJson,
+                                StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException(
+                                "The project manifest changed during restore; the lock file was not written.");
+                        }
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
             _logger.LogInformation("Lock file written to '{LockFilePath}'.", lockFilePath);
+        }
+        else if (effectiveOptions.WriteLockFile)
+        {
+            _logger.LogWarning(
+                "The dependency closure is incomplete; the existing lock file was not modified.");
         }
 
         return closure;
@@ -1183,6 +1255,23 @@ public sealed class FhirPackageManager :
                         localKey,
                         cancellationToken)
                     .ConfigureAwait(false);
+                if (cachedRecord is not null
+                    && expectedResolvedReference
+                        is PackageReference expectedCachedReference)
+                {
+                    _ = PackageIdentityValidator.ValidateExpected(
+                        cachedRecord.Manifest,
+                        new PackageIdentityExpectation
+                        {
+                            Kind =
+                                PackageIdentityExpectationKind.Alias,
+                            Reference = requestedReference,
+                            ExpectedManifestReference =
+                                expectedCachedReference,
+                        },
+                        directive);
+                }
+
                 await InstallCachedDependenciesIfRequestedAsync(
                         cachedRecord,
                         policy,
@@ -1196,6 +1285,47 @@ public sealed class FhirPackageManager :
                 directive);
             ReportProgress(policy.Progress, requestedReference.Name, PackageProgressPhase.Failed);
             return null;
+        }
+
+        if (!policy.OverwriteExisting
+            && parsedDirective.VersionType
+                is VersionType.CiBuild
+                    or VersionType.CiBuildBranch
+            && expectedResolvedReference
+                is PackageReference expectedCachedAlias)
+        {
+            PackageCacheKey aliasKey = requestedCacheKey!;
+            if (await IsInstalledAsync(
+                    aliasKey,
+                    cancellationToken)
+                .ConfigureAwait(false))
+            {
+                PackageRecord? cachedRecord =
+                    await GetCachedPackageAsync(
+                            aliasKey,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                if (cachedRecord is not null
+                    && cachedRecord.Manifest.Name.Equals(
+                        expectedCachedAlias.Name,
+                        StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(
+                        cachedRecord.Manifest.Version,
+                        expectedCachedAlias.Version,
+                        StringComparison.Ordinal))
+                {
+                    _logger.LogInformation(
+                        "Cached package alias {Alias} matches locked identity {Identity}.",
+                        requestedReference.FhirDirective,
+                        expectedCachedAlias.FhirDirective);
+                    await InstallCachedDependenciesIfRequestedAsync(
+                            cachedRecord,
+                            policy,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    return cachedRecord;
+                }
+            }
         }
 
         if (parsedDirective.VersionType == VersionType.Exact && !policy.OverwriteExisting)
@@ -1235,14 +1365,22 @@ public sealed class FhirPackageManager :
             return null;
         }
 
+        bool preservesAlias = parsedDirective.VersionType
+            is VersionType.CiBuild or VersionType.CiBuildBranch;
+        bool resolvedIdentityIsExact =
+            PackageDirective.ClassifyVersion(
+                resolved.Reference.Version)
+            == VersionType.Exact;
         if (expectedResolvedReference is PackageReference expected
             && (!resolved.Reference.Name.Equals(
                     expected.Name,
                     StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(
-                    resolved.Reference.Version,
-                    expected.Version,
-                    StringComparison.Ordinal)))
+                || (!preservesAlias
+                        || resolvedIdentityIsExact)
+                    && !string.Equals(
+                        resolved.Reference.Version,
+                        expected.Version,
+                        StringComparison.Ordinal)))
         {
             throw new PackageInstallException(
                 PackageInstallErrorCode.InvalidPackageIdentity,
@@ -1269,8 +1407,6 @@ public sealed class FhirPackageManager :
                 requestedReference.FhirDirective);
         }
 
-        bool preservesAlias = parsedDirective.VersionType
-            is VersionType.CiBuild or VersionType.CiBuildBranch;
         PackageReference? expectedManifestReference =
             expectedResolvedReference;
         if (preservesAlias
@@ -2421,7 +2557,8 @@ public sealed class FhirPackageManager :
                 installationReference.Version);
         return (referenceType
                     is VersionType.CiBuild
-                        or VersionType.CiBuildBranch)
+                        or VersionType.CiBuildBranch
+                        or VersionType.LocalBuild)
             && closure.Resolved.TryGetValue(
                 installationReference.Name,
                 out PackageReference selectedReference)
@@ -2432,81 +2569,549 @@ public sealed class FhirPackageManager :
     /// <summary>
     /// Determines whether an existing lock file covers all dependencies in the manifest.
     /// </summary>
-    private static bool IsLockFileCurrent(PackageManifest manifest, PackageLockFile lockFile)
+    private static bool IsLockFileCurrent(
+        PackageManifest manifest,
+        PackageLockFile lockFile,
+        ResolvedPackageInstallPolicy policy,
+        PackageFixupPolicy fixupPolicy)
     {
-        if (manifest.Dependencies is null || manifest.Dependencies.Count == 0)
-            return true;
-
-        // The lock file is stale if any manifest dependency is missing or has a changed version specifier
-        foreach ((string? name, string? versionSpecifier) in manifest.Dependencies)
+        if (lockFile.SchemaVersion
+                != PackageLockFile.CurrentSchemaVersion
+            || !RootPackageMatches(
+                manifest,
+                lockFile.RootPackage)
+            || lockFile.Roots is null
+            || lockFile.Dependencies is null
+            || lockFile.InstallOrder is null
+            || lockFile.Policy is null
+            || lockFile.Missing is { Count: > 0 }
+            || lockFile.Failures is null
+            || lockFile.Failures.Count > 0
+            || lockFile.Policy.ConflictStrategy
+                != policy.ConflictStrategy
+            || lockFile.Policy.AllowPreRelease
+                != policy.AllowPreRelease
+            || lockFile.Policy.PreferredFhirRelease
+                != policy.PreferredFhirRelease
+            || lockFile.Policy.MaxDepth != policy.MaxDepth
+            || !string.Equals(
+                lockFile.Policy.VersionFixupHash,
+                fixupPolicy.IdentityHash,
+                StringComparison.Ordinal))
         {
-            if (!lockFile.Dependencies.TryGetValue(name, out string? lockedVersion))
-                return false;
+            return false;
+        }
 
-            // If the version specifier changed (e.g., "4.0.x" → "5.0.x"), the lock file is stale
-            if (!string.Equals(versionSpecifier, lockedVersion, StringComparison.Ordinal)
-                && !IsVersionSatisfiedBy(versionSpecifier, lockedVersion))
+        IReadOnlyDictionary<string, string?> expectedRoots =
+            CreateRootMap(manifest.Dependencies);
+        if (lockFile.Roots.Count != expectedRoots.Count)
+            return false;
+
+        Dictionary<string, string?> lockedRoots =
+            new(StringComparer.OrdinalIgnoreCase);
+        List<PackageDirective> lockedRootDirectives = [];
+        try
+        {
+            foreach (string root in lockFile.Roots)
+            {
+                PackageDirective directive =
+                    PackageDirective.Parse(root);
+                lockedRootDirectives.Add(directive);
+                if (!lockedRoots.TryAdd(
+                        directive.PackageId,
+                        directive.RequestedVersion))
+                {
+                    return false;
+                }
+            }
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        if (lockedRoots.Count != expectedRoots.Count)
+            return false;
+
+        foreach (KeyValuePair<string, string?> root in expectedRoots)
+        {
+            if (!lockedRoots.TryGetValue(
+                    root.Key,
+                    out string? lockedVersion)
+                || !string.Equals(
+                    root.Value,
+                    lockedVersion,
+                    StringComparison.Ordinal))
+            {
                 return false;
+            }
+        }
+
+        if (policy.ConflictStrategy
+                == ConflictResolutionStrategy.FirstWins
+            && !RootOrderMatches(
+                expectedRoots,
+                lockedRootDirectives))
+        {
+            return false;
+        }
+
+        return HasValidLockedDependencies(
+            lockedRootDirectives,
+            lockFile.Dependencies,
+            lockFile.InstallOrder,
+            fixupPolicy,
+            lockFile.Policy.AllowPreRelease,
+            lockFile.Policy.ConflictStrategy);
+    }
+
+    private static string ResolveLockFilePath(
+        string fullProjectPath,
+        string? configuredPath)
+    {
+        string resolvedPath;
+        if (configuredPath is null)
+        {
+            resolvedPath =
+                Path.Combine(
+                    fullProjectPath,
+                    LockFileName);
+        }
+        else if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            throw new ArgumentException(
+                "LockFilePath cannot be empty.",
+                nameof(configuredPath));
+        }
+        else if (Path.IsPathFullyQualified(configuredPath))
+        {
+            resolvedPath =
+                Path.GetFullPath(configuredPath);
+        }
+        else if (Path.IsPathRooted(configuredPath))
+        {
+            throw new ArgumentException(
+                "LockFilePath must be fully qualified or relative to the project directory.",
+                nameof(configuredPath));
+        }
+        else
+        {
+            resolvedPath = Path.GetFullPath(
+                Path.Combine(
+                    fullProjectPath,
+                    configuredPath));
+        }
+
+        string coordinationPath = Path.Combine(
+            Path.GetDirectoryName(resolvedPath)
+                ?? throw new ArgumentException(
+                    "LockFilePath must have a parent directory.",
+                    nameof(configuredPath)),
+            ".fhirpkg-restore.lock");
+        if (string.Equals(
+                resolvedPath,
+                coordinationPath,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                "LockFilePath cannot use the reserved '.fhirpkg-restore.lock' coordination filename.",
+                nameof(configuredPath));
+        }
+
+        return resolvedPath;
+    }
+
+    private static Task<PackageCacheLease>
+        AcquireLockFileLeaseAsync(
+            string lockFilePath,
+            CancellationToken cancellationToken)
+    {
+        string directoryPath =
+            Path.GetDirectoryName(lockFilePath)
+            ?? throw new InvalidOperationException(
+                "The lock file path does not have a parent directory.");
+        PackageCacheCoordinator coordinator =
+            new(directoryPath);
+        return coordinator.AcquireFileMutationAsync(
+            lockFilePath,
+            cancellationToken);
+    }
+
+    private static bool HasValidLockedDependencies(
+        IReadOnlyList<PackageDirective> roots,
+        IReadOnlyDictionary<string, string> dependencies,
+        IReadOnlyList<string> installOrder,
+        PackageFixupPolicy fixupPolicy,
+        bool allowPreRelease,
+        ConflictResolutionStrategy conflictStrategy)
+    {
+        Dictionary<string, string> dependencyPins =
+            new(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (KeyValuePair<string, string> dependency
+                     in dependencies)
+            {
+                if (!dependencyPins.TryAdd(
+                        dependency.Key,
+                        dependency.Value))
+                    return false;
+
+                if (!FhirSemVer.TryParse(
+                        dependency.Value,
+                        out FhirSemVer? parsedVersion)
+                    || parsedVersion.IsWildcard
+                    || (!allowPreRelease
+                        && parsedVersion.IsPreRelease))
+                {
+                    return false;
+                }
+            }
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        HashSet<string> installedNames =
+            new(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (string directiveText in installOrder)
+            {
+                PackageDirective directive =
+                    PackageDirective.Parse(
+                        directiveText);
+                if (!installedNames.Add(
+                        directive.PackageId)
+                    || !dependencyPins.TryGetValue(
+                        directive.PackageId,
+                        out string? exactVersion))
+                {
+                    return false;
+                }
+
+                if (directive.VersionType == VersionType.Exact)
+                {
+                    if (!string.Equals(
+                            directive.RequestedVersion,
+                            exactVersion,
+                            StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+                }
+                else if (directive.VersionType
+                    is not VersionType.CiBuild
+                    and not VersionType.CiBuildBranch
+                    and not VersionType.LocalBuild)
+                {
+                    return false;
+                }
+            }
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        if (installedNames.Count != dependencyPins.Count)
+            return false;
+        if (roots.Count == 0)
+            return dependencyPins.Count == 0;
+
+        bool hasEarlierEffectiveRoot = false;
+        foreach (PackageDirective root in roots)
+        {
+            if (root.ExpandedPackageIds is { Count: > 0 })
+            {
+                foreach (string candidate
+                         in root.ExpandedPackageIds)
+                {
+                    if (!LockedRootIsRepresented(
+                            root,
+                            candidate,
+                            dependencyPins,
+                            fixupPolicy,
+                            conflictStrategy,
+                            allowPreRelease,
+                            hasEarlierEffectiveRoot))
+                    {
+                        return false;
+                    }
+
+                    hasEarlierEffectiveRoot = true;
+                }
+
+                continue;
+            }
+
+            if (!LockedRootIsRepresented(
+                    root,
+                    root.PackageId,
+                    dependencyPins,
+                    fixupPolicy,
+                    conflictStrategy,
+                    allowPreRelease,
+                    hasEarlierEffectiveRoot))
+            {
+                return false;
+            }
+
+            hasEarlierEffectiveRoot = true;
         }
 
         return true;
     }
 
-    /// <summary>
-    /// Checks whether a locked exact version could plausibly satisfy the given version specifier.
-    /// This is a heuristic: exact versions satisfy themselves, and wildcard/range specifiers
-    /// are checked via <see cref="FhirSemVer.Satisfies"/>.
-    /// </summary>
-    private static bool IsVersionSatisfiedBy(string specifier, string lockedVersion)
+    private static bool RootPackageMatches(
+        PackageManifest manifest,
+        string? lockedRootPackage)
     {
-        // If the specifier IS the locked version, it's satisfied
-        if (string.Equals(specifier, lockedVersion, StringComparison.Ordinal))
-            return true;
+        if (string.IsNullOrWhiteSpace(lockedRootPackage))
+            return false;
 
-        // Try to parse both and check satisfaction
-        if (FhirSemVer.TryParse(lockedVersion, out FhirSemVer? lockedSemVer)
-            && FhirSemVer.TryParse(specifier, out FhirSemVer? specifierSemVer))
+        try
         {
-            // If the specifier is a wildcard or range, check if the locked version satisfies it
-            if (specifierSemVer.IsWildcard)
-                return lockedSemVer.Satisfies(specifier);
+            PackageReference lockedReference =
+                PackageReference.Parse(lockedRootPackage);
+            return lockedReference.Name.Equals(
+                    manifest.Name,
+                    StringComparison.OrdinalIgnoreCase)
+                && string.Equals(
+                    lockedReference.Version,
+                    manifest.Version,
+                    StringComparison.Ordinal);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool RootOrderMatches(
+        IReadOnlyDictionary<string, string?> expectedRoots,
+        IReadOnlyList<PackageDirective> lockedRoots)
+    {
+        int index = 0;
+        foreach (KeyValuePair<string, string?> expected
+                 in expectedRoots)
+        {
+            PackageDirective locked = lockedRoots[index++];
+            if (!locked.PackageId.Equals(
+                    expected.Key,
+                    StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    locked.RequestedVersion,
+                    expected.Value,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
         }
 
-        // For "latest", "current", range expressions (^, ~), assume the lock file may be stale
-        return false;
+        return true;
     }
 
-    /// <summary>
-    /// Reads a lock file from disk.
-    /// </summary>
-    private static async Task<PackageLockFile> ReadLockFileAsync(
-        string path,
-        CancellationToken cancellationToken)
+    private static bool LockedRootIsRepresented(
+        PackageDirective root,
+        string candidateName,
+        IReadOnlyDictionary<string, string> dependencyPins,
+        PackageFixupPolicy fixupPolicy,
+        ConflictResolutionStrategy conflictStrategy,
+        bool allowPreRelease,
+        bool allowFirstWinsSupersession)
     {
-        string json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<PackageLockFile>(json, s_jsonOptions)
-            ?? throw new InvalidOperationException($"Failed to deserialize lock file at '{path}'.");
-    }
-
-    /// <summary>
-    /// Writes a lock file to disk from a resolved closure.
-    /// </summary>
-    private static async Task WriteLockFileAsync(
-        string path,
-        PackageClosure closure,
-        CancellationToken cancellationToken)
-    {
-        PackageLockFile lockFile = new PackageLockFile
+        PackageReference requestedReference =
+            PackageFixups.Apply(
+                new PackageReference(
+                    candidateName,
+                    root.RequestedVersion),
+                fixupPolicy);
+        if (!dependencyPins.TryGetValue(
+                requestedReference.Name,
+                out string? lockedVersion))
         {
+            return false;
+        }
+
+        if (!FhirSemVer.TryParse(
+                lockedVersion,
+                out FhirSemVer? lockedSemanticVersion)
+            || lockedSemanticVersion.IsWildcard)
+        {
+            return false;
+        }
+
+        if (root.VersionType == VersionType.Exact
+            && requestedReference.Version is string exactVersion)
+        {
+            if (!FhirSemVer.TryParse(
+                    exactVersion,
+                    out FhirSemVer? requestedSemanticVersion)
+                || requestedSemanticVersion.IsWildcard
+                || (!allowPreRelease
+                    && requestedSemanticVersion.IsPreRelease))
+            {
+                return false;
+            }
+
+            return string.Equals(
+                    exactVersion,
+                    lockedVersion,
+                    StringComparison.Ordinal)
+                || (conflictStrategy
+                        == ConflictResolutionStrategy.HighestWins
+                    && lockedSemanticVersion
+                        > requestedSemanticVersion)
+                || (conflictStrategy
+                        == ConflictResolutionStrategy.FirstWins
+                    && allowFirstWinsSupersession);
+        }
+
+        if (root.VersionType
+                is VersionType.Range
+                    or VersionType.Wildcard
+            && root.RequestedVersion is string rangeExpression
+            && FhirSemVerRange.TryParse(
+                rangeExpression,
+                out FhirSemVerRange? range))
+        {
+            return range.IsSatisfiedBy(
+                    lockedSemanticVersion)
+                || (conflictStrategy
+                        == ConflictResolutionStrategy.HighestWins
+                    && range.HasSatisfyingVersionAtOrBelow(
+                        lockedSemanticVersion,
+                        allowPreRelease))
+                || (conflictStrategy
+                        == ConflictResolutionStrategy.FirstWins
+                    && allowFirstWinsSupersession);
+        }
+
+        return true;
+    }
+
+    private static PackageLockFile CreateLockFile(
+        PackageManifest manifest,
+        PackageClosure closure,
+        ResolvedPackageInstallPolicy policy,
+        PackageFixupPolicy fixupPolicy) =>
+        new()
+        {
+            SchemaVersion =
+                PackageLockFile.CurrentSchemaVersion,
             Updated = closure.Timestamp,
-            Dependencies = closure.Resolved.ToDictionary(
-                kvp => kvp.Key,
-                kvp => kvp.Value.Version ?? string.Empty),
-            Missing = closure.Missing.Count > 0 ? closure.Missing : null
+            RootPackage = new PackageReference(
+                    manifest.Name,
+                    manifest.Version)
+                .FhirDirective,
+            Roots = CreateRootDirectives(
+                manifest.Dependencies),
+            Policy = new PackageLockPolicy
+            {
+                ConflictStrategy =
+                    policy.ConflictStrategy,
+                AllowPreRelease =
+                    policy.AllowPreRelease,
+                PreferredFhirRelease =
+                    policy.PreferredFhirRelease,
+                MaxDepth = policy.MaxDepth,
+                VersionFixupHash =
+                    fixupPolicy.IdentityHash,
+            },
+            Dependencies = closure.Resolved
+                .OrderBy(
+                    pair => pair.Key,
+                    StringComparer.OrdinalIgnoreCase)
+                .ThenBy(
+                    pair => pair.Key,
+                    StringComparer.Ordinal)
+                .ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value.Version
+                        ?? throw new InvalidOperationException(
+                            $"Resolved package '{pair.Key}' did not contain an exact version."),
+                    StringComparer.OrdinalIgnoreCase),
+            InstallOrder = CreateLockInstallOrder(
+                closure),
+            Missing = null,
+            Failures = [],
         };
 
-        string json = JsonSerializer.Serialize(lockFile, s_jsonOptions);
-        await File.WriteAllTextAsync(path, json, cancellationToken).ConfigureAwait(false);
+    private static IReadOnlyList<string> CreateLockInstallOrder(
+        PackageClosure closure)
+    {
+        List<PackageReference> order = [];
+        HashSet<string> included =
+            new(StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<PackageReference> preferredOrder =
+            closure.ReplayOrder.Count > 0
+                ? closure.ReplayOrder
+                : closure.InstallOrder;
+        foreach (PackageReference reference in preferredOrder)
+        {
+            if (included.Add(reference.Name))
+                order.Add(reference);
+        }
+
+        IEnumerable<PackageReference> missing =
+            closure.Resolved.Values
+                .Where(reference =>
+                    !included.Contains(
+                        reference.Name))
+                .OrderBy(
+                    reference => reference.Name,
+                    StringComparer.OrdinalIgnoreCase)
+                .ThenBy(
+                    reference => reference.Name,
+                    StringComparer.Ordinal);
+        order.AddRange(missing);
+        return order.Select(
+                reference => reference.FhirDirective)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> CreateRootDirectives(
+        IReadOnlyDictionary<string, string>? dependencies) =>
+        CreateRootMap(dependencies)
+            .Select(
+                pair => new PackageReference(
+                    pair.Key,
+                    pair.Value)
+                .FhirDirective)
+            .ToArray();
+
+    private static IReadOnlyDictionary<string, string?>
+        CreateRootMap(
+            IReadOnlyDictionary<string, string>? dependencies)
+    {
+        Dictionary<string, string?> roots =
+            new(StringComparer.OrdinalIgnoreCase);
+        if (dependencies is null)
+            return roots;
+
+        foreach (KeyValuePair<string, string> dependency
+                 in dependencies)
+        {
+            roots.Add(
+                dependency.Key,
+                dependency.Value);
+        }
+
+        return roots;
     }
 
     /// <summary>

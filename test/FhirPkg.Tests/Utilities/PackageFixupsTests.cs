@@ -190,6 +190,32 @@ public class PackageFixupsTests
     }
 
     [Fact]
+    public void ConfiguredPolicy_IdentityHash_IsDeterministic()
+    {
+        PackageFixupPolicy first = PackageFixupPolicy.Create(
+            new Dictionary<string, string>
+            {
+                ["Example.Package@1.0.0"] = "1.0.1",
+                ["other.package@2.0.0"] = "2.0.1",
+            });
+        PackageFixupPolicy reordered = PackageFixupPolicy.Create(
+            new Dictionary<string, string>
+            {
+                ["other.package@2.0.0"] = "2.0.1",
+                ["example.package@1.0.0"] = "1.0.1",
+            });
+        PackageFixupPolicy changed = PackageFixupPolicy.Create(
+            new Dictionary<string, string>
+            {
+                ["other.package@2.0.0"] = "2.0.1",
+                ["example.package@1.0.0"] = "1.0.2",
+            });
+
+        first.IdentityHash.ShouldBe(reordered.IdentityHash);
+        changed.IdentityHash.ShouldNotBe(first.IdentityHash);
+    }
+
+    [Fact]
     public void ConfiguredPolicy_CanonicalizesCiBuildSourcesAndTargets()
     {
         PackageFixupPolicy policy = PackageFixupPolicy.Create(

@@ -90,6 +90,29 @@ The closure records:
   failures
 - **Completeness:** A closure is complete when there are no failures
 
+## Restore Locks
+
+`RestoreAsync` persists complete closures in a schema-v2 lock. In addition to
+the flattened exact dependency versions, the lock records:
+
+- the exact direct root directives from the project manifest;
+- the exact project package name and version used for root back-edge checks;
+- conflict strategy, prerelease policy, preferred FHIR release, and max depth;
+- a deterministic identity hash of the active version-fixup policy; and
+- the complete dependency-first replay order, preserving mutable aliases while
+  the dependency map retains exact expected manifest identities; and
+- structured resolution failures, which are empty in every newly written lock.
+
+The lock fast path requires exact root-set, project identity, and policy
+equality. Package names are compared case-insensitively while version text
+remains ordinal and case-sensitive. Root order is also significant for
+`FirstWins`. Every dependency value must be a concrete semantic-version pin and
+each effective root must be represented. Removing or reordering an applicable
+root, changing project identity or any policy input, or loading a
+legacy/incomplete lock forces graph resolution. A complete highest-wins result
+contains only the active winner and its reachable descendants; superseded nodes
+and their failures are not installed or locked.
+
 ## Circular Dependency Prevention
 
 The resolver tracks active parent edges rather than using one global visited

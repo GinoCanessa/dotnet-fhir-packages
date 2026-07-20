@@ -75,25 +75,49 @@ internal static class RestoreCommand
 
             try
             {
+                if (maxDepth < 0)
+                {
+                    CommandHelpers.WriteErrorOutput(
+                        globalOpts,
+                        "--max-depth cannot be negative.");
+                    return ExitCodes.InvalidArgs;
+                }
+
+                FhirRelease? preferredFhirRelease = null;
+                if (fhirVersion is not null)
+                {
+                    if (!TryParseFhirReleaseName(
+                            fhirVersion,
+                            out FhirRelease release))
+                    {
+                        CommandHelpers.WriteErrorOutput(
+                            globalOpts,
+                            $"Unsupported FHIR release '{fhirVersion}'.");
+                        return ExitCodes.InvalidArgs;
+                    }
+
+                    preferredFhirRelease = release;
+                }
+
                 FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
                 FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
 
                 RestoreOptions restoreOptions = new RestoreOptions
                 {
+                    LockFilePath = lockFile,
                     ConflictStrategy = conflictStrategy,
                     WriteLockFile = !noLock,
-                    MaxDepth = maxDepth
+                    MaxDepth = maxDepth,
+                    PreferredFhirRelease =
+                        preferredFhirRelease,
                 };
-
-                if (fhirVersion is not null && Enum.TryParse<FhirRelease>(fhirVersion, ignoreCase: true, out FhirRelease release))
-                {
-                    restoreOptions.PreferredFhirRelease = release;
-                }
 
                 if (globalOpts.Verbose)
                 {
                     ConsoleOutput.WriteVerbose($"Restoring from: {Path.GetFullPath(projectPath)}");
                     ConsoleOutput.WriteVerbose($"Conflict strategy: {conflictStrategy}");
+                    ConsoleOutput.WriteVerbose(
+                        $"Lock file: {lockFile ?? "fhirpkg.lock.json"}");
                 }
 
                 PackageClosure closure;
@@ -146,4 +170,24 @@ internal static class RestoreCommand
         return command;
     }
 
+    private static bool TryParseFhirReleaseName(
+        string value,
+        out FhirRelease release)
+    {
+        foreach (FhirRelease candidate
+                 in Enum.GetValues<FhirRelease>())
+        {
+            if (string.Equals(
+                    value,
+                    candidate.ToString(),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                release = candidate;
+                return true;
+            }
+        }
+
+        release = default;
+        return false;
+    }
 }

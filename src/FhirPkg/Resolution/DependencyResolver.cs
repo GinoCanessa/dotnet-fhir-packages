@@ -138,6 +138,7 @@ public class DependencyResolver : IDependencyResolver
             Missing = CreateMissingProjection(result.Failures),
             Failures = result.Failures,
             InstallOrder = result.InstallOrder,
+            ReplayOrder = result.ReplayOrder,
             BootstrapInstallOrder = result.BootstrapInstallOrder,
             InstallOrderIsComplete = true,
         };
@@ -150,83 +151,277 @@ public class DependencyResolver : IDependencyResolver
     {
         ArgumentNullException.ThrowIfNull(lockFile);
 
-        Dictionary<string, PackageReference> resolved = new Dictionary<string, PackageReference>(StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, string> missing = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, PackageReference> resolved =
+            new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> dependencyPins =
+            new(StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, string> dependency
+                 in lockFile.Dependencies)
+        {
+            if (!dependencyPins.TryAdd(
+                    dependency.Key,
+                    dependency.Value))
+            {
+                throw new InvalidDataException(
+                    $"Lock file contains duplicate dependency '{dependency.Key}'.");
+            }
+        }
+
+        Dictionary<string, string> missing =
+            new(StringComparer.OrdinalIgnoreCase);
         List<DependencyResolutionFailure> failures = [];
+        List<PackageReference> requestedReplayOrder = [];
+        HashSet<string> orderedNames =
+            new(StringComparer.OrdinalIgnoreCase);
+        foreach (string directive in lockFile.InstallOrder ?? [])
+        {
+            PackageReference reference =
+                PackageReference.Parse(directive);
+            if (!dependencyPins.ContainsKey(
+                    reference.Name)
+                || !orderedNames.Add(reference.Name))
+            {
+                throw new InvalidDataException(
+                    $"Lock installation directive '{directive}' did not identify exactly one locked dependency.");
+            }
+
+            requestedReplayOrder.Add(reference);
+        }
+
+        IEnumerable<PackageReference> unorderedReferences =
+            dependencyPins
+                .Where(dependency =>
+                    !orderedNames.Contains(
+                        dependency.Key))
+                .OrderBy(
+                    dependency => dependency.Key,
+                    StringComparer.OrdinalIgnoreCase)
+                .ThenBy(
+                    dependency => dependency.Key,
+                    StringComparer.Ordinal)
+                .Select(
+                    dependency =>
+                        new PackageReference(
+                            dependency.Key,
+                            dependency.Value));
+        requestedReplayOrder.AddRange(
+            unorderedReferences);
+
+        List<PackageReference> installOrder = [];
+        List<PackageReference> replayOrder = [];
 
         _logger.LogInformation(
             "Restoring {Count} locked dependencies from lock file (updated {Updated:O}).",
             lockFile.Dependencies.Count, lockFile.Updated);
 
-        foreach ((string? packageId, string? version) in lockFile.Dependencies)
+        foreach (PackageReference replayReference
+                 in requestedReplayOrder)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            PackageReference reference = new PackageReference(packageId, version);
-
-            // Check if the package is already in the local cache
-            bool isCached = await _cache.IsInstalledAsync(reference, cancellationToken).ConfigureAwait(false);
-            if (isCached)
+            string exactVersion =
+                dependencyPins[
+                    replayReference.Name];
+            PackageReference exactReference =
+                new PackageReference(
+                    replayReference.Name,
+                    exactVersion);
+            PackageReference installationReference =
+                replayReference;
+            bool replayIsCached =
+                await _cache.IsInstalledAsync(
+                        replayReference,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            bool staleReplayCache = false;
+            bool available = replayIsCached;
+            if (replayIsCached
+                && replayReference != exactReference)
             {
-                _logger.LogDebug("Package '{PackageId}@{Version}' found in cache.", packageId, version);
-                resolved[packageId] = reference;
-                continue;
+                PackageManifest? cachedManifest =
+                    await _cache.ReadManifestAsync(
+                            replayReference,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                available =
+                    cachedManifest is not null
+                    && cachedManifest.Name.Equals(
+                        exactReference.Name,
+                        StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(
+                        cachedManifest.Version,
+                        exactReference.Version,
+                        StringComparison.Ordinal);
+                staleReplayCache = !available;
             }
 
-            // Not cached — try to resolve and mark for download by the orchestrator
-            FhirSemVer? resolvedVersion = await _versionResolver.ResolveVersionAsync(
-                packageId, version, cancellationToken: cancellationToken).ConfigureAwait(false);
-
-            if (resolvedVersion is not null)
+            if (!available
+                && replayReference != exactReference
+                && await _cache.IsInstalledAsync(
+                        exactReference,
+                        cancellationToken)
+                    .ConfigureAwait(false))
             {
-                PackageReference resolvedRef = new PackageReference(packageId, resolvedVersion.ToString());
-                resolved[packageId] = resolvedRef;
-
-                _logger.LogDebug(
-                    "Locked package '{PackageId}@{Version}' resolved to '{ResolvedVersion}' (not cached, needs download).",
-                    packageId, version, resolvedVersion);
+                available = true;
+                installationReference =
+                    exactReference;
             }
-            else
+
+            if (!available)
             {
-                string message = $"Locked version '{version}' could not be resolved from any registry.";
-                missing[packageId] = message;
-                failures.Add(new DependencyResolutionFailure
+                VersionType replayType =
+                    PackageDirective.ClassifyVersion(
+                        replayReference.Version);
+                if (replayType == VersionType.Exact)
                 {
-                    Code = DependencyResolutionFailureCode.PackageNotFound,
-                    PackageId = packageId,
-                    VersionSpecifier = version,
-                    Message = message,
-                });
-                _logger.LogWarning(
-                    "Locked package '{PackageId}@{Version}' could not be resolved from any configured registry.",
-                    packageId, version);
-            }
-        }
-
-        // Also include any packages that were missing in the original lock file
-        if (lockFile.Missing is not null)
-        {
-            foreach ((string? packageId, string? versionConstraint) in lockFile.Missing)
-            {
-                if (!resolved.ContainsKey(packageId) && !missing.ContainsKey(packageId))
+                    FhirSemVer? resolvedVersion =
+                        await _versionResolver.ResolveVersionAsync(
+                                replayReference.Name,
+                                exactVersion,
+                                cancellationToken:
+                                    cancellationToken)
+                            .ConfigureAwait(false);
+                    available =
+                        resolvedVersion is not null
+                        && string.Equals(
+                            resolvedVersion.ToString(),
+                            exactVersion,
+                            StringComparison.Ordinal);
+                }
+                else if (replayType
+                    is VersionType.CiBuild
+                        or VersionType.CiBuildBranch)
                 {
-                    string message = $"Previously missing in lock file: '{versionConstraint}'";
-                    missing[packageId] = message;
-                    failures.Add(new DependencyResolutionFailure
+                    ResolvedDirective? resolvedDirective =
+                        await _registryClient.ResolveAsync(
+                                PackageDirective.Parse(
+                                    replayReference
+                                        .FhirDirective),
+                                cancellationToken:
+                                    cancellationToken)
+                            .ConfigureAwait(false);
+                    if (resolvedDirective is not null
+                        && resolvedDirective.Reference.Name.Equals(
+                            replayReference.Name,
+                            StringComparison.OrdinalIgnoreCase))
                     {
-                        Code = DependencyResolutionFailureCode.PackageNotFound,
-                        PackageId = packageId,
-                        VersionSpecifier = versionConstraint,
-                        Message = message,
-                    });
+                        VersionType resolvedType =
+                            PackageDirective.ClassifyVersion(
+                                resolvedDirective
+                                    .Reference.Version);
+                        available =
+                            resolvedType
+                                is VersionType.CiBuild
+                                    or VersionType.CiBuildBranch
+                            || (resolvedType
+                                    == VersionType.Exact
+                                && string.Equals(
+                                    resolvedDirective
+                                        .Reference.Version,
+                                    exactVersion,
+                                    StringComparison.Ordinal));
+                    }
                 }
             }
 
+            if (available)
+            {
+                resolved[replayReference.Name] =
+                    exactReference;
+                installOrder.Add(
+                    installationReference);
+                replayOrder.Add(replayReference);
+                continue;
+            }
+
+            if (staleReplayCache)
+            {
+                resolved[replayReference.Name] =
+                    exactReference;
+                installOrder.Add(replayReference);
+                replayOrder.Add(replayReference);
+            }
+
+            string message =
+                $"Locked package '{replayReference.FhirDirective}' with exact identity '{exactReference.FhirDirective}' was not available from the cache or configured registries.";
+            missing[replayReference.Name] =
+                message;
+            failures.Add(
+                new DependencyResolutionFailure
+                {
+                    Code =
+                        DependencyResolutionFailureCode
+                            .PackageNotFound,
+                    PackageId =
+                        replayReference.Name,
+                    VersionSpecifier =
+                        replayReference.Version,
+                    SelectedVersion =
+                        exactVersion,
+                    Message = message,
+                });
+            _logger.LogWarning(
+                "Locked package '{Directive}' with exact identity '{ExactDirective}' was not available.",
+                replayReference.FhirDirective,
+                exactReference.FhirDirective);
+        }
+
+        if (lockFile.Missing is not null)
+        {
+            foreach (KeyValuePair<string, string> entry
+                     in lockFile.Missing)
+            {
+                if (resolved.ContainsKey(entry.Key)
+                    || missing.ContainsKey(entry.Key))
+                {
+                    continue;
+                }
+
+                string message =
+                    $"Previously missing in lock file: '{entry.Value}'";
+                missing[entry.Key] = message;
+                failures.Add(
+                    new DependencyResolutionFailure
+                    {
+                        Code =
+                            DependencyResolutionFailureCode
+                                .PackageNotFound,
+                        PackageId = entry.Key,
+                        VersionSpecifier =
+                            entry.Value,
+                        Message = message,
+                    });
+            }
+        }
+
+        foreach (DependencyResolutionFailure lockedFailure
+                 in lockFile.Failures ?? [])
+        {
+            if (failures.Any(
+                    failure =>
+                        failure.PackageId.Equals(
+                            lockedFailure.PackageId,
+                            StringComparison.OrdinalIgnoreCase)
+                        && failure.Code
+                            == lockedFailure.Code
+                        && string.Equals(
+                            failure.VersionSpecifier,
+                            lockedFailure.VersionSpecifier,
+                            StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            failures.Add(lockedFailure);
+            missing.TryAdd(
+                lockedFailure.PackageId,
+                lockedFailure.Message);
         }
 
         _logger.LogInformation(
             "Lock file restore complete: {ResolvedCount} resolved, {MissingCount} missing.",
-            resolved.Count, missing.Count);
+            resolved.Count,
+            missing.Count);
 
         return new PackageClosure
         {
@@ -234,14 +429,8 @@ public class DependencyResolver : IDependencyResolver
             Resolved = resolved,
             Missing = missing,
             Failures = failures,
-            InstallOrder = resolved.Values
-                .OrderBy(
-                    reference => reference.Name,
-                    StringComparer.OrdinalIgnoreCase)
-                .ThenBy(
-                    reference => reference.Version,
-                    StringComparer.Ordinal)
-                .ToArray(),
+            InstallOrder = installOrder,
+            ReplayOrder = replayOrder,
             InstallOrderIsComplete = true,
         };
     }
@@ -745,7 +934,10 @@ public class DependencyResolver : IDependencyResolver
             return new DependencyGraphResult(
                 resolved,
                 failures,
-                CreateInstallOrder(),
+                CreateInstallOrder(
+                    includeCached: false),
+                CreateInstallOrder(
+                    includeCached: true),
                 CreateBootstrapInstallOrder());
         }
 
@@ -819,16 +1011,29 @@ public class DependencyResolver : IDependencyResolver
                                 winner.Version.ToString(),
                                 StringComparison.Ordinal))
                         .ToList();
-                ResolvedDependencyRequirement source =
+                ResolvedDependencyRequirement installationSource =
+                    selectedRequirements.FirstOrDefault(
+                        requirement =>
+                            IsMutableInstallationAlias(
+                                requirement
+                                    .InstallationReference))
+                    ?? selectedRequirements.FirstOrDefault(
+                        requirement =>
+                            !requirement.RequiresInstallation)
+                    ?? selectedRequirements.FirstOrDefault(
+                        requirement =>
+                            !requirement.BootstrapRequired)
+                    ?? winner;
+                ResolvedDependencyRequirement requirementMetadataSource =
                     selectedRequirements.FirstOrDefault(
                         requirement =>
                             !requirement.BootstrapRequired)
                     ?? selectedRequirements.FirstOrDefault(
                         requirement =>
                             !requirement.RequiresInstallation)
-                    ?? winner;
+                    ?? installationSource;
                 installationReference =
-                    source.InstallationReference
+                    installationSource.InstallationReference
                     ?? selectedReference;
                 requiresInstallation =
                     selectedRequirements.All(
@@ -839,7 +1044,7 @@ public class DependencyResolver : IDependencyResolver
                         requirement =>
                             requirement.BootstrapRequired);
                 metadataReference =
-                    source.MetadataReference
+                    requirementMetadataSource.MetadataReference
                     ?? selectedReference;
                 ResolvedDependencyRequirement activeRoute =
                     SelectActiveRoute(requirements);
@@ -1669,7 +1874,8 @@ public class DependencyResolver : IDependencyResolver
             return versions;
         }
 
-        private IReadOnlyList<PackageReference> CreateInstallOrder()
+        private IReadOnlyList<PackageReference> CreateInstallOrder(
+            bool includeCached)
         {
             List<PackageReference> order = [];
             HashSet<string> visited =
@@ -1686,7 +1892,8 @@ public class DependencyResolver : IDependencyResolver
                     edge.PackageId,
                     visited,
                     active,
-                    order);
+                    order,
+                    includeCached);
             }
 
             return order;
@@ -1726,7 +1933,8 @@ public class DependencyResolver : IDependencyResolver
             string packageId,
             HashSet<string> visited,
             HashSet<string> active,
-            List<PackageReference> order)
+            List<PackageReference> order,
+            bool includeCached)
         {
             if (visited.Contains(packageId)
                 || !_nodes.TryGetValue(
@@ -1750,13 +1958,15 @@ public class DependencyResolver : IDependencyResolver
                     childEdge.PackageId,
                     visited,
                     active,
-                    order);
+                    order,
+                    includeCached);
             }
 
             active.Remove(packageId);
             if (visited.Add(packageId))
             {
-                if (node.RequiresInstallation
+                if ((includeCached
+                        || node.RequiresInstallation)
                     && !node.BootstrapRequired)
                 {
                     order.Add(
@@ -2024,6 +2234,15 @@ public class DependencyResolver : IDependencyResolver
                     right.Value.Version,
                     StringComparison.Ordinal);
         }
+
+        private static bool IsMutableInstallationAlias(
+            PackageReference? reference) =>
+            reference is PackageReference value
+            && PackageDirective.ClassifyVersion(
+                value.Version)
+                is VersionType.CiBuild
+                    or VersionType.CiBuildBranch
+                    or VersionType.LocalBuild;
     }
 
     private sealed class DependencyNode
@@ -2202,5 +2421,6 @@ public class DependencyResolver : IDependencyResolver
         IReadOnlyDictionary<string, PackageReference> Resolved,
         IReadOnlyList<DependencyResolutionFailure> Failures,
         IReadOnlyList<PackageReference> InstallOrder,
+        IReadOnlyList<PackageReference> ReplayOrder,
         IReadOnlyList<PackageReference> BootstrapInstallOrder);
 }

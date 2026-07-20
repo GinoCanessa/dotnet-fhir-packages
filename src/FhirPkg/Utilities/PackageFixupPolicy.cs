@@ -1,5 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Security.Cryptography;
+using System.Text;
 using FhirPkg.Installation;
 using FhirPkg.Models;
 
@@ -24,7 +26,10 @@ internal sealed class PackageFixupPolicy
     private PackageFixupPolicy(IReadOnlyDictionary<string, string> versionFixups)
     {
         _versionFixups = versionFixups;
+        IdentityHash = ComputeIdentityHash(versionFixups);
     }
+
+    internal string IdentityHash { get; }
 
     internal static PackageFixupPolicy Create(IReadOnlyDictionary<string, string> configuredFixups)
     {
@@ -89,6 +94,30 @@ internal sealed class PackageFixupPolicy
         version.EndsWith(CiBuildSuffix, StringComparison.OrdinalIgnoreCase)
             ? version[..^CiBuildSuffix.Length]
             : version;
+
+    private static string ComputeIdentityHash(
+        IReadOnlyDictionary<string, string> versionFixups)
+    {
+        StringBuilder builder = new();
+        foreach (KeyValuePair<string, string> fixup
+                 in versionFixups.OrderBy(
+                     pair => pair.Key,
+                     StringComparer.Ordinal))
+        {
+            builder.Append(fixup.Key.Length);
+            builder.Append(':');
+            builder.Append(fixup.Key);
+            builder.Append('=');
+            builder.Append(fixup.Value.Length);
+            builder.Append(':');
+            builder.Append(fixup.Value);
+            builder.Append(';');
+        }
+
+        byte[] hash = SHA256.HashData(
+            Encoding.UTF8.GetBytes(builder.ToString()));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
 
     private static PackageInstallException InvalidPolicy(string message) =>
         new(

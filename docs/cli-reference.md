@@ -161,10 +161,10 @@ fhir-pkg restore [project-path] [options]
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--lock-file <path>` | `-l` | `string` | — | Path to a lock file. If it exists, restore from it for deterministic results. |
-| `--no-lock` | — | `bool` | `false` | Do not write or update a lock file after restore. |
+| `--lock-file <path>` | `-l` | `string` | `<project-path>/fhirpkg.lock.json` | Lock file to read and write. Relative paths are resolved against `project-path`; absolute paths are unchanged. The filename `.fhirpkg-restore.lock` is reserved for coordination. |
+| `--no-lock` | — | `bool` | `false` | Do not write or update the lock file. A current existing lock can still be read. |
 | `--conflict-strategy <strategy>` | — | `enum` | `HighestWins` | How to handle version conflicts. Values: `HighestWins`, `FirstWins`, `Error`. |
-| `--max-depth <n>` | — | `int` | `20` | Maximum recursion depth for transitive dependency resolution. |
+| `--max-depth <n>` | — | `int` | `20` | Maximum root-relative depth for transitive dependency resolution. Must be non-negative; direct dependencies are depth `0`. |
 | `--fhir-version <release>` | `-f` | `string` | — | Preferred FHIR release (`R4`, `R4B`, `R5`, `R6`). |
 
 #### Examples
@@ -177,11 +177,26 @@ fhir-pkg restore
 fhir-pkg restore ./my-ig-project
 
 # Restore with a lock file
-fhir-pkg restore --lock-file ./fhirpkg.lock.json
+fhir-pkg restore ./my-ig-project --lock-file ./locks/fhirpkg.lock.json
 
 # Fail on version conflicts instead of auto-resolving
 fhir-pkg restore --conflict-strategy Error
 ```
+
+A schema-v2 lock is used as a fast path only when its project package identity
+and root directives exactly match the manifest and its conflict, prerelease,
+FHIR-release, depth, and version-fixup policies match the current request.
+Package names are matched case-insensitively; version text is matched exactly.
+Root order must also match for `FirstWins`. Legacy schema-v1, incomplete, stale,
+or missing locks are re-resolved. Unknown future schemas are rejected without
+changing the file. Locked dependency values must be concrete semantic-version
+pins, each effective root must be represented, and an empty root set requires
+an empty dependency map.
+
+Only a complete resolution is written. Lock replacement is a durable,
+same-directory atomic operation, so cancellation or a pre-commit failure leaves
+the previous lock unchanged. `--overwrite` is not a restore option: cache
+replacement and lock freshness are independent SDK concerns.
 
 #### Output
 

@@ -494,6 +494,32 @@ public class FhirSemVerTests
         results.ShouldBe(expected);
     }
 
+    [Theory]
+    [InlineData("^2.0.0", "1.0.0", false, false)]
+    [InlineData("^2.0.0", "3.0.0", false, true)]
+    [InlineData("2.x", "3.0.0", false, true)]
+    [InlineData(
+        ">1.0.0-alpha <1.0.0-rc",
+        "2.0.0",
+        true,
+        true)]
+    public void Range_HasSatisfyingVersionAtOrBelow_UsesBounds(
+        string expression,
+        string ceiling,
+        bool allowPreRelease,
+        bool expected)
+    {
+        FhirSemVerRange range =
+            FhirSemVerRange.Parse(expression);
+
+        bool actual =
+            range.HasSatisfyingVersionAtOrBelow(
+                FhirSemVer.Parse(ceiling),
+                allowPreRelease);
+
+        actual.ShouldBe(expected);
+    }
+
     [Fact]
     public void ToString_ExactVersion_FormatsCorrectly()
     {

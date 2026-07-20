@@ -12,12 +12,10 @@ public class CliIntegrationTests : IntegrationTestBase
 {
     private const int _timeoutSeconds = 60 * 10;
 
-    private static readonly string CliProjectPath = Path.GetFullPath(
-        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-            "src", "FhirPkg.Cli", "FhirPkg.Cli.csproj"));
-
-    private static readonly string TargetFramework =
-        $"net{Environment.Version.Major}.{Environment.Version.Minor}";
+    private static readonly string CliAssemblyPath =
+        Path.Combine(
+            AppContext.BaseDirectory,
+            "FhirPkg.Cli.dll");
 
     private async Task<(int ExitCode, string StdOut, string StdErr)> RunCli(params string[] args)
     {
@@ -34,7 +32,7 @@ public class CliIntegrationTests : IntegrationTestBase
             StartInfo = new ProcessStartInfo
             {
                 FileName = "dotnet",
-                Arguments = $"run --project \"{CliProjectPath}\" --framework {TargetFramework} -- {allArgs}",
+                Arguments = $"\"{CliAssemblyPath}\" {allArgs}",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,

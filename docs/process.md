@@ -362,7 +362,8 @@ a dedicated **`DependencyResolver`** — see
 
 `RestoreAsync` is a higher-level workflow designed for project-level dependency
 management. It reads a project's `package.json`, resolves the full transitive
-dependency closure, installs every package, and writes a lock file.
+dependency closure, installs the active dependency-first plan, and writes a
+schema-v2 lock only for a complete result.
 
 ### Workflow
 
@@ -370,16 +371,16 @@ dependency closure, installs every package, and writes a lock file.
 Read project package.json
   │
   ▼
-Lock file exists & current? ──── yes ──▶ Restore from lock file (fast path)
+Requested lock exists & current? ─ yes ─▶ Restore from lock file (fast path)
   │ no
   ▼
 Resolve full dependency closure
   │
   ▼
-Install all resolved packages (parallel, batched)
+Install authoritative active closure in dependency-first order
   │
   ▼
-Write fhirpkg.lock.json
+Durably replace requested lock path
   │
   ▼
 Return PackageClosure
@@ -387,9 +388,26 @@ Return PackageClosure
 
 ### Lock File Fast Path
 
-If `fhirpkg.lock.json` exists and every dependency in the manifest is already
-present in the lock file, the resolver skips the full resolution and restores
-directly from the lock file — installing only packages not yet in the cache.
+The default path is `<project>/fhirpkg.lock.json`; `RestoreOptions.LockFilePath`
+can select an absolute path or a path relative to the project. Only that path is
+read or written. The sibling filename `.fhirpkg-restore.lock` is reserved for
+cross-process writer coordination and cannot be selected as the lock path.
+
+A lock skips full resolution only when it is schema v2, contains no missing or
+typed failures, and exactly matches both:
+
+- the project package name/version and manifest's complete direct-root set and
+  directive versions (package names are case-insensitive; version text is
+  ordinal); and
+- conflict strategy, prerelease policy, preferred FHIR release, max depth, and
+  the deterministic version-fixup policy hash.
+
+Root order must also match for the order-sensitive `FirstWins` strategy. Every
+locked dependency must be a concrete semantic-version pin, must satisfy the
+prerelease policy, and every effective root must be represented. An empty
+manifest therefore accepts only empty root, dependency, and replay-order sets.
+Schema-v1 locks are readable but always stale. Unknown future schemas are rejected without
+rewrite. `OverwriteExisting` affects cache replacement, not lock freshness.
 
 ### Recursive Resolution
 
@@ -425,20 +443,34 @@ The result is a **`PackageClosure`** containing:
   `Failures`.
 - `IsComplete` — true only when both `Failures` and `Missing` are empty.
 
-### Batch Installation
+### Active Closure Installation
 
-The resolved closure is installed via `InstallManyAsync`, which processes
-packages in parallel up to `MaxParallelRegistryQueries` (default 3) concurrent
-operations. Each directive is handled independently — a failure in one package
-does not block the others. `IncludeDependencies` is set to `false` for this
-step because the closure already contains the full transitive graph.
+Restore consumes the resolver's authoritative dependency-first
+`InstallOrder`, with dependency recursion disabled for each node. Mutable CI
+aliases that cannot expose authoritative metadata before installation use the
+bounded bootstrap order and are then re-resolved from the committed manifest.
+Superseded nodes, losing-only descendants, and pruned failures never enter the
+installation plan.
 
 ### Lock File Output
 
-After installation, a `fhirpkg.lock.json` is written (when
-`RestoreOptions.WriteLockFile` is true) containing the exact resolved versions and
-any missing packages. Subsequent restores can use this lock file to skip
-resolution entirely.
+After successful installation, a lock is written only when the closure is
+complete and `RestoreOptions.WriteLockFile` is true. It records schema version,
+project identity, exact roots, policy identity, only the active exact dependency
+versions, and the complete dependency-first replay order. Replay directives
+preserve `current`, branch-specific `current`, and `dev` aliases while the exact
+map remains the expected manifest identity.
+
+The lock is serialized completely before I/O, written and flushed to a unique
+sibling temporary file, cancellation-checked before commit, atomically
+replaced, and followed by parent-directory synchronization where supported.
+Writers for the same requested path are serialized across manager instances
+and processes by a persistent `.fhirpkg-restore.lock` sibling lease. The manifest is re-read
+immediately before commit; if it changed during resolution, the restore fails
+without replacing the lock. Readers permit replacement, and Windows
+replacement retries transient sharing conflicts. The writer cleans only its
+owned temporary file, so cancellation or an interrupted pre-commit write
+preserves the prior lock byte-for-byte.
 
 ## 9 — Resource Indexing
 

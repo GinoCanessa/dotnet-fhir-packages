@@ -7,6 +7,7 @@ using FhirPkg.Installation;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
+using FhirPkg.Utilities;
 using Shouldly;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -1485,8 +1486,11 @@ public class FhirPackageManagerTests
             It.IsAny<CancellationToken>()), Times.Exactly(2));
     }
 
-    [Fact]
-    public async Task InstallAsync_CiDependency_PreservesAliasForExactResolution()
+    [Theory]
+    [InlineData("2.0.0")]
+    [InlineData("current")]
+    public async Task InstallAsync_CiDependency_PreservesPinnedAlias(
+        string resolvedVersion)
     {
         PackageRecord rootRecord = CreatePackageRecord(
             "root.package",
@@ -1518,7 +1522,9 @@ public class FhirPackageManagerTests
         ResolvedDirective ciResolved = new()
         {
             Reference =
-                new PackageReference("ci.package", "2.0.0"),
+                new PackageReference(
+                    "ci.package",
+                    resolvedVersion),
             TarballUri =
                 new Uri("https://example.test/ci.package.tgz"),
         };
@@ -1586,7 +1592,15 @@ public class FhirPackageManagerTests
         _cacheMock.Verify(cache => cache.InstallAsync(
             ciAlias,
             It.IsAny<Stream>(),
-            It.IsAny<InstallCacheOptions?>(),
+            It.Is<InstallCacheOptions?>(
+                options =>
+                    options != null
+                    && options.IdentityExpectation != null
+                    && options.IdentityExpectation
+                        .ExpectedManifestReference
+                        == new PackageReference(
+                            "ci.package",
+                            "2.0.0")),
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -2362,6 +2376,1981 @@ public class FhirPackageManagerTests
             It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RestoreAsync_CustomLockPath_WritesOnlyRequestedPath(
+        bool useAbsolutePath)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-path-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            PackageClosure closure = CreateEmptyClosure();
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            string relativePath =
+                Path.Combine("locks", "custom.lock.json");
+            string expectedPath = Path.Combine(
+                projectPath,
+                relativePath);
+            string configuredPath = useAbsolutePath
+                ? expectedPath
+                : relativePath;
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    LockFilePath = configuredPath,
+                },
+                TestContext.Current.CancellationToken);
+
+            File.Exists(expectedPath).ShouldBeTrue();
+            File.Exists(
+                Path.Combine(
+                    projectPath,
+                    "fhirpkg.lock.json"))
+                .ShouldBeFalse();
+            PackageLockFile lockFile =
+                await PackageLockFile.LoadAsync(
+                    expectedPath,
+                    TestContext.Current.CancellationToken);
+            lockFile.SchemaVersion.ShouldBe(
+                PackageLockFile.CurrentSchemaVersion);
+            lockFile.Roots.ShouldBeEmpty();
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_DriveRelativeLockPath_IsRejected()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-drive-relative-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            using FhirPackageManager manager = CreateManager();
+
+            await Should.ThrowAsync<ArgumentException>(
+                () => manager.RestoreAsync(
+                    projectPath,
+                    new RestoreOptions
+                    {
+                        LockFilePath =
+                            @"C:locks\fhirpkg.lock.json",
+                    },
+                    TestContext.Current.CancellationToken));
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(".fhirpkg-restore.lock")]
+    [InlineData(".FHIRPKG-RESTORE.LOCK")]
+    public async Task RestoreAsync_CoordinationLockPath_IsRejected(
+        string lockFilePath)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-coordination-path-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            using FhirPackageManager manager = CreateManager();
+
+            ArgumentException exception =
+                await Should.ThrowAsync<ArgumentException>(
+                    () => manager.RestoreAsync(
+                        projectPath,
+                        new RestoreOptions
+                        {
+                            LockFilePath =
+                                lockFilePath,
+                        },
+                        TestContext.Current.CancellationToken));
+
+            exception.Message.ShouldContain(
+                "reserved");
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_CurrentLock_IgnoresPackageOverwrite()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-current-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            string lockPath = Path.Combine(
+                projectPath,
+                "fhirpkg.lock.json");
+            await CreateSchemaV2Lock().SaveAsync(
+                lockPath,
+                TestContext.Current.CancellationToken);
+            PackageClosure closure = CreateEmptyClosure();
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            using FhirPackageManager manager = CreateManager();
+
+            PackageClosure result = await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    OverwriteExisting = true,
+                },
+                TestContext.Current.CancellationToken);
+
+            result.ShouldBe(closure);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("Example.Package", "^1.0.0")]
+    [InlineData("example.package", "^1.0.0")]
+    public async Task RestoreAsync_CurrentLock_RequiresExactRootDirective(
+        string lockedName,
+        string lockedVersion)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-root-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"example.package":"^1.0.0"}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots: [$"{lockedName}#{lockedVersion}"],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["example.package"] = "1.2.3",
+                        })
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            PackageClosure closure = CreateEmptyClosure();
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            using FhirPackageManager manager = CreateManager();
+
+            PackageClosure result = await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            result.ShouldBe(closure);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_ChangedRootVersion_Reresolves()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-root-version-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"example.package":"^1.0.0"}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots: ["example.package#^1.0.1"])
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("0.9.0")]
+    [InlineData("^1.0.0")]
+    [InlineData("not-a-semver")]
+    public async Task RestoreAsync_InconsistentCurrentLock_Reresolves(
+        string? lockedVersion)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-inconsistent-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"example.package":"^1.0.0"}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots: ["example.package#^1.0.0"],
+                    dependencies: lockedVersion is null
+                        ? null
+                        : new Dictionary<string, string>
+                        {
+                            ["example.package"] = lockedVersion,
+                        })
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(
+        "hl7.fhir.r4.core",
+        "4.0.0",
+        "4.0.0",
+        ConflictResolutionStrategy.HighestWins)]
+    [InlineData(
+        "example.package",
+        "1.0.0",
+        "2.0.0",
+        ConflictResolutionStrategy.FirstWins)]
+    [InlineData(
+        "example.package",
+        "not-a-semver",
+        "1.0.0",
+        ConflictResolutionStrategy.HighestWins)]
+    public async Task RestoreAsync_ContradictingExactRootPin_Reresolves(
+        string packageName,
+        string rootVersion,
+        string lockedVersion,
+        ConflictResolutionStrategy conflictStrategy)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-root-pin-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            string manifestJson =
+                $$"""
+                {
+                  "name": "root.package",
+                  "version": "1.0.0",
+                  "dependencies": {
+                    "{{packageName}}": "{{rootVersion}}"
+                  }
+                }
+                """;
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                manifestJson,
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots:
+                        [$"{packageName}#{rootVersion}"],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            [packageName] = lockedVersion,
+                        },
+                    conflictStrategy: conflictStrategy)
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    ConflictStrategy = conflictStrategy,
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("other.package#1.0.0")]
+    [InlineData("root.package#2.0.0")]
+    public async Task RestoreAsync_ChangedRootPackageIdentity_Reresolves(
+        string lockedRootPackage)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-root-identity-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    rootPackage: lockedRootPackage)
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_HighestWinnerAboveRootRange_IsCurrent()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-range-winner-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"example.package":"^2.0.0"}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots: ["example.package#^2.0.0"],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["example.package"] = "3.0.0",
+                        })
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            PackageClosure closure = CreateEmptyClosure();
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            using FhirPackageManager manager = CreateManager();
+
+            PackageClosure result = await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            result.ShouldBe(closure);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(
+        ConflictResolutionStrategy.FirstWins,
+        true)]
+    [InlineData(
+        ConflictResolutionStrategy.HighestWins,
+        false)]
+    public async Task RestoreAsync_RootOrderIsPolicySensitive(
+        ConflictResolutionStrategy conflictStrategy,
+        bool shouldReresolve)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-root-order-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """
+                {
+                  "name": "root.package",
+                  "version": "1.0.0",
+                  "dependencies": {
+                    "second.package": "1.0.0",
+                    "first.package": "1.0.0"
+                  }
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots:
+                    [
+                        "first.package#1.0.0",
+                        "second.package#1.0.0",
+                    ],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["first.package"] = "1.0.0",
+                            ["second.package"] = "1.0.0",
+                        },
+                    conflictStrategy: conflictStrategy)
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            PackageClosure closure = CreateEmptyClosure();
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    ConflictStrategy = conflictStrategy,
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                shouldReresolve ? Times.Once() : Times.Never());
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                shouldReresolve ? Times.Never() : Times.Once());
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("1.0.0-alpha")]
+    [InlineData("1.0.0")]
+    public async Task RestoreAsync_PolicyIneligiblePrereleaseRoot_Reresolves(
+        string lockedVersion)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-prerelease-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"example.package":"1.0.0-alpha"}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots: ["example.package#1.0.0-alpha"],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["example.package"] =
+                                lockedVersion,
+                        },
+                    allowPreRelease: false)
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    AllowPreRelease = false,
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_EmptyManifestRejectsLockedDependencies()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-empty-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["unrelated.package"] = "1.0.0",
+                        })
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_EmptyManifestRejectsNonEmptyInstallOrder()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-empty-order-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    installOrder:
+                        ["unrelated.package#1.0.0"])
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_PartialCoreRootRequiresEveryExpansion()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-core-expansion-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"hl7.fhir.r4":"4.0.1"}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots: ["hl7.fhir.r4#4.0.1"],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["hl7.fhir.r4.core"] = "4.0.1",
+                        })
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_ManifestChangedDuringResolution_DoesNotWriteLock()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-manifest-race-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+        string manifestPath = Path.Combine(
+            projectPath,
+            "package.json");
+        string lockPath = Path.Combine(
+            projectPath,
+            "fhirpkg.lock.json");
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                manifestPath,
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            byte[] originalLockBytes =
+                """
+                {
+                  "updated": "2026-07-18T12:00:00Z",
+                  "dependencies": {}
+                }
+                """u8.ToArray();
+            await File.WriteAllBytesAsync(
+                lockPath,
+                originalLockBytes,
+                TestContext.Current.CancellationToken);
+            PackageClosure closure = CreateEmptyClosure();
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .Returns(
+                    async (
+                        PackageManifest resolvedManifest,
+                        DependencyResolveOptions? resolveOptions,
+                        CancellationToken cancellationToken) =>
+                    {
+                        await File.WriteAllTextAsync(
+                            manifestPath,
+                            """{"name":"root.package","version":"2.0.0","dependencies":{}}""",
+                            cancellationToken);
+                        return closure;
+                    });
+            using FhirPackageManager manager = CreateManager();
+
+            InvalidOperationException exception =
+                await Should.ThrowAsync<InvalidOperationException>(
+                    () => manager.RestoreAsync(
+                        projectPath,
+                        cancellationToken:
+                            TestContext.Current.CancellationToken));
+
+            exception.Message.ShouldContain(
+                "manifest changed");
+            (await File.ReadAllBytesAsync(
+                lockPath,
+                TestContext.Current.CancellationToken))
+                .ShouldBe(originalLockBytes);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RestoreAsync_IncompleteLock_ReresolvesWithoutRewrite(
+        bool useTypedFailure)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-incomplete-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"missing.package":"1.0.0"}}""",
+                TestContext.Current.CancellationToken);
+            DependencyResolutionFailure resolutionFailure =
+                new()
+                {
+                    Code =
+                        DependencyResolutionFailureCode.PackageNotFound,
+                    PackageId = "missing.package",
+                    VersionSpecifier = "1.0.0",
+                    Message = "Missing package.",
+                };
+            PackageLockFile existingLock = CreateSchemaV2Lock(
+                roots: ["missing.package#1.0.0"],
+                missing: useTypedFailure
+                    ? null
+                    : new Dictionary<string, string>
+                    {
+                        ["missing.package"] = "1.0.0",
+                    },
+                failures: useTypedFailure
+                    ? [resolutionFailure]
+                    : []);
+            string lockPath = Path.Combine(
+                projectPath,
+                "fhirpkg.lock.json");
+            await existingLock.SaveAsync(
+                lockPath,
+                TestContext.Current.CancellationToken);
+            byte[] originalBytes =
+                await File.ReadAllBytesAsync(
+                    lockPath,
+                    TestContext.Current.CancellationToken);
+            PackageClosure incompleteClosure = new()
+            {
+                Timestamp = DateTime.UtcNow,
+                Resolved =
+                    new Dictionary<string, PackageReference>(
+                        StringComparer.OrdinalIgnoreCase),
+                Missing =
+                    new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["missing.package"] =
+                            "Missing package.",
+                    },
+                Failures = [resolutionFailure],
+                InstallOrderIsComplete = true,
+            };
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(incompleteClosure);
+            using FhirPackageManager manager = CreateManager();
+
+            PackageClosure result = await manager.RestoreAsync(
+                projectPath,
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+            result.ShouldBe(incompleteClosure);
+            (await File.ReadAllBytesAsync(
+                lockPath,
+                TestContext.Current.CancellationToken))
+                .ShouldBe(originalBytes);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_LegacyLock_IsAlwaysStale()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-legacy-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            PackageLockFile legacyLock = new()
+            {
+                Updated = DateTime.UtcNow,
+                Dependencies =
+                    new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase),
+            };
+            await legacyLock.SaveAsync(
+                Path.Combine(
+                    projectPath,
+                    "fhirpkg.lock.json"),
+                TestContext.Current.CancellationToken);
+            PackageClosure closure = CreateEmptyClosure();
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_CompleteResolution_RewritesLegacyLockAsV2()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-legacy-rewrite-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            string lockPath = Path.Combine(
+                projectPath,
+                "fhirpkg.lock.json");
+            await new PackageLockFile
+            {
+                Updated = DateTime.UtcNow,
+                Dependencies =
+                    new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase),
+            }.SaveAsync(
+                lockPath,
+                TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+            PackageLockFile rewritten =
+                await PackageLockFile.LoadAsync(
+                    lockPath,
+                    TestContext.Current.CancellationToken);
+            rewritten.SchemaVersion.ShouldBe(
+                PackageLockFile.CurrentSchemaVersion);
+            rewritten.Roots.ShouldBeEmpty();
+            rewritten.Policy.ShouldNotBeNull();
+            rewritten.Failures.ShouldBeEmpty();
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_FutureLock_IsRejectedWithoutRewrite()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-future-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            string lockPath = Path.Combine(
+                projectPath,
+                "fhirpkg.lock.json");
+            byte[] originalBytes =
+                """
+                {
+                  "schemaVersion": 99,
+                  "updated": "2026-07-18T12:00:00Z",
+                  "dependencies": {}
+                }
+                """u8.ToArray();
+            await File.WriteAllBytesAsync(
+                lockPath,
+                originalBytes,
+                TestContext.Current.CancellationToken);
+            using FhirPackageManager manager = CreateManager();
+
+            await Should.ThrowAsync<NotSupportedException>(
+                () => manager.RestoreAsync(
+                    projectPath,
+                    cancellationToken:
+                        TestContext.Current.CancellationToken));
+
+            (await File.ReadAllBytesAsync(
+                lockPath,
+                TestContext.Current.CancellationToken))
+                .ShouldBe(originalBytes);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_RootOrPolicyChange_Reresolves()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-stale-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"first.package":"1.0.0"}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots:
+                        [
+                            "first.package#1.0.0",
+                            "removed.package#1.0.0",
+                        ],
+                    maxDepth: 10)
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            PackageClosure closure = CreateEmptyClosure();
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    MaxDepth = 20,
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("conflict")]
+    [InlineData("prerelease")]
+    [InlineData("fhir-release")]
+    [InlineData("max-depth")]
+    [InlineData("fixup-hash")]
+    public async Task RestoreAsync_AnyPolicyChange_Reresolves(
+        string changedField)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-policy-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+            PackageLockFile lockFile = changedField switch
+            {
+                "conflict" => CreateSchemaV2Lock(
+                    conflictStrategy:
+                        ConflictResolutionStrategy.FirstWins),
+                "prerelease" => CreateSchemaV2Lock(
+                    allowPreRelease: false),
+                "fhir-release" => CreateSchemaV2Lock(
+                    preferredFhirRelease: FhirRelease.R4),
+                "max-depth" => CreateSchemaV2Lock(maxDepth: 19),
+                "fixup-hash" => CreateSchemaV2Lock(
+                    versionFixupHash: "changed"),
+                _ => throw new InvalidOperationException(
+                    $"Unknown policy field '{changedField}'."),
+            };
+            await lockFile.SaveAsync(
+                Path.Combine(
+                    projectPath,
+                    "fhirpkg.lock.json"),
+                TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_HighestWinner_WritesOnlyActiveClosure()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-winner-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """
+                {
+                  "name": "root.package",
+                  "version": "1.0.0",
+                  "dependencies": {
+                    "low.parent": "1.0.0",
+                    "high.parent": "1.0.0"
+                  }
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            PackageClosure closure = new()
+            {
+                Timestamp = DateTime.UtcNow,
+                Resolved =
+                    new Dictionary<string, PackageReference>(
+                        StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["low.parent"] =
+                            new("low.parent", "1.0.0"),
+                        ["high.parent"] =
+                            new("high.parent", "1.0.0"),
+                        ["pivot.package"] =
+                            new("pivot.package", "2.0.0"),
+                        ["winning.child"] =
+                            new("winning.child", "1.0.0"),
+                    },
+                Missing =
+                    new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase),
+                Failures = [],
+                InstallOrderIsComplete = true,
+            };
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+            PackageLockFile lockFile =
+                await PackageLockFile.LoadAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            lockFile.Dependencies["pivot.package"]
+                .ShouldBe("2.0.0");
+            lockFile.Dependencies.ContainsKey(
+                    "losing.child")
+                .ShouldBeFalse();
+            lockFile.Missing.ShouldBeNull();
+            lockFile.Failures.ShouldBeEmpty();
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_HighestWinnerLock_IsCurrentOnNextRestore()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-winner-roundtrip-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """
+                {
+                  "name": "root.package",
+                  "version": "1.0.0",
+                  "dependencies": {
+                    "pivot.package": "1.0.0",
+                    "higher.parent": "1.0.0"
+                  }
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            PackageClosure closure = new()
+            {
+                Timestamp = DateTime.UtcNow,
+                Resolved =
+                    new Dictionary<string, PackageReference>(
+                        StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["pivot.package"] =
+                            new("pivot.package", "2.0.0"),
+                        ["higher.parent"] =
+                            new("higher.parent", "1.0.0"),
+                    },
+                Missing =
+                    new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase),
+                InstallOrderIsComplete = true,
+            };
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_MutableAlias_WritesReplayableInstallOrder()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-alias-lock-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"ci.package":"current"}}""",
+                TestContext.Current.CancellationToken);
+            PackageClosure closure = new()
+            {
+                Timestamp = DateTime.UtcNow,
+                Resolved =
+                    new Dictionary<string, PackageReference>(
+                        StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["ci.package"] =
+                            new("ci.package", "2.0.0"),
+                    },
+                Missing =
+                    new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase),
+                ReplayOrder =
+                    [new PackageReference(
+                        "ci.package",
+                        "current")],
+                InstallOrderIsComplete = true,
+            };
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+            PackageLockFile lockFile =
+                await PackageLockFile.LoadAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            lockFile.Dependencies["ci.package"]
+                .ShouldBe("2.0.0");
+            lockFile.InstallOrder.ShouldBe(
+                ["ci.package#current"]);
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_CachedCiAliasMatchingLock_DoesNotResolveRemotely()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-cached-ci-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+        PackageReference aliasReference =
+            new("ci.package", "current");
+        PackageClosure closure = new()
+        {
+            Timestamp = DateTime.UtcNow,
+            Resolved =
+                new Dictionary<string, PackageReference>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["ci.package"] =
+                        new("ci.package", "2.0.0"),
+                },
+            Missing =
+                new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase),
+            InstallOrder = [aliasReference],
+            ReplayOrder = [aliasReference],
+            InstallOrderIsComplete = true,
+        };
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"ci.package":"current"}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots: ["ci.package#current"],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["ci.package"] = "2.0.0",
+                        },
+                    installOrder:
+                        ["ci.package#current"])
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            _cacheMock.Setup(cache => cache.IsInstalledAsync(
+                    aliasReference,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+            _cacheMock.Setup(cache => cache.GetPackageAsync(
+                    aliasReference,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(
+                    CreateAliasPackageRecord(
+                        "ci.package",
+                        "current",
+                        "2.0.0"));
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _registryMock.Verify(
+                registry => registry.ResolveAsync(
+                    It.IsAny<PackageDirective>(),
+                    It.IsAny<VersionResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("1.0.0", true)]
+    [InlineData("2.0.0", false)]
+    public async Task RestoreAsync_CachedDevManifest_EnforcesLockedPin(
+        string manifestVersion,
+        bool shouldSucceed)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-dev-lock-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+        PackageReference devReference =
+            new("dev.package", "dev");
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """{"name":"root.package","version":"1.0.0","dependencies":{"dev.package":"dev"}}""",
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots: ["dev.package#dev"],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["dev.package"] = "1.0.0",
+                        },
+                    installOrder:
+                        ["dev.package#dev"])
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            PackageClosure closure = new()
+            {
+                Timestamp = DateTime.UtcNow,
+                Resolved =
+                    new Dictionary<string, PackageReference>(
+                        StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["dev.package"] =
+                            new("dev.package", "1.0.0"),
+                    },
+                Missing =
+                    new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase),
+                InstallOrder = [devReference],
+                ReplayOrder = [devReference],
+                InstallOrderIsComplete = true,
+            };
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            _cacheMock.Setup(cache => cache.IsInstalledAsync(
+                    devReference,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(true);
+            _cacheMock.Setup(cache => cache.GetPackageAsync(
+                    devReference,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(
+                    CreateAliasPackageRecord(
+                        "dev.package",
+                        "dev",
+                        manifestVersion));
+            using FhirPackageManager manager = CreateManager();
+
+            if (shouldSucceed)
+            {
+                await manager.RestoreAsync(
+                    projectPath,
+                    new RestoreOptions
+                    {
+                        WriteLockFile = false,
+                    },
+                    TestContext.Current.CancellationToken);
+            }
+            else
+            {
+                PackageInstallException exception =
+                    await Should.ThrowAsync<PackageInstallException>(
+                        () => manager.RestoreAsync(
+                            projectPath,
+                            new RestoreOptions
+                            {
+                                WriteLockFile = false,
+                            },
+                            TestContext.Current.CancellationToken));
+
+                exception.ErrorCode.ShouldBe(
+                    PackageInstallErrorCode.InvalidPackageIdentity);
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_FirstWins_PreservesManifestRootOrder()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-first-order-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """
+                {
+                  "name": "root.package",
+                  "version": "1.0.0",
+                  "dependencies": {
+                    "second.package": "1.0.0",
+                    "first.package": "1.0.0"
+                  }
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            PackageClosure closure = new()
+            {
+                Timestamp = DateTime.UtcNow,
+                Resolved =
+                    new Dictionary<string, PackageReference>(
+                        StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["second.package"] =
+                            new("second.package", "1.0.0"),
+                        ["first.package"] =
+                            new("first.package", "1.0.0"),
+                    },
+                Missing =
+                    new Dictionary<string, string>(
+                        StringComparer.OrdinalIgnoreCase),
+                InstallOrderIsComplete = true,
+            };
+            _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    ConflictStrategy =
+                        ConflictResolutionStrategy.FirstWins,
+                },
+                TestContext.Current.CancellationToken);
+
+            PackageLockFile lockFile =
+                await PackageLockFile.LoadAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            lockFile.Roots.ShouldBe(
+            [
+                "second.package#1.0.0",
+                "first.package#1.0.0",
+            ]);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreAsync_FirstWinsLaterLosingRoot_UsesCurrentLock()
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-first-loser-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                """
+                {
+                  "name": "root.package",
+                  "version": "1.0.0",
+                  "dependencies": {
+                    "parent.package": "1.0.0",
+                    "child.package": "2.0.0"
+                  }
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots:
+                    [
+                        "parent.package#1.0.0",
+                        "child.package#2.0.0",
+                    ],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["parent.package"] = "1.0.0",
+                            ["child.package"] = "1.0.0",
+                        },
+                    installOrder:
+                    [
+                        "child.package#1.0.0",
+                        "parent.package#1.0.0",
+                    ],
+                    conflictStrategy:
+                        ConflictResolutionStrategy.FirstWins)
+                .SaveAsync(
+                    Path.Combine(
+                        projectPath,
+                        "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateEmptyClosure());
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    ConflictStrategy =
+                        ConflictResolutionStrategy.FirstWins,
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Never);
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task RestoreAsync_FailedClosureInstallThrowsAndDoesNotWriteLock()
     {
@@ -2677,6 +4666,7 @@ public class FhirPackageManagerTests
         Func<Task<PackageClosure>> act = () => manager.RestoreAsync(nonexistentPath);
 
         await Should.ThrowAsync<FileNotFoundException>(act);
+        Directory.Exists(nonexistentPath).ShouldBeFalse();
     }
 
     private static PackageRecord CreatePackageRecord(
@@ -2710,6 +4700,66 @@ public class FhirPackageManagerTests
                 Name = name,
                 Version = manifestVersion,
             },
+        };
+
+    private static PackageClosure CreateEmptyClosure() =>
+        new()
+        {
+            Timestamp = DateTime.UtcNow,
+            Resolved =
+                new Dictionary<string, PackageReference>(
+                    StringComparer.OrdinalIgnoreCase),
+            Missing =
+                new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase),
+            InstallOrderIsComplete = true,
+        };
+
+    private static PackageLockFile CreateSchemaV2Lock(
+        IReadOnlyList<string>? roots = null,
+        IReadOnlyDictionary<string, string>? dependencies = null,
+        IReadOnlyDictionary<string, string>? missing = null,
+        IReadOnlyList<DependencyResolutionFailure>? failures = null,
+        IReadOnlyList<string>? installOrder = null,
+        int maxDepth = 20,
+        ConflictResolutionStrategy conflictStrategy =
+            ConflictResolutionStrategy.HighestWins,
+        bool allowPreRelease = true,
+        FhirRelease? preferredFhirRelease = null,
+        string? versionFixupHash = null,
+        string rootPackage = "root.package#1.0.0") =>
+        new()
+        {
+            SchemaVersion =
+                PackageLockFile.CurrentSchemaVersion,
+            Updated = DateTime.UtcNow,
+            RootPackage = rootPackage,
+            Roots = roots ?? [],
+            Policy = new PackageLockPolicy
+            {
+                ConflictStrategy = conflictStrategy,
+                AllowPreRelease = allowPreRelease,
+                PreferredFhirRelease = preferredFhirRelease,
+                MaxDepth = maxDepth,
+                VersionFixupHash =
+                    versionFixupHash
+                    ?? PackageFixupPolicy.Default.IdentityHash,
+            },
+            Dependencies = dependencies
+                ?? new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase),
+            InstallOrder = installOrder
+                ?? dependencies?
+                    .Select(
+                        dependency =>
+                            new PackageReference(
+                                dependency.Key,
+                                dependency.Value)
+                            .FhirDirective)
+                    .ToArray()
+                ?? [],
+            Missing = missing,
+            Failures = failures ?? [],
         };
 
     private sealed class TimeoutReadStream : Stream

@@ -17,6 +17,346 @@ namespace FhirPkg.Tests.Resolution;
 public class DependencyResolverTests
 {
     [Fact]
+    public async Task RestoreFromLockFileAsync_PreservesMutableReplayAlias()
+    {
+        Mock<IVersionResolver> versionResolver =
+            new(MockBehavior.Strict);
+        Mock<IRegistryClient> registry =
+            CreateRegistry(
+                new Dictionary<string, PackageListing>(
+                    StringComparer.OrdinalIgnoreCase));
+        registry.Setup(client => client.ResolveAsync(
+                It.Is<PackageDirective>(
+                    directive =>
+                        directive.PackageId
+                            == "ci.package"
+                        && directive.RequestedVersion
+                            == "current"),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ResolvedDirective
+            {
+                Reference =
+                    new PackageReference(
+                        "ci.package",
+                        "current"),
+                TarballUri =
+                    new Uri(
+                        "https://registry.example/ci.package.tgz"),
+            });
+        DependencyResolver resolver = CreateResolver(
+            versionResolver,
+            registry,
+            CreateCache());
+        PackageLockFile lockFile = new()
+        {
+            SchemaVersion =
+                PackageLockFile.CurrentSchemaVersion,
+            Updated = DateTime.UtcNow,
+            RootPackage = "root.package#1.0.0",
+            Roots = ["ci.package#current"],
+            Policy = new PackageLockPolicy
+            {
+                ConflictStrategy =
+                    ConflictResolutionStrategy.HighestWins,
+                AllowPreRelease = true,
+                PreferredFhirRelease = null,
+                MaxDepth = 20,
+                VersionFixupHash =
+                    PackageFixupPolicy.Default.IdentityHash,
+            },
+            Dependencies =
+                new Dictionary<string, string>
+                {
+                    ["CI.Package"] = "2.0.0",
+                },
+            InstallOrder = ["ci.package#current"],
+            Failures = [],
+        };
+
+        PackageClosure closure =
+            await resolver.RestoreFromLockFileAsync(
+                lockFile,
+                TestContext.Current.CancellationToken);
+
+        closure.Resolved["ci.package"]
+            .ShouldBe(
+                new PackageReference(
+                    "ci.package",
+                    "2.0.0"));
+        closure.InstallOrder.ShouldBe(
+            [new PackageReference(
+                "ci.package",
+                "current")]);
+        closure.ReplayOrder.ShouldBe(
+            closure.InstallOrder);
+        versionResolver.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task RestoreFromLockFileAsync_UnavailableExactPin_IsIncomplete()
+    {
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(
+                "missing.package"),
+            CreateRegistry(
+                new Dictionary<string, PackageListing>(
+                    StringComparer.OrdinalIgnoreCase)),
+            CreateCache());
+        PackageLockFile lockFile = new()
+        {
+            SchemaVersion =
+                PackageLockFile.CurrentSchemaVersion,
+            Updated = DateTime.UtcNow,
+            RootPackage = "root.package#1.0.0",
+            Roots = ["missing.package#1.0.0"],
+            Policy = new PackageLockPolicy
+            {
+                ConflictStrategy =
+                    ConflictResolutionStrategy.HighestWins,
+                AllowPreRelease = true,
+                PreferredFhirRelease = null,
+                MaxDepth = 20,
+                VersionFixupHash =
+                    PackageFixupPolicy.Default.IdentityHash,
+            },
+            Dependencies =
+                new Dictionary<string, string>
+                {
+                    ["missing.package"] = "1.0.0",
+                },
+            InstallOrder =
+                ["missing.package#1.0.0"],
+            Failures = [],
+        };
+
+        PackageClosure closure =
+            await resolver.RestoreFromLockFileAsync(
+                lockFile,
+                TestContext.Current.CancellationToken);
+
+        closure.IsComplete.ShouldBeFalse();
+        closure.Resolved.ShouldBeEmpty();
+        closure.Missing.ContainsKey(
+                "missing.package")
+            .ShouldBeTrue();
+        closure.Failures.ShouldHaveSingleItem()
+            .Code.ShouldBe(
+                DependencyResolutionFailureCode
+                    .PackageNotFound);
+    }
+
+    [Fact]
+    public async Task RestoreFromLockFileAsync_StaleAlias_UsesMatchingExactCache()
+    {
+        PackageReference aliasReference =
+            new("ci.package", "current");
+        PackageReference exactReference =
+            new("ci.package", "2.0.0");
+        Mock<IPackageCache> cache =
+            CreateCache(
+                reference =>
+                    reference == aliasReference
+                        ? CreateManifest(
+                            "ci.package",
+                            "1.0.0",
+                            Dependencies())
+                        : reference == exactReference
+                            ? CreateManifest(
+                                "ci.package",
+                                "2.0.0",
+                                Dependencies())
+                            : null);
+        cache.Setup(value => value.IsInstalledAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((
+                PackageReference reference,
+                CancellationToken _) =>
+                reference == aliasReference
+                || reference == exactReference);
+        Mock<IRegistryClient> registry =
+            CreateRegistry(
+                new Dictionary<string, PackageListing>(
+                    StringComparer.OrdinalIgnoreCase));
+        DependencyResolver resolver = CreateResolver(
+            new Mock<IVersionResolver>(
+                MockBehavior.Strict),
+            registry,
+            cache);
+        PackageLockFile lockFile = new()
+        {
+            SchemaVersion =
+                PackageLockFile.CurrentSchemaVersion,
+            Updated = DateTime.UtcNow,
+            RootPackage = "root.package#1.0.0",
+            Roots = ["ci.package#current"],
+            Policy = new PackageLockPolicy
+            {
+                ConflictStrategy =
+                    ConflictResolutionStrategy.HighestWins,
+                AllowPreRelease = true,
+                PreferredFhirRelease = null,
+                MaxDepth = 20,
+                VersionFixupHash =
+                    PackageFixupPolicy.Default.IdentityHash,
+            },
+            Dependencies =
+                new Dictionary<string, string>
+                {
+                    ["ci.package"] = "2.0.0",
+                },
+            InstallOrder = ["ci.package#current"],
+            Failures = [],
+        };
+
+        PackageClosure closure =
+            await resolver.RestoreFromLockFileAsync(
+                lockFile,
+                TestContext.Current.CancellationToken);
+
+        closure.IsComplete.ShouldBeTrue();
+        closure.InstallOrder.ShouldBe(
+            [exactReference]);
+        closure.ReplayOrder.ShouldBe(
+            [aliasReference]);
+        registry.Verify(
+            client => client.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task RestoreFromLockFileAsync_TypedFailureOnly_RemainsIncomplete()
+    {
+        DependencyResolutionFailure lockedFailure = new()
+        {
+            Code =
+                DependencyResolutionFailureCode
+                    .RegistryUnavailable,
+            PackageId = "failed.package",
+            VersionSpecifier = "1.0.0",
+            Message =
+                "Registry availability was not authoritative.",
+        };
+        DependencyResolver resolver = CreateResolver(
+            new Mock<IVersionResolver>(
+                MockBehavior.Strict),
+            CreateRegistry(
+                new Dictionary<string, PackageListing>(
+                    StringComparer.OrdinalIgnoreCase)),
+            CreateCache());
+        PackageLockFile lockFile = new()
+        {
+            SchemaVersion =
+                PackageLockFile.CurrentSchemaVersion,
+            Updated = DateTime.UtcNow,
+            RootPackage = "root.package#1.0.0",
+            Roots = [],
+            Policy = new PackageLockPolicy
+            {
+                ConflictStrategy =
+                    ConflictResolutionStrategy.HighestWins,
+                AllowPreRelease = true,
+                PreferredFhirRelease = null,
+                MaxDepth = 20,
+                VersionFixupHash =
+                    PackageFixupPolicy.Default.IdentityHash,
+            },
+            Dependencies =
+                new Dictionary<string, string>(),
+            InstallOrder = [],
+            Failures = [lockedFailure],
+        };
+
+        PackageClosure closure =
+            await resolver.RestoreFromLockFileAsync(
+                lockFile,
+                TestContext.Current.CancellationToken);
+
+        closure.IsComplete.ShouldBeFalse();
+        closure.Failures.ShouldBe(
+            [lockedFailure]);
+        closure.Missing.ContainsKey(
+                "failed.package")
+            .ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_EqualExactAndCiRequirements_PreservesCiAlias()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["exact.parent"] = CreateListing(
+                CreateVersion(
+                    "exact.parent",
+                    "1.0.0",
+                    Dependencies(
+                        ("shared.package", "2.0.0")))),
+            ["ci.parent"] = CreateListing(
+                CreateVersion(
+                    "ci.parent",
+                    "1.0.0",
+                    Dependencies(
+                        ("shared.package", "current")))),
+            ["shared.package"] = CreateListing(
+                CreateVersion(
+                    "shared.package",
+                    "2.0.0",
+                    Dependencies())),
+        };
+        Mock<IRegistryClient> registry =
+            CreateRegistry(listings);
+        registry.Setup(client => client.ResolveAsync(
+                It.Is<PackageDirective>(
+                    directive =>
+                        directive.PackageId
+                            == "shared.package"
+                        && directive.RequestedVersion
+                            == "current"),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ResolvedDirective
+            {
+                Reference =
+                    new PackageReference(
+                        "shared.package",
+                        "2.0.0"),
+                TarballUri =
+                    new Uri(
+                        "https://registry.example/shared.package.tgz"),
+                Dependencies = Dependencies(),
+            });
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            registry,
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(
+                    ("exact.parent", "1.0.0"),
+                    ("ci.parent", "1.0.0"))),
+            cancellationToken:
+                TestContext.Current.CancellationToken);
+
+        result.Resolved["shared.package"].ShouldBe(
+            new PackageReference(
+                "shared.package",
+                "2.0.0"));
+        result.ReplayOrder
+            .Where(reference =>
+                reference.Name == "shared.package")
+            .ShouldBe(
+                [new PackageReference(
+                    "shared.package",
+                    "current")]);
+    }
+
+    [Fact]
     public async Task ResolveAsync_AppliesConfiguredFixupToTransitiveDirective()
     {
         Mock<IVersionResolver> versionResolver = new();

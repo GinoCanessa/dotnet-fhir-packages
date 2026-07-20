@@ -762,7 +762,12 @@ public sealed class PackageCacheTransactionTests : IDisposable
             content.ShouldBe("old");
         else
             content.ShouldContain("value = new");
-        fileOperations.MutatingCalls.ShouldNotContain("DeleteFile");
+        fileOperations.DeletedFiles.ShouldAllBe(
+            deletedPath =>
+                !Path.GetFullPath(deletedPath).Equals(
+                    Path.GetFullPath(path),
+                    StringComparison.OrdinalIgnoreCase));
+        fileOperations.MutatingCalls.ShouldNotContain("MoveFile");
     }
 
     [Fact]
@@ -1453,6 +1458,8 @@ public sealed class PackageCacheTransactionTests : IDisposable
 
         internal List<string> MutatingCalls { get; } = [];
 
+        internal List<string> DeletedFiles { get; } = [];
+
         public bool DirectoryExists(string path)
         {
             Before("DirectoryExists", isMutating: false);
@@ -1496,6 +1503,7 @@ public sealed class PackageCacheTransactionTests : IDisposable
         public void DeleteFile(string path)
         {
             Before("DeleteFile");
+            DeletedFiles.Add(path);
             _inner.DeleteFile(path);
         }
 

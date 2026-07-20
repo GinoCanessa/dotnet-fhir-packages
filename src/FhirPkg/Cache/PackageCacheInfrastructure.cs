@@ -2,33 +2,20 @@
 
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using FhirPkg.Utilities;
 
 namespace FhirPkg.Cache;
 
-internal interface IPackageCacheFileOperations
+internal interface IPackageCacheFileOperations :
+    IDurableFileOperations
 {
     bool DirectoryExists(string path);
-
-    bool FileExists(string path);
-
-    void CreateDirectory(string path);
 
     void MoveDirectory(string sourcePath, string destinationPath);
 
     void MoveFile(string sourcePath, string destinationPath);
 
     void DeleteDirectory(string path, bool recursive);
-
-    void DeleteFile(string path);
-
-    ValueTask WriteFileAndFlushAsync(
-        string path,
-        ReadOnlyMemory<byte> content,
-        CancellationToken cancellationToken);
-
-    void AtomicReplaceFile(string sourcePath, string destinationPath);
-
-    void SynchronizeDirectory(string directoryPath);
 
     PackageCacheArtifactKind GetArtifactKind(string path);
 
@@ -224,57 +211,6 @@ internal sealed class SystemPackageCacheFileOperations :
     }
 }
 
-internal static class PackageCacheDurableFileWriter
-{
-    internal static async Task WriteAsync(
-        string destinationPath,
-        ReadOnlyMemory<byte> content,
-        IPackageCacheFileOperations fileOperations,
-        CancellationToken cancellationToken)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
-        ArgumentNullException.ThrowIfNull(fileOperations);
-
-        string fullDestinationPath = Path.GetFullPath(destinationPath);
-        string directoryPath = Path.GetDirectoryName(fullDestinationPath)
-            ?? throw new IOException(
-                "The durable file destination has no parent directory.");
-        fileOperations.CreateDirectory(directoryPath);
-        string tempPath = Path.Combine(
-            directoryPath,
-            $".{Path.GetFileName(fullDestinationPath)}.{Guid.NewGuid():N}.tmp");
-        try
-        {
-            await fileOperations.WriteFileAndFlushAsync(
-                    tempPath,
-                    content,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            fileOperations.AtomicReplaceFile(
-                tempPath,
-                fullDestinationPath);
-            fileOperations.SynchronizeDirectory(directoryPath);
-        }
-        finally
-        {
-            try
-            {
-                if (File.Exists(tempPath))
-                    File.Delete(tempPath);
-            }
-            catch (UnauthorizedAccessException)
-            {
-                // Temporary cleanup must not replace the durable write outcome.
-            }
-            catch (IOException)
-            {
-                // Temporary cleanup must not replace the durable write outcome.
-            }
-        }
-    }
-}
-
 internal enum PackageCacheDirectorySyncOutcome
 {
     Full = 0,
@@ -297,6 +233,11 @@ internal static class PackageCacheNativeFileSystem
     private const uint InvalidFileAttributes = 0xFFFFFFFF;
     private const int ErrorFileNotFound = 2;
     private const int ErrorPathNotFound = 3;
+    private const int ErrorAccessDenied = 5;
+    private const int ErrorSharingViolation = 32;
+    private const int ErrorLockViolation = 33;
+    private const int WindowsReplaceRetryCount = 20;
+    private const int WindowsReplaceRetryDelayMilliseconds = 10;
     private const int UnixInvalidArgument = 22;
     private const int UnixInappropriateIoControl = 25;
     private const int UnixFunctionNotImplemented = 38;
@@ -317,16 +258,37 @@ internal static class PackageCacheNativeFileSystem
     {
         if (OperatingSystem.IsWindows())
         {
-            if (!MoveFileEx(
-                ToWindowsExtendedPath(sourcePath),
-                ToWindowsExtendedPath(destinationPath),
-                MoveFileReplaceExisting | MoveFileWriteThrough))
+            int error = 0;
+            for (int attempt = 0;
+                 attempt < WindowsReplaceRetryCount;
+                 attempt++)
             {
-                throw NativeIOException(
-                    "The durable file replacement failed.");
+                if (MoveFileEx(
+                    ToWindowsExtendedPath(sourcePath),
+                    ToWindowsExtendedPath(destinationPath),
+                    MoveFileReplaceExisting | MoveFileWriteThrough))
+                {
+                    return;
+                }
+
+                error = Marshal.GetLastPInvokeError();
+                if (!IsTransientWindowsReplaceError(error))
+                {
+                    throw NativeIOException(
+                        "The durable file replacement failed.",
+                        error);
+                }
+
+                if (attempt < WindowsReplaceRetryCount - 1)
+                {
+                    Thread.Sleep(
+                        WindowsReplaceRetryDelayMilliseconds);
+                }
             }
 
-            return;
+            throw NativeIOException(
+                "The durable file replacement failed.",
+                error);
         }
 
         EnsureSupportedUnix();
@@ -572,6 +534,12 @@ internal static class PackageCacheNativeFileSystem
                 "Durable package-cache renames require Windows, Linux, or macOS.");
         }
     }
+
+    private static bool IsTransientWindowsReplaceError(
+        int error) =>
+        error is ErrorAccessDenied
+            or ErrorSharingViolation
+            or ErrorLockViolation;
 
     internal static bool TryGetLinuxPathModeNoFollow(
         string path,

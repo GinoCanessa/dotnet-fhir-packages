@@ -235,7 +235,7 @@ public static class IniParser
                 encoderShouldEmitUTF8Identifier: false,
                 throwOnInvalidBytes: true)
             .GetBytes(Serialize(sections));
-        await PackageCacheDurableFileWriter.WriteAsync(
+        await DurableFileWriter.WriteAsync(
                 filePath,
                 content,
                 fileOperations,
