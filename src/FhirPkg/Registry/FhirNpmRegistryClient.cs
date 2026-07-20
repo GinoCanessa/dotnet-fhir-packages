@@ -36,6 +36,14 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
     {
     }
 
+    internal FhirNpmRegistryClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<FhirNpmRegistryClient> logger)
+        : base(transport, endpoint, logger)
+    {
+    }
+
     // ── IRegistryClient properties ──────────────────────────────────────
 
     /// <inheritdoc />

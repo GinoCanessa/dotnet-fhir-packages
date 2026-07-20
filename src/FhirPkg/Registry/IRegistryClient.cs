@@ -78,7 +78,10 @@ public interface IRegistryClient
     /// Publishes a package tarball to the registry.
     /// </summary>
     /// <param name="reference">The package reference (name and version) to publish.</param>
-    /// <param name="tarballStream">The stream containing the package tarball (<c>.tgz</c>).</param>
+    /// <param name="tarballStream">
+    /// The stream containing the package tarball (<c>.tgz</c>). The operation may
+    /// consume or advance the stream, but never owns or disposes it.
+    /// </param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A result indicating whether the publish operation succeeded.</returns>
     Task<PublishResult> PublishAsync(

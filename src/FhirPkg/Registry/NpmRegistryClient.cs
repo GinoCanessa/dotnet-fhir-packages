@@ -32,6 +32,14 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     {
     }
 
+    internal NpmRegistryClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<NpmRegistryClient> logger)
+        : base(transport, endpoint, logger)
+    {
+    }
+
     // ── IRegistryClient properties ──────────────────────────────────────
 
     /// <inheritdoc />

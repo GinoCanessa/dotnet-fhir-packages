@@ -66,14 +66,13 @@ public static class ServiceCollectionExtensions
         // Register HttpClient via the typed HttpClient factory
         services.AddHttpClient("FhirPackages", (sp, client) =>
         {
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
-            client.Timeout = options.HttpTimeout;
+            client.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
         }).ConfigurePrimaryHttpMessageHandler(sp =>
         {
             FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
             return new HttpClientHandler
             {
-                AllowAutoRedirect = true,
+                AllowAutoRedirect = false,
                 MaxAutomaticRedirections = options.MaxRedirects
             };
         });
@@ -103,8 +102,17 @@ public static class ServiceCollectionExtensions
             HttpClient httpClient = httpClientFactory.CreateClient("FhirPackages");
             ILoggerFactory loggerFactory = sp.GetRequiredService<ILoggerFactory>();
             TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
+            RegistryHttpTransport transport =
+                RegistryHttpTransport.CreateRedirectControlled(
+                    httpClient,
+                    options.HttpTimeout,
+                    options.MaxRedirects);
 
-            return RegistryClientFactory.BuildRegistryClient(options, httpClient, loggerFactory, timeProvider);
+            return RegistryClientFactory.BuildRegistryClient(
+                options,
+                transport,
+                loggerFactory,
+                timeProvider);
         });
 
         // Register IVersionResolver as VersionResolver
@@ -165,7 +173,9 @@ public static class ServiceCollectionExtensions
                 logger,
                 memoryCache,
                 installLimits,
-                httpClient);
+                httpClient,
+                sp.GetRequiredService<ILoggerFactory>(),
+                redirectsControlled: true);
         });
 
         services.TryAddSingleton<IHardenedFhirPackageManager>(sp =>

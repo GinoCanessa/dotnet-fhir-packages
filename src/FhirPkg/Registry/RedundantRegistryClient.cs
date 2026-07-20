@@ -183,6 +183,8 @@ public sealed class RedundantRegistryClient : IRegistryClient
             _logger.LogDebug(
                 "All registries failed or returned null for {PackageId}; last error: {Error}",
                 packageId, lastException.Message);
+            if (lastException is RegistryResponseTimeoutException timeout)
+                throw timeout;
         }
 
         return null;
@@ -258,6 +260,8 @@ public sealed class RedundantRegistryClient : IRegistryClient
             _logger.LogDebug(
                 "All registries failed to resolve {PackageId}; last error: {Error}",
                 directive.PackageId, lastException.Message);
+            if (lastException is RegistryResponseTimeoutException timeout)
+                throw timeout;
         }
 
         return null;
@@ -271,6 +275,31 @@ public sealed class RedundantRegistryClient : IRegistryClient
         ResolvedDirective resolved, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(resolved);
+
+        if (resolved.SourceRegistry is RegistryEndpoint sourceRegistry)
+        {
+            List<IRegistryClient> sourceClients = _clients
+                .Where(client => EndpointsMatch(
+                    client.Endpoint,
+                    sourceRegistry))
+                .ToList();
+            if (sourceClients.Count != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Resolved package source '{sourceRegistry.Url}' matched {sourceClients.Count} configured registry clients; exactly one match is required.");
+            }
+
+            IRegistryClient sourceClient = sourceClients[0];
+            _logger.LogDebug(
+                "Downloading {PackageId} only from resolving source {Endpoint}",
+                resolved.Reference.Name,
+                sourceClient.Endpoint.Url);
+            return await sourceClient.DownloadAsync(
+                    resolved,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         Exception? lastException = null;
 
         foreach (IRegistryClient client in _clients)
@@ -311,9 +340,34 @@ public sealed class RedundantRegistryClient : IRegistryClient
             _logger.LogDebug(
                 "All registries failed to download {PackageId}; last error: {Error}",
                 resolved.Reference.Name, lastException.Message);
+            if (lastException is RegistryResponseTimeoutException timeout)
+                throw timeout;
         }
 
         return null;
+    }
+
+    private static bool EndpointsMatch(
+        RegistryEndpoint left,
+        RegistryEndpoint right)
+    {
+        if (left.Type != right.Type)
+            return false;
+
+        Uri leftUri = NormalizeEndpointUri(left.Url);
+        Uri rightUri = NormalizeEndpointUri(right.Url);
+        return leftUri.Equals(rightUri);
+    }
+
+    private static Uri NormalizeEndpointUri(string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri))
+        {
+            throw new InvalidOperationException(
+                $"Registry endpoint '{value}' is not an absolute URI.");
+        }
+
+        return new Uri(uri.AbsoluteUri.TrimEnd('/') + "/");
     }
 
     /// <inheritdoc />

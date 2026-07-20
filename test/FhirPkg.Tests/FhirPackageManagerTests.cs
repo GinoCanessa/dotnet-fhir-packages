@@ -747,6 +747,61 @@ public class FhirPackageManagerTests
     }
 
     [Fact]
+    public async Task InstallAsync_RegistryBodyTimeout_MapsToAcquisitionFailure()
+    {
+        ResolvedDirective resolvedDirective = new()
+        {
+            Reference = new PackageReference("example.package", "1.0.0"),
+            TarballUri = new Uri("https://example.test/example.package.tgz")
+        };
+        _cacheMock.Setup(cache => cache.IsInstalledAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        _registryMock.Setup(registry => registry.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(resolvedDirective);
+        _registryMock.Setup(registry => registry.DownloadAsync(
+                resolvedDirective,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PackageDownloadResult
+            {
+                Content = new TimeoutReadStream(),
+                ContentType = "application/gzip"
+            });
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .Returns<PackageReference, Stream, InstallCacheOptions?, CancellationToken>(
+                async (_, stream, _, cancellationToken) =>
+                {
+                    byte[] buffer = new byte[1];
+                    await stream.ReadExactlyAsync(
+                        buffer,
+                        cancellationToken);
+                    return CreatePackageRecord(
+                        "example.package",
+                        "1.0.0");
+                });
+        using FhirPackageManager manager = CreateManager();
+
+        PackageInstallException exception =
+            await Should.ThrowAsync<PackageInstallException>(
+                () => manager.InstallAsync(
+                    "example.package#1.0.0",
+                    cancellationToken:
+                        TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(PackageInstallErrorCode.DownloadFailed);
+        exception.Stage.ShouldBe(PackageInstallStage.Acquisition);
+        exception.InnerException.ShouldBeOfType<RegistryResponseTimeoutException>();
+    }
+
+    [Fact]
     public async Task InstallManyAsync_UnresolvedDirective_MapsResolutionErrorCode()
     {
         _cacheMock.Setup(cache => cache.IsInstalledAsync(
@@ -1086,4 +1141,39 @@ public class FhirPackageManagerTests
                 Dependencies = dependencies
             }
         };
+
+    private sealed class TimeoutReadStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() { }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new RegistryResponseTimeoutException(
+                "Simulated registry body timeout.");
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromException<int>(
+                new RegistryResponseTimeoutException(
+                    "Simulated registry body timeout."));
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+    }
 }

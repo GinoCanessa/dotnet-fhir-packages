@@ -273,7 +273,8 @@ otherwise throw `PackageInstallException` with
 - Caller streams are consumed from their current position and remain open.
 - URI sources must be absolute HTTP/HTTPS URIs. The configured `HttpClient`
   uses `ResponseHeadersRead`; `HttpTimeout` covers header acquisition and body
-  staging. Redirect limits are configured by `MaxRedirects`.
+  staging across every redirect. Redirect limits are configured by
+  `MaxRedirects`.
 - Network allow-list, proxy, DNS, and credential policy are application
   responsibilities.
 - All four modes use the same limits, checksum validation, archive validation,
@@ -1050,6 +1051,13 @@ public interface IRegistryClient
 }
 ```
 
+Registry GET requests follow redirects manually so authorization and custom
+headers are reevaluated for every destination. `HttpTimeout` is one total
+deadline spanning headers, redirects, and response-body reads; expiry throws
+`RegistryResponseTimeoutException`. Registry clients do not automatically
+follow publish redirects. `PublishAsync` consumes or advances the supplied
+stream but never owns or disposes it.
+
 ### RegistryEndpoint
 
 Configuration for a single registry.
@@ -1061,9 +1069,38 @@ public record RegistryEndpoint
     public required RegistryType Type { get; init; }
     public string? AuthHeaderValue { get; init; }
     public IReadOnlyList<(string Name, string Value)>? CustomHeaders { get; init; }
+    public IReadOnlyList<string> TrustedHeaderOrigins { get; init; }
     public string? UserAgent { get; init; }
 }
 ```
+
+Authorization and custom headers are sent only to the endpoint's exact origin
+(scheme, IDN-normalized host, and effective port) or an origin explicitly
+listed in `TrustedHeaderOrigins`. Paths, subdomains, and wildcards do not
+broaden trust.
+
+```csharp
+RegistryEndpoint registry = new()
+{
+    Url = "https://registry.example.com/",
+    Type = RegistryType.FhirNpm,
+    AuthHeaderValue = "Bearer ...",
+    TrustedHeaderOrigins =
+    [
+        "https://packages-cdn.example.com/"
+    ]
+};
+```
+
+Low-level registry constructors that accept an arbitrary `HttpClient` are
+unverified transports. Authenticated or custom-header requests fail before
+network access unless the client is created through
+`RegistryClientFactory.CreateClientForEndpoint` with a
+`RegistryHttpTransport.CreateRedirectControlled(...)` capability. The supplied
+client's handler must have automatic redirects disabled. Registry transports
+must not use `HttpClient.DefaultRequestHeaders`; configure all request headers
+through `RegistryEndpoint`. POST and PUT helpers always require a
+redirect-controlled transport, even when no credentials are configured.
 
 **Well-known endpoints:**
 

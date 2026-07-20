@@ -49,6 +49,16 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    internal FhirCiBuildClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<FhirCiBuildClient> logger,
+        TimeProvider? timeProvider = null)
+        : base(transport, endpoint, logger)
+    {
+        _timeProvider = timeProvider ?? TimeProvider.System;
+    }
+
     // ── IRegistryClient properties ──────────────────────────────────────
 
     /// <inheritdoc />

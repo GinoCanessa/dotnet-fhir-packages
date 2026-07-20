@@ -119,6 +119,32 @@ public sealed class FhirPackageManagerSourceTests
         handler.RequestCount.ShouldBe(1);
     }
 
+    [Fact]
+    public async Task UriSource_FollowsRedirectsWithRedirectDisabledTransport()
+    {
+        using TestDirectory directory = new();
+        byte[] archive = CreatePackageArchive(
+            "redirected.package",
+            "1.0.0").ToArray();
+        RedirectingHttpMessageHandler handler = new(archive);
+        using FhirPackageManager manager = CreateManager(
+            directory.Path,
+            handler);
+
+        PackageRecord record = await manager.ImportAsync(
+            new Uri("https://packages.example.test/start.tgz"),
+            options: null,
+            TestContext.Current.CancellationToken);
+
+        record.Reference.ShouldBe(
+            new PackageReference("redirected.package", "1.0.0"));
+        handler.RequestUris.ShouldBe(
+        [
+            new Uri("https://packages.example.test/start.tgz"),
+            new Uri("https://packages.example.test/files/package.tgz")
+        ]);
+    }
+
     [Theory]
     [InlineData("file:///package.tgz")]
     [InlineData("ftp://packages.example.test/package.tgz")]
@@ -709,6 +735,39 @@ public sealed class FhirPackageManagerSourceTests
         {
             RequestCount++;
             LastRequestUri = request.RequestUri;
+            HttpResponseMessage response = new(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(content)
+            };
+            response.Content.Headers.ContentLength = content.LongLength;
+            return Task.FromResult(response);
+        }
+    }
+
+    private sealed class RedirectingHttpMessageHandler(byte[] content) :
+        HttpMessageHandler
+    {
+        internal List<Uri> RequestUris { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestUris.Add(request.RequestUri!);
+            if (RequestUris.Count == 1)
+            {
+                return Task.FromResult(
+                    new HttpResponseMessage(HttpStatusCode.Redirect)
+                    {
+                        Headers =
+                        {
+                            Location = new Uri(
+                                "/files/package.tgz",
+                                UriKind.Relative)
+                        }
+                    });
+            }
+
             HttpResponseMessage response = new(HttpStatusCode.OK)
             {
                 Content = new ByteArrayContent(content)

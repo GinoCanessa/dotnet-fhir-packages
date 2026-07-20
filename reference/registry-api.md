@@ -15,7 +15,12 @@ The FHIR package server exposes an NPM-compatible API with FHIR-specific extensi
 | Primary (Firely) | `https://packages.fhir.org` |
 | Secondary (HL7) | `https://packages2.fhir.org/packages` |
 
-> **Note:** The primary registry is also accessible as `packages.simplifier.net`. Tarball download URLs returned by the primary registry use the `packages.simplifier.net` hostname.
+> **Note:** The primary registry is also accessible as
+> `packages.simplifier.net`. Tarball download URLs returned by the primary
+> registry use that different origin. The SDK does not forward registry
+> authorization or custom headers across origins by default. Private deployments
+> that intentionally authenticate a separate package CDN must add its exact
+> scheme, host, and port to `RegistryEndpoint.TrustedHeaderOrigins`.
 
 ## Endpoints
 
@@ -182,7 +187,10 @@ GET https://packages.fhir.org/hl7.fhir.us.core
 }
 ```
 
-> **Note:** Tarball URLs in the primary registry point to `packages.simplifier.net`, not `packages.fhir.org`. Clients should follow the URL as-is rather than constructing download URLs independently.
+> **Note:** Tarball URLs in the primary registry point to
+> `packages.simplifier.net`, not `packages.fhir.org`. Clients should follow the
+> URL as-is rather than constructing download URLs independently, but must not
+> forward credentials to that origin unless it is explicitly trusted.
 
 <!-- ✅ VALIDATED 2026-03-09: Secondary listing confirmed. Includes extra fields per version:
      _id (version-specific), date, fhirVersion (literal), kind, count, canonical, url,

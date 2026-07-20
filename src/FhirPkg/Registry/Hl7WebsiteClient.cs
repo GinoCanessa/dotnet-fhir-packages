@@ -66,6 +66,14 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
     {
     }
 
+    internal Hl7WebsiteClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<Hl7WebsiteClient> logger)
+        : base(transport, endpoint, logger)
+    {
+    }
+
     // ── IRegistryClient properties ──────────────────────────────────────
 
     /// <inheritdoc />

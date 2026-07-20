@@ -45,6 +45,7 @@ public sealed class FhirPackageManager :
     private readonly ILoggerFactory _loggerFactory;
     private readonly HttpClient _httpClient;
     private readonly HttpClient? _ownedHttpClient;
+    private readonly RegistryHttpTransport _registryTransport;
     private bool _disposed;
 
     private const string LockFileName = "fhirpkg.lock.json";
@@ -118,17 +119,24 @@ public sealed class FhirPackageManager :
         // Build HTTP client with configured timeout and redirect policy
         HttpClientHandler handler = new HttpClientHandler
         {
-            AllowAutoRedirect = true,
+            AllowAutoRedirect = false,
             MaxAutomaticRedirections = options.MaxRedirects
         };
         _ownedHttpClient = new HttpClient(handler, disposeHandler: true)
         {
-            Timeout = options.HttpTimeout
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan
         };
         _httpClient = _ownedHttpClient;
+        _registryTransport = RegistryHttpTransport.CreateRedirectControlled(
+            _ownedHttpClient,
+            options.HttpTimeout,
+            options.MaxRedirects);
 
         // Build registry client chain
-        _registryClient = RegistryClientFactory.BuildRegistryClient(options, _ownedHttpClient, factory);
+        _registryClient = RegistryClientFactory.BuildRegistryClient(
+            options,
+            _registryTransport,
+            factory);
 
         // Build resolvers
         _versionResolver = new VersionResolver(_registryClient, _logger);
@@ -199,7 +207,9 @@ public sealed class FhirPackageManager :
             memoryCache,
             managerInstallLimits,
             CreateDirectHttpClient(options),
-            ownsHttpClient: true)
+            ownsHttpClient: true,
+            loggerFactory: null,
+            redirectsControlled: true)
     {
     }
 
@@ -213,7 +223,9 @@ public sealed class FhirPackageManager :
         ILogger<FhirPackageManager> logger,
         MemoryResourceCache? memoryCache,
         PackageInstallLimits managerInstallLimits,
-        HttpClient httpClient) =>
+        HttpClient httpClient,
+        ILoggerFactory? loggerFactory = null,
+        bool redirectsControlled = false) =>
         new(
             cache,
             registryClient,
@@ -225,7 +237,9 @@ public sealed class FhirPackageManager :
             memoryCache,
             managerInstallLimits,
             httpClient,
-            ownsHttpClient: false);
+            ownsHttpClient: false,
+            loggerFactory,
+            redirectsControlled);
 
     private FhirPackageManager(
         IPackageCache cache,
@@ -238,7 +252,9 @@ public sealed class FhirPackageManager :
         MemoryResourceCache? memoryCache,
         PackageInstallLimits managerInstallLimits,
         HttpClient httpClient,
-        bool ownsHttpClient)
+        bool ownsHttpClient,
+        ILoggerFactory? loggerFactory,
+        bool redirectsControlled)
     {
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(registryClient);
@@ -259,10 +275,16 @@ public sealed class FhirPackageManager :
         _options = options;
         _managerInstallLimits = managerInstallLimits;
         _logger = logger;
-        _loggerFactory = NullLoggerFactory.Instance;
+        _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         _memoryCache = memoryCache;
         _httpClient = httpClient;
         _ownedHttpClient = ownsHttpClient ? httpClient : null;
+        _registryTransport = redirectsControlled
+            ? RegistryHttpTransport.CreateRedirectControlled(
+                httpClient,
+                options.HttpTimeout,
+                options.MaxRedirects)
+            : RegistryHttpTransport.CreateUnverified(httpClient);
     }
 
     /// <inheritdoc />
@@ -725,12 +747,12 @@ public sealed class FhirPackageManager :
         ArgumentNullException.ThrowIfNull(options);
         HttpClientHandler handler = new()
         {
-            AllowAutoRedirect = true,
+            AllowAutoRedirect = false,
             MaxAutomaticRedirections = options.MaxRedirects
         };
         return new HttpClient(handler, disposeHandler: true)
         {
-            Timeout = options.HttpTimeout
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan
         };
     }
 
@@ -885,7 +907,7 @@ public sealed class FhirPackageManager :
             PackageProgressPhase.Downloading);
         try
         {
-            await using HttpPackageStream packageStream =
+            await using DeadlineAwareHttpStream packageStream =
                 await OpenHttpPackageStreamAsync(
                         packageUri,
                         cancellationToken)
@@ -950,37 +972,71 @@ public sealed class FhirPackageManager :
         }
     }
 
-    private async Task<HttpPackageStream> OpenHttpPackageStreamAsync(
+    private async Task<DeadlineAwareHttpStream> OpenHttpPackageStreamAsync(
         Uri packageUri,
         CancellationToken cancellationToken)
     {
-        CancellationTokenSource timeoutSource =
-            CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken);
+        CancellationTokenSource timeoutSource = new();
         timeoutSource.CancelAfter(_options.HttpTimeout);
         HttpResponseMessage? response = null;
         bool completed = false;
+        Uri currentUri = packageUri;
+        int redirectsFollowed = 0;
         try
         {
-            using HttpRequestMessage request = new(
-                HttpMethod.Get,
-                packageUri);
-            response = await _httpClient.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    timeoutSource.Token)
-                .ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            Stream content = await response.Content.ReadAsStreamAsync(
-                    timeoutSource.Token)
-                .ConfigureAwait(false);
-            HttpPackageStream result = new(
-                content,
-                response,
-                timeoutSource,
-                response.Content.Headers.ContentLength);
-            completed = true;
-            return result;
+            while (true)
+            {
+                using HttpRequestMessage request = new(
+                    HttpMethod.Get,
+                    currentUri);
+                using CancellationTokenSource linkedSource =
+                    CancellationTokenSource.CreateLinkedTokenSource(
+                        cancellationToken,
+                        timeoutSource.Token);
+                response = await _httpClient.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        linkedSource.Token)
+                    .ConfigureAwait(false);
+
+                if (IsRedirect(response.StatusCode)
+                    && response.Headers.Location is Uri location)
+                {
+                    if (redirectsFollowed >= _options.MaxRedirects)
+                    {
+                        throw new HttpRequestException(
+                            $"The package URI exceeded the configured redirect limit of {_options.MaxRedirects}.",
+                            inner: null,
+                            response.StatusCode);
+                    }
+
+                    Uri nextUri = location.IsAbsoluteUri
+                        ? location
+                        : new Uri(currentUri, location);
+                    ValidatePackageUri(nextUri);
+                    response.Dispose();
+                    response = null;
+                    currentUri = nextUri;
+                    redirectsFollowed++;
+                    continue;
+                }
+
+                response.EnsureSuccessStatusCode();
+                Stream content = await response.Content.ReadAsStreamAsync(
+                        linkedSource.Token)
+                    .ConfigureAwait(false);
+                DeadlineAwareHttpStream result = new(
+                    content,
+                    response,
+                    timeoutSource,
+                    cancellationToken,
+                    () => new OperationCanceledException(
+                        "The package URI did not complete before the configured timeout.",
+                        timeoutSource.Token),
+                    response.Content.Headers.ContentLength);
+                completed = true;
+                return result;
+            }
         }
         finally
         {
@@ -991,6 +1047,15 @@ public sealed class FhirPackageManager :
             }
         }
     }
+
+    private static bool IsRedirect(System.Net.HttpStatusCode statusCode) =>
+        statusCode is
+            System.Net.HttpStatusCode.MultipleChoices
+            or System.Net.HttpStatusCode.MovedPermanently
+            or System.Net.HttpStatusCode.Found
+            or System.Net.HttpStatusCode.SeeOther
+            or System.Net.HttpStatusCode.TemporaryRedirect
+            or System.Net.HttpStatusCode.PermanentRedirect;
 
     private static void ValidatePackageUri(Uri packageUri)
     {
@@ -1168,6 +1233,15 @@ public sealed class FhirPackageManager :
                 directive,
                 exception);
         }
+        catch (RegistryResponseTimeoutException exception)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.ResolutionFailed,
+                PackageInstallStage.Resolution,
+                $"Package directive '{directive}' could not be resolved before the source timed out.",
+                directive,
+                exception);
+        }
         catch (HttpRequestException exception)
         {
             throw new PackageInstallException(
@@ -1310,6 +1384,15 @@ public sealed class FhirPackageManager :
         catch (PackageInstallException)
         {
             throw;
+        }
+        catch (RegistryResponseTimeoutException exception)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                $"Package '{request.Directive}' download timed out while reading the response body.",
+                request.Directive,
+                exception);
         }
         catch (InvalidDataException exception)
         {
@@ -1454,6 +1537,15 @@ public sealed class FhirPackageManager :
                     request.Directive);
         }
         catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.DownloadFailed,
+                PackageInstallStage.Acquisition,
+                $"Package '{request.Directive}' download timed out.",
+                request.Directive,
+                exception);
+        }
+        catch (RegistryResponseTimeoutException exception)
         {
             throw new PackageInstallException(
                 PackageInstallErrorCode.DownloadFailed,
@@ -1807,15 +1899,12 @@ public sealed class FhirPackageManager :
         if (string.Equals(_registryClient.Endpoint.Url, registry.Url, StringComparison.OrdinalIgnoreCase))
             return _registryClient;
 
-        // For publish operations, we may need a client for a registry not in the default chain.
-        // Create an ephemeral client. The caller owns the HTTP client lifetime externally.
-        if (_ownedHttpClient is not null)
-        {
-            return RegistryClientFactory.CreateClientForEndpoint(registry, _ownedHttpClient, _loggerFactory);
-        }
-
-        // If we're in DI mode, fall back to the registered client
-        return _registryClient;
+        // For publish operations, create one endpoint-specific client over the
+        // manager's redirect-controlled transport.
+        return RegistryClientFactory.CreateClientForEndpoint(
+            registry,
+            _registryTransport,
+            _loggerFactory);
     }
 
     /// <summary>
@@ -1837,125 +1926,6 @@ public sealed class FhirPackageManager :
             BytesDownloaded = bytesDownloaded,
             TotalBytes = totalBytes
         });
-    }
-
-    private sealed class HttpPackageStream : Stream
-    {
-        private readonly Stream _inner;
-        private readonly HttpResponseMessage _response;
-        private readonly CancellationTokenSource _timeoutSource;
-        private int _disposed;
-
-        internal HttpPackageStream(
-            Stream inner,
-            HttpResponseMessage response,
-            CancellationTokenSource timeoutSource,
-            long? contentLength)
-        {
-            ArgumentNullException.ThrowIfNull(inner);
-            ArgumentNullException.ThrowIfNull(response);
-            ArgumentNullException.ThrowIfNull(timeoutSource);
-            _inner = inner;
-            _response = response;
-            _timeoutSource = timeoutSource;
-            ContentLength = contentLength;
-        }
-
-        internal long? ContentLength { get; }
-
-        public override bool CanRead => _inner.CanRead;
-
-        public override bool CanSeek => _inner.CanSeek;
-
-        public override bool CanWrite => false;
-
-        public override long Length => _inner.Length;
-
-        public override long Position
-        {
-            get => _inner.Position;
-            set => _inner.Position = value;
-        }
-
-        public override void Flush() => _inner.Flush();
-
-        public override int Read(
-            byte[] buffer,
-            int offset,
-            int count)
-        {
-            _timeoutSource.Token.ThrowIfCancellationRequested();
-            return _inner.Read(buffer, offset, count);
-        }
-
-        public override async Task<int> ReadAsync(
-            byte[] buffer,
-            int offset,
-            int count,
-            CancellationToken cancellationToken)
-        {
-            using CancellationTokenSource linkedSource =
-                CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken,
-                    _timeoutSource.Token);
-            return await _inner.ReadAsync(
-                    buffer,
-                    offset,
-                    count,
-                    linkedSource.Token)
-                .ConfigureAwait(false);
-        }
-
-        public override async ValueTask<int> ReadAsync(
-            Memory<byte> buffer,
-            CancellationToken cancellationToken = default)
-        {
-            using CancellationTokenSource linkedSource =
-                CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken,
-                    _timeoutSource.Token);
-            return await _inner.ReadAsync(
-                    buffer,
-                    linkedSource.Token)
-                .ConfigureAwait(false);
-        }
-
-        public override long Seek(long offset, SeekOrigin origin) =>
-            _inner.Seek(offset, origin);
-
-        public override void SetLength(long value) =>
-            throw new NotSupportedException();
-
-        public override void Write(
-            byte[] buffer,
-            int offset,
-            int count) =>
-            throw new NotSupportedException();
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing
-                && Interlocked.Exchange(ref _disposed, 1) == 0)
-            {
-                _inner.Dispose();
-                _response.Dispose();
-                _timeoutSource.Dispose();
-            }
-
-            base.Dispose(disposing);
-        }
-
-        public override async ValueTask DisposeAsync()
-        {
-            if (Interlocked.Exchange(ref _disposed, 1) == 0)
-            {
-                await _inner.DisposeAsync().ConfigureAwait(false);
-                _response.Dispose();
-                _timeoutSource.Dispose();
-            }
-
-            GC.SuppressFinalize(this);
-        }
     }
 
     private static readonly JsonSerializerOptions s_jsonOptions = new()

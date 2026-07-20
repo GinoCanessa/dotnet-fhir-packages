@@ -24,31 +24,63 @@ public static class RegistryClientFactory
         FhirPackageManagerOptions options,
         HttpClient httpClient,
         ILoggerFactory loggerFactory,
+        TimeProvider? timeProvider = null) =>
+        BuildRegistryClient(
+            options,
+            RegistryHttpTransport.CreateUnverified(httpClient),
+            loggerFactory,
+            timeProvider);
+
+    /// <summary>
+    /// Builds the composite registry client chain from the provided options and
+    /// explicit transport guarantees.
+    /// </summary>
+    public static IRegistryClient BuildRegistryClient(
+        FhirPackageManagerOptions options,
+        RegistryHttpTransport transport,
+        ILoggerFactory loggerFactory,
         TimeProvider? timeProvider = null)
     {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
         List<IRegistryClient> clients = new List<IRegistryClient>();
 
         if (options.Registries.Count > 0)
         {
             foreach (RegistryEndpoint endpoint in options.Registries)
             {
-                clients.Add(CreateClientForEndpoint(endpoint, httpClient, loggerFactory, timeProvider));
+                clients.Add(CreateClientForEndpoint(endpoint, transport, loggerFactory, timeProvider));
             }
         }
         else
         {
-            clients.Add(new FhirNpmRegistryClient(httpClient, RegistryEndpoint.FhirPrimary, loggerFactory.CreateLogger<FhirNpmRegistryClient>()));
-            clients.Add(new FhirNpmRegistryClient(httpClient, RegistryEndpoint.FhirSecondary, loggerFactory.CreateLogger<FhirNpmRegistryClient>()));
+            clients.Add(new FhirNpmRegistryClient(
+                transport,
+                RegistryEndpoint.FhirPrimary,
+                loggerFactory.CreateLogger<FhirNpmRegistryClient>()));
+            clients.Add(new FhirNpmRegistryClient(
+                transport,
+                RegistryEndpoint.FhirSecondary,
+                loggerFactory.CreateLogger<FhirNpmRegistryClient>()));
         }
 
         if (options.IncludeCiBuilds)
         {
-            clients.Add(new FhirCiBuildClient(httpClient, RegistryEndpoint.FhirCiBuild, loggerFactory.CreateLogger<FhirCiBuildClient>(), timeProvider));
+            clients.Add(new FhirCiBuildClient(
+                transport,
+                RegistryEndpoint.FhirCiBuild,
+                loggerFactory.CreateLogger<FhirCiBuildClient>(),
+                timeProvider));
         }
 
         if (options.IncludeHl7WebsiteFallback)
         {
-            clients.Add(new Hl7WebsiteClient(httpClient, RegistryEndpoint.Hl7Website, loggerFactory.CreateLogger<Hl7WebsiteClient>()));
+            clients.Add(new Hl7WebsiteClient(
+                transport,
+                RegistryEndpoint.Hl7Website,
+                loggerFactory.CreateLogger<Hl7WebsiteClient>()));
         }
 
         return new RedundantRegistryClient(clients, loggerFactory.CreateLogger<RedundantRegistryClient>());
@@ -67,14 +99,46 @@ public static class RegistryClientFactory
         RegistryEndpoint endpoint,
         HttpClient httpClient,
         ILoggerFactory loggerFactory,
+        TimeProvider? timeProvider = null) =>
+        CreateClientForEndpoint(
+            endpoint,
+            RegistryHttpTransport.CreateUnverified(httpClient),
+            loggerFactory,
+            timeProvider);
+
+    /// <summary>
+    /// Creates the appropriate registry client implementation for a given endpoint
+    /// using explicit transport guarantees.
+    /// </summary>
+    public static IRegistryClient CreateClientForEndpoint(
+        RegistryEndpoint endpoint,
+        RegistryHttpTransport transport,
+        ILoggerFactory loggerFactory,
         TimeProvider? timeProvider = null)
     {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
         return endpoint.Type switch
         {
-            RegistryType.FhirNpm => new FhirNpmRegistryClient(httpClient, endpoint, loggerFactory.CreateLogger<FhirNpmRegistryClient>()),
-            RegistryType.FhirCiBuild => new FhirCiBuildClient(httpClient, endpoint, loggerFactory.CreateLogger<FhirCiBuildClient>(), timeProvider),
-            RegistryType.FhirHttp => new Hl7WebsiteClient(httpClient, endpoint, loggerFactory.CreateLogger<Hl7WebsiteClient>()),
-            RegistryType.Npm => new NpmRegistryClient(httpClient, endpoint, loggerFactory.CreateLogger<NpmRegistryClient>()),
+            RegistryType.FhirNpm => new FhirNpmRegistryClient(
+                transport,
+                endpoint,
+                loggerFactory.CreateLogger<FhirNpmRegistryClient>()),
+            RegistryType.FhirCiBuild => new FhirCiBuildClient(
+                transport,
+                endpoint,
+                loggerFactory.CreateLogger<FhirCiBuildClient>(),
+                timeProvider),
+            RegistryType.FhirHttp => new Hl7WebsiteClient(
+                transport,
+                endpoint,
+                loggerFactory.CreateLogger<Hl7WebsiteClient>()),
+            RegistryType.Npm => new NpmRegistryClient(
+                transport,
+                endpoint,
+                loggerFactory.CreateLogger<NpmRegistryClient>()),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(endpoint), endpoint.Type, $"Unsupported registry type: {endpoint.Type}.")
         };
