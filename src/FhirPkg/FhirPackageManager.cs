@@ -41,6 +41,7 @@ public sealed class FhirPackageManager :
     private readonly MemoryResourceCache? _memoryCache;
     private readonly FhirPackageManagerOptions _options;
     private readonly PackageInstallLimits _managerInstallLimits;
+    private readonly PackageFixupPolicy _fixupPolicy;
     private readonly ILogger<FhirPackageManager> _logger;
     private readonly ILoggerFactory _loggerFactory;
     private readonly HttpClient _httpClient;
@@ -69,41 +70,25 @@ public sealed class FhirPackageManager :
     /// <param name="loggerFactory">Optional logger factory for creating typed loggers.</param>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="options"/> is <c>null</c>.</exception>
     public FhirPackageManager(FhirPackageManagerOptions options, ILoggerFactory? loggerFactory = null)
-        : this(options, loggerFactory, ResolveManagerLimits(options))
-    {
-    }
-
-    private FhirPackageManager(
-        FhirPackageManagerOptions options,
-        ILoggerFactory? loggerFactory,
-        PackageInstallLimits managerInstallLimits)
         : this(
-            options,
+            FhirPackageManagerConfiguration.Create(options),
             loggerFactory,
-            managerInstallLimits,
             NullPackageCacheContentionObserver.Instance)
     {
     }
 
-    internal static FhirPackageManager CreateWithContentionObserver(
-        FhirPackageManagerOptions options,
-        IPackageCacheContentionObserver contentionObserver,
-        ILoggerFactory? loggerFactory = null) =>
-        new(
-            options,
-            loggerFactory,
-            ResolveManagerLimits(options),
-            contentionObserver);
-
     private FhirPackageManager(
-        FhirPackageManagerOptions options,
+        FhirPackageManagerConfiguration configuration,
         ILoggerFactory? loggerFactory,
-        PackageInstallLimits managerInstallLimits,
         IPackageCacheContentionObserver contentionObserver)
     {
+        ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(contentionObserver);
+        FhirPackageManagerOptions options = configuration.Options;
+        PackageInstallLimits managerInstallLimits = configuration.InstallLimits;
         _options = options;
         _managerInstallLimits = managerInstallLimits;
+        _fixupPolicy = configuration.FixupPolicy;
         ILoggerFactory factory = loggerFactory ?? NullLoggerFactory.Instance;
         _loggerFactory = factory;
         _logger = factory.CreateLogger<FhirPackageManager>();
@@ -140,7 +125,12 @@ public sealed class FhirPackageManager :
 
         // Build resolvers
         _versionResolver = new VersionResolver(_registryClient, _logger);
-        _dependencyResolver = new DependencyResolver(_registryClient, _versionResolver, _cache, _logger);
+        _dependencyResolver = new DependencyResolver(
+            _registryClient,
+            _versionResolver,
+            _cache,
+            _logger,
+            _fixupPolicy);
 
         // Build indexer
         _packageIndexer = new PackageIndexer(factory.CreateLogger<PackageIndexer>());
@@ -151,6 +141,15 @@ public sealed class FhirPackageManager :
             _memoryCache = new MemoryResourceCache(options.ResourceCacheSize, options.ResourceCacheSafeMode);
         }
     }
+
+    internal static FhirPackageManager CreateWithContentionObserver(
+        FhirPackageManagerOptions options,
+        IPackageCacheContentionObserver contentionObserver,
+        ILoggerFactory? loggerFactory = null) =>
+        new(
+            FhirPackageManagerConfiguration.Create(options),
+            loggerFactory,
+            contentionObserver);
 
     /// <summary>
     /// Initializes a new <see cref="FhirPackageManager"/> with externally provided dependencies.
@@ -179,10 +178,34 @@ public sealed class FhirPackageManager :
             versionResolver,
             dependencyResolver,
             packageIndexer,
-            options,
+            FhirPackageManagerConfiguration.Create(options),
+            logger,
+            memoryCache)
+    {
+    }
+
+    private FhirPackageManager(
+        IPackageCache cache,
+        IRegistryClient registryClient,
+        IVersionResolver versionResolver,
+        IDependencyResolver dependencyResolver,
+        IPackageIndexer packageIndexer,
+        FhirPackageManagerConfiguration configuration,
+        ILogger<FhirPackageManager> logger,
+        MemoryResourceCache? memoryCache)
+        : this(
+            cache,
+            registryClient,
+            versionResolver,
+            dependencyResolver,
+            packageIndexer,
+            configuration,
             logger,
             memoryCache,
-            ResolveManagerLimits(options))
+            CreateDirectHttpClient(configuration.Options),
+            ownsHttpClient: true,
+            loggerFactory: null,
+            redirectsControlled: true)
     {
     }
 
@@ -202,10 +225,9 @@ public sealed class FhirPackageManager :
             versionResolver,
             dependencyResolver,
             packageIndexer,
-            options,
+            FhirPackageManagerConfiguration.Create(options, managerInstallLimits),
             logger,
             memoryCache,
-            managerInstallLimits,
             CreateDirectHttpClient(options),
             ownsHttpClient: true,
             loggerFactory: null,
@@ -225,21 +247,25 @@ public sealed class FhirPackageManager :
         PackageInstallLimits managerInstallLimits,
         HttpClient httpClient,
         ILoggerFactory? loggerFactory = null,
-        bool redirectsControlled = false) =>
-        new(
+        bool redirectsControlled = false)
+    {
+        FhirPackageManagerConfiguration configuration =
+            FhirPackageManagerConfiguration.Create(options, managerInstallLimits);
+
+        return new FhirPackageManager(
             cache,
             registryClient,
             versionResolver,
             dependencyResolver,
             packageIndexer,
-            options,
+            configuration,
             logger,
             memoryCache,
-            managerInstallLimits,
             httpClient,
             ownsHttpClient: false,
             loggerFactory,
             redirectsControlled);
+    }
 
     private FhirPackageManager(
         IPackageCache cache,
@@ -247,10 +273,9 @@ public sealed class FhirPackageManager :
         IVersionResolver versionResolver,
         IDependencyResolver dependencyResolver,
         IPackageIndexer packageIndexer,
-        FhirPackageManagerOptions options,
+        FhirPackageManagerConfiguration configuration,
         ILogger<FhirPackageManager> logger,
         MemoryResourceCache? memoryCache,
-        PackageInstallLimits managerInstallLimits,
         HttpClient httpClient,
         bool ownsHttpClient,
         ILoggerFactory? loggerFactory,
@@ -261,11 +286,12 @@ public sealed class FhirPackageManager :
         ArgumentNullException.ThrowIfNull(versionResolver);
         ArgumentNullException.ThrowIfNull(dependencyResolver);
         ArgumentNullException.ThrowIfNull(packageIndexer);
-        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(logger);
-        ArgumentNullException.ThrowIfNull(managerInstallLimits);
         ArgumentNullException.ThrowIfNull(httpClient);
-        managerInstallLimits.Validate();
+
+        FhirPackageManagerOptions options = configuration.Options;
+        PackageInstallLimits managerInstallLimits = configuration.InstallLimits;
 
         _cache = cache;
         _registryClient = registryClient;
@@ -274,6 +300,7 @@ public sealed class FhirPackageManager :
         _packageIndexer = packageIndexer;
         _options = options;
         _managerInstallLimits = managerInstallLimits;
+        _fixupPolicy = configuration.FixupPolicy;
         _logger = logger;
         _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         _memoryCache = memoryCache;
@@ -523,7 +550,8 @@ public sealed class FhirPackageManager :
             ConflictStrategy = effectiveOptions.ConflictStrategy,
             MaxDepth = effectiveOptions.MaxDepth,
             AllowPreRelease = installPolicy.AllowPreRelease,
-            PreferredFhirRelease = installPolicy.PreferredFhirRelease
+            PreferredFhirRelease = installPolicy.PreferredFhirRelease,
+            FixupPolicy = _fixupPolicy,
         };
 
         closure = await _dependencyResolver.ResolveAsync(manifest, resolveOptions, cancellationToken)
@@ -632,6 +660,14 @@ public sealed class FhirPackageManager :
         _logger.LogDebug("ResolveAsync for directive '{Directive}'.", directive);
 
         PackageDirective parsedDirective = DirectiveParser.Parse(directive);
+        PackageReference fixedReference = PackageFixups.Apply(
+            parsedDirective.ToReference(),
+            _fixupPolicy);
+        if (!fixedReference.Equals(parsedDirective.ToReference()))
+        {
+            parsedDirective = DirectiveParser.Parse(fixedReference.FhirDirective);
+        }
+
         ResolvedDirective? resolved = await _registryClient.ResolveAsync(parsedDirective, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
@@ -708,38 +744,6 @@ public sealed class FhirPackageManager :
     }
 
     #region Private helpers
-
-    private static PackageInstallLimits ResolveManagerLimits(FhirPackageManagerOptions options)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-
-        if (!Enum.IsDefined(options.CorruptCacheBehavior))
-        {
-            throw new PackageInstallException(
-                PackageInstallErrorCode.InvalidPolicy,
-                PackageInstallStage.PolicyValidation,
-                "CorruptCacheBehavior is not a supported value.");
-        }
-
-        if (options.HttpTimeout <= TimeSpan.Zero
-            || options.HttpTimeout.TotalMilliseconds > int.MaxValue)
-        {
-            throw new PackageInstallException(
-                PackageInstallErrorCode.InvalidPolicy,
-                PackageInstallStage.PolicyValidation,
-                "HttpTimeout must be finite, positive, and no greater than Int32.MaxValue milliseconds.");
-        }
-
-        if (options.MaxRedirects <= 0)
-        {
-            throw new PackageInstallException(
-                PackageInstallErrorCode.InvalidPolicy,
-                PackageInstallStage.PolicyValidation,
-                "MaxRedirects must be greater than zero.");
-        }
-
-        return PackageInstallLimits.ResolveManager(options.InstallLimits);
-    }
 
     private static HttpClient CreateDirectHttpClient(
         FhirPackageManagerOptions options)
@@ -1095,7 +1099,9 @@ public sealed class FhirPackageManager :
         _logger.LogDebug("Installing directive '{Directive}' through the unified install contract.", directive);
 
         PackageDirective parsedDirective = DirectiveParser.Parse(directive);
-        PackageReference requestedReference = PackageFixups.Apply(parsedDirective.ToReference());
+        PackageReference requestedReference = PackageFixups.Apply(
+            parsedDirective.ToReference(),
+            _fixupPolicy);
         if (!requestedReference.Equals(parsedDirective.ToReference()))
         {
             parsedDirective = DirectiveParser.Parse(requestedReference.FhirDirective);

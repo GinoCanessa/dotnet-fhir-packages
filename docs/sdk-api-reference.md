@@ -322,9 +322,13 @@ public class FhirPackageManagerOptions
     public int MaxParallelRegistryQueries { get; set; }             // default: 3
     public int ResourceCacheSize { get; set; }                      // default: 200
     public SafeMode ResourceCacheSafeMode { get; set; }             // default: SafeMode.Off
-    public Dictionary<string, string> VersionFixups { get; set; }   // default: {"hl7.fhir.r4.core@4.0.0": "4.0.1"}
+    public Dictionary<string, string> VersionFixups { get; set; }   // defaults include R4 4.0.0→4.0.1 and R4B snapshot1→4.3.0
 }
 ```
+
+Options are validated and snapshotted when a manager is constructed. Mutating
+the original options or its collections afterward does not reconfigure that
+manager. See [Version Resolution Policy](versioning-policy.md).
 
 ### InstallOptions
 
@@ -525,6 +529,7 @@ public record PackageVersionInfo
     public required string Version { get; init; }
     public string? Description { get; init; }
     public string? FhirVersion { get; init; }
+    public IReadOnlyList<string>? FhirVersions { get; init; }
     public string? Canonical { get; init; }
     public string? Kind { get; init; }
     public string? PublicationDate { get; init; }
@@ -535,6 +540,10 @@ public record PackageVersionInfo
     public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
 }
 ```
+
+Registry JSON may provide `fhirVersion` as a scalar or array, or use the plural
+`fhirVersions` field. `FhirVersion` exposes the first value for compatibility;
+`FhirVersions` exposes the complete normalized set.
 
 ### CatalogEntry
 

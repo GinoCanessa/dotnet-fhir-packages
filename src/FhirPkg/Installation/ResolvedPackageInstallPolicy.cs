@@ -39,6 +39,15 @@ internal sealed record ResolvedPackageInstallPolicy
         }
 
         InstallOptions effectiveOptions = installOptions ?? new InstallOptions();
+        if (effectiveOptions.PreferredFhirRelease is FhirRelease preferredFhirRelease
+            && !Enum.IsDefined(preferredFhirRelease))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPolicy,
+                PackageInstallStage.PolicyValidation,
+                "PreferredFhirRelease is not a supported value.");
+        }
+
         PackageInstallLimits limits = PackageInstallLimits.ResolvePerCall(
             managerLimits,
             effectiveOptions.InstallLimits);

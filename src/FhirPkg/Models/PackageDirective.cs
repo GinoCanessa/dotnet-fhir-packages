@@ -215,17 +215,15 @@ public partial record PackageDirective
         if (version.Equals("dev", StringComparison.OrdinalIgnoreCase))
             return VersionType.LocalBuild;
 
-        // Wildcard: contains 'x', 'X', or '*' as a version segment
-        string[] segments = version.Split('.');
-        foreach (string seg in segments)
+        if (FhirSemVerRange.TryParse(version, out FhirSemVerRange? range))
         {
-            if (seg is "x" or "X" or "*")
-                return VersionType.Wildcard;
+            return range.Kind switch
+            {
+                FhirSemVerRangeKind.Wildcard => VersionType.Wildcard,
+                FhirSemVerRangeKind.Range => VersionType.Range,
+                _ => VersionType.Exact,
+            };
         }
-
-        // Range operators: ^, ~, or pipe
-        if (version.StartsWith('^') || version.StartsWith('~') || version.Contains('|'))
-            return VersionType.Range;
 
         return VersionType.Exact;
     }

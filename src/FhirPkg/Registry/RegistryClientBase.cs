@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FhirPkg.Models;
+using FhirPkg.Resolution;
 using FhirPkg.Utilities;
 using Microsoft.Extensions.Logging;
 
@@ -1019,16 +1020,7 @@ public abstract class RegistryClientBase : IRegistryClient
     /// <summary>Resolves the best matching version from a <see cref="PackageListing"/>.</summary>
     protected static string? ResolveVersion(
         PackageDirective directive, PackageListing listing, VersionResolveOptions? options)
-    {
-        return directive.VersionType switch
-        {
-            VersionType.Exact => ResolveExact(listing, directive.RequestedVersion!),
-            VersionType.Latest => listing.LatestVersion,
-            VersionType.Wildcard => ResolveWildcard(listing, directive.RequestedVersion!, options),
-            VersionType.Range => ResolveRange(listing, directive.RequestedVersion!, options),
-            _ => null,
-        };
-    }
+        => PackageVersionSelector.Select(directive, listing, options)?.Key;
 
     /// <summary>Returns <paramref name="requestedVersion"/> if it exists in the listing, otherwise <see langword="null"/>.</summary>
     protected static string? ResolveExact(PackageListing listing, string requestedVersion)

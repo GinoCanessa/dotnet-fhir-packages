@@ -114,6 +114,9 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         PreReleaseType = ClassifyPreRelease(preRelease);
     }
 
+    internal static FhirSemVer CreateExact(int major, int minor, int patch) =>
+        new(major, minor, patch, null, null, WildcardLevel.None);
+
     // ────────────────────────────────────────────────────────────────────
     //  Parsing
     // ────────────────────────────────────────────────────────────────────
@@ -616,7 +619,9 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     ///     (allows patch bumps only).
     ///   </description></item>
     ///   <item><description>
-    ///     <b>Pipe (OR)</b>: <c>"1.0.0|3.0.0"</c> — matches either version.
+    ///     <b>Comparators</b>: <c>">=1.0.0 &lt;2.0.0"</c> — whitespace-separated
+    ///     comparators form an intersection. Supported operators are <c>&lt;</c>,
+    ///     <c>&lt;=</c>, <c>&gt;</c>, <c>&gt;=</c>, and <c>=</c>.
     ///   </description></item>
     ///   <item><description>
     ///     <b>Hyphen</b>: <c>"1.0.0 - 2.0.0"</c> — matches ≥1.0.0 and ≤2.0.0.
@@ -628,10 +633,14 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     ///   <item><description>
     ///     <b>Exact</b>: <c>"4.0.1"</c> — matches exactly that version.
     ///   </description></item>
+    ///   <item><description>
+    ///     <b>Pipe (OR)</b>: <c>"1.0.0|3.0.0"</c> — matches either alternative.
+    ///   </description></item>
     /// </list>
     /// <para>
     /// Pipe-separated sub-expressions can individually use any of the above syntaxes
-    /// (e.g., <c>"^1.0.0|~2.3.0"</c>).
+    /// (e.g., <c>"^1.0.0|~2.3.0"</c>). Matching versions retain the order in which
+    /// they appear in <paramref name="versions"/>.
     /// </para>
     /// </remarks>
     /// <param name="versions">The candidate versions to evaluate.</param>
@@ -647,77 +656,9 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         ArgumentNullException.ThrowIfNull(versions);
         ArgumentException.ThrowIfNullOrEmpty(rangeExpression);
 
-        // Materialize once so multiple pipe-separated parts can iterate the same source.
+        FhirSemVerRange range = FhirSemVerRange.Parse(rangeExpression);
         IReadOnlyList<FhirSemVer> versionList = versions as IReadOnlyList<FhirSemVer> ?? versions.ToList();
-        string[] parts = rangeExpression.Split('|');
-
-        if (parts.Length == 1)
-            return EvaluateRangePart(versionList, parts[0].Trim());
-
-        // Union results from all pipe-separated sub-expressions.
-        HashSet<FhirSemVer> results = new HashSet<FhirSemVer>();
-        foreach (string part in parts)
-        {
-            foreach (FhirSemVer v in EvaluateRangePart(versionList, part.Trim()))
-                results.Add(v);
-        }
-
-        return results;
-    }
-
-    /// <summary>
-    /// Evaluates a single (non-pipe) range expression part against a list of versions.
-    /// </summary>
-    private static IEnumerable<FhirSemVer> EvaluateRangePart(
-        IReadOnlyList<FhirSemVer> versions,
-        string part)
-    {
-        // Hyphen range: "1.0.0 - 2.0.0"
-        int hyphenIndex = part.IndexOf(" - ", StringComparison.Ordinal);
-        if (hyphenIndex >= 0)
-        {
-            FhirSemVer lower = ParseExactForRange(part[..hyphenIndex].Trim(), part);
-            FhirSemVer upper = ParseExactForRange(part[(hyphenIndex + 3)..].Trim(), part);
-            return versions.Where(v => !v.IsWildcard && v >= lower && v <= upper);
-        }
-
-        // Caret range: "^3.0.1"
-        if (part.StartsWith('^'))
-        {
-            FhirSemVer baseVersion = ParseExactForRange(part[1..], part);
-            FhirSemVer ceiling = new FhirSemVer(
-                baseVersion.Major + 1, 0, 0, null, null, WildcardLevel.None);
-            return versions.Where(v => !v.IsWildcard && v >= baseVersion && v < ceiling);
-        }
-
-        // Tilde range: "~3.0.1"
-        if (part.StartsWith('~'))
-        {
-            FhirSemVer baseVersion = ParseExactForRange(part[1..], part);
-            FhirSemVer ceiling = new FhirSemVer(
-                baseVersion.Major, baseVersion.Minor + 1, 0, null, null, WildcardLevel.None);
-            return versions.Where(v => !v.IsWildcard && v >= baseVersion && v < ceiling);
-        }
-
-        // Wildcard or exact match
-        FhirSemVer specifier = Parse(part);
-        return versions.Where(v => v.Satisfies(specifier));
-    }
-
-    /// <summary>
-    /// Parses a version for use in a range expression, requiring it to be an exact
-    /// (non-wildcard) version.
-    /// </summary>
-    private static FhirSemVer ParseExactForRange(string versionPart, string fullExpression)
-    {
-        FhirSemVer version = Parse(versionPart);
-        if (version.IsWildcard)
-        {
-            throw new FormatException(
-                $"Range expressions require exact versions, not wildcards: '{fullExpression}'.");
-        }
-
-        return version;
+        return versionList.Where(range.IsSatisfiedBy);
     }
 
     // ────────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
 using FhirPkg.Models;
+using FhirPkg.Utilities;
 
 namespace FhirPkg.Resolution;
 
@@ -35,4 +36,6 @@ public class DependencyResolveOptions
     /// When <c>null</c>, any FHIR release is accepted.
     /// </summary>
     public FhirRelease? PreferredFhirRelease { get; set; }
+
+    internal PackageFixupPolicy? FixupPolicy { get; set; }
 }

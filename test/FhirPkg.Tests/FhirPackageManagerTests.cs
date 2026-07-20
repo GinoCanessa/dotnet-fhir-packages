@@ -115,6 +115,36 @@ public class FhirPackageManagerTests
             It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Fact]
+    public async Task ResolveAsync_UsesVersionFixupSnapshotCapturedAtConstruction()
+    {
+        FhirPackageManagerOptions options = new()
+        {
+            VersionFixups = new Dictionary<string, string>
+            {
+                ["example.package@1.0.0"] = "1.0.1",
+            },
+        };
+        PackageDirective? captured = null;
+        _registryMock.Setup(registry => registry.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<PackageDirective, VersionResolveOptions?, CancellationToken>(
+                (directive, _, _) => captured = directive)
+            .ReturnsAsync((ResolvedDirective?)null);
+
+        using FhirPackageManager manager = CreateManager(options);
+        options.VersionFixups["example.package@1.0.0"] = "2.0.0";
+
+        await manager.ResolveAsync(
+            "example.package#1.0.0",
+            TestContext.Current.CancellationToken);
+
+        captured.ShouldNotBeNull();
+        captured.RequestedVersion.ShouldBe("1.0.1");
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

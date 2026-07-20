@@ -138,12 +138,27 @@ public class PackageDirectiveTests
         reference.Version.ShouldBe("4.0.1");
     }
 
-    [Fact]
-    public void Parse_RangeVersion_ClassifiedCorrectly()
+    [Theory]
+    [InlineData("^4.0.0")]
+    [InlineData("~4.0.0")]
+    [InlineData(">=4.0.0")]
+    [InlineData(">=4.0.0 <5.0.0")]
+    [InlineData("4.0.0 - 4.0.2")]
+    [InlineData("=4.0.1")]
+    [InlineData("1.0.0|2.0.0")]
+    public void Parse_RangeVersion_ClassifiedCorrectly(string version)
     {
-        PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#^4.0.0");
+        PackageDirective directive = PackageDirective.Parse($"hl7.fhir.r4.core#{version}");
 
         directive.VersionType.ShouldBe(VersionType.Range);
+    }
+
+    [Fact]
+    public void Parse_TwoSegmentVersion_ClassifiedAsWildcard()
+    {
+        PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0");
+
+        directive.VersionType.ShouldBe(VersionType.Wildcard);
     }
 
     [Fact]

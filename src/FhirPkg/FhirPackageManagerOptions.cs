@@ -10,6 +10,10 @@ namespace FhirPkg;
 /// Controls cache location, registry endpoints, HTTP behavior, checksum verification,
 /// and in-memory caching parameters.
 /// </summary>
+/// <remarks>
+/// A package manager validates and snapshots these values at construction time.
+/// Later mutations to this instance or its collections do not reconfigure that manager.
+/// </remarks>
 public class FhirPackageManagerOptions
 {
     /// <summary>
@@ -87,9 +91,15 @@ public class FhirPackageManagerOptions
     /// Known package version fixups that correct well-known errata in the FHIR package ecosystem.
     /// Keys are in the format <c>"name@version"</c>; values are the corrected version strings.
     /// </summary>
+    /// <remarks>
+    /// The final <c>@</c> separates the package name from the concrete source version,
+    /// allowing scoped package names. An empty dictionary disables configured version
+    /// rewrites but not package-name canonicalization or <c>-cibuild</c> stripping.
+    /// </remarks>
     public Dictionary<string, string> VersionFixups { get; init; } = new()
     {
-        ["hl7.fhir.r4.core@4.0.0"] = "4.0.1"
+        ["hl7.fhir.r4.core@4.0.0"] = "4.0.1",
+        ["hl7.fhir.r4b.core@4.3.0-snapshot1"] = "4.3.0",
     };
 }
 
@@ -190,5 +200,9 @@ public class VersionResolveOptions
     /// <summary>
     /// FHIR release to restrict resolution to. When <c>null</c>, all releases are considered.
     /// </summary>
+    /// <remarks>
+    /// Explicit package metadata is authoritative. Package-name inference is used only
+    /// when no explicit FHIR-version metadata is present.
+    /// </remarks>
     public FhirRelease? FhirRelease { get; set; }
 }

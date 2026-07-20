@@ -79,16 +79,32 @@ hl7.fhir.r4.core@dev             # Local dev build
 
 ### 4. Version Ranges
 
-Some clients support SemVer range expressions:
+The SDK supports this SemVer range grammar:
 
 | Pattern | Meaning | Example |
 |---------|---------|---------|
+| `X.Y.Z` | Exact version | `3.0.1` |
+| `X.Y.x`, `X.x`, `X.Y`, `*` | Wildcard version | `3.0.x` |
 | `^X.Y.Z` | Compatible with X.Y.Z | `^3.0.1` → `≥3.0.1, <4.0.0` |
 | `~X.Y.Z` | Approximately X.Y.Z | `~3.0.1` → `≥3.0.1, <3.1.0` |
 | `X.Y.Z - A.B.C` | Between (inclusive) | `3.0.1 - 3.0.3` |
-| `X.Y.Z \| A.B.C` | Either version | `1.0.0 \| 2.0.0` |
+| `<`, `<=`, `>`, `>=`, `=` | Compare with an exact version | `>=3.0.1` |
+| Comparators separated by whitespace | Intersection (AND) | `>=3.0.1 <4.0.0` |
+| Alternatives separated by `\|` | Alternative (OR) | `1.0.0 \| >=2.0.0 <3.0.0` |
 
-> **Note:** Range expressions are primarily supported by the Firely C# implementation. Other implementations may have more limited support.
+Comparator operators may be adjacent to their version or separated from it by
+whitespace. Hyphen ranges require whitespace around the hyphen. Caret, tilde,
+hyphen, and comparator operands must be exact versions; wildcards are supported
+only as standalone alternatives. A pipe-separated alternative can use any one
+of the forms above.
+
+Caret ceilings follow the first non-zero component:
+
+| Range | Equivalent bounds |
+|-------|-------------------|
+| `^1.2.3` | `>=1.2.3 <2.0.0` |
+| `^0.2.3` | `>=0.2.3 <0.3.0` |
+| `^0.0.3` | `>=0.0.3 <0.0.4` |
 
 ### 5. No Version (Implicit Latest)
 

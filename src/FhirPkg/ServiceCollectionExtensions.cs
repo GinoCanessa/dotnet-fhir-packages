@@ -6,6 +6,7 @@ using FhirPkg.Installation;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
+using FhirPkg.Utilities;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -49,6 +50,9 @@ public static class ServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
+        bool hasPreRegisteredOptions = services.Any(descriptor =>
+            descriptor.ServiceType == typeof(FhirPackageManagerOptions));
+
         // Register and configure options
         OptionsBuilder<FhirPackageManagerOptions> optionsBuilder = services.AddOptions<FhirPackageManagerOptions>();
         if (configure is not null)
@@ -56,12 +60,25 @@ public static class ServiceCollectionExtensions
             optionsBuilder.Configure(configure);
         }
 
-        // Register the options instance for direct injection
         services.TryAddSingleton(sp =>
         {
-            IOptions<FhirPackageManagerOptions> opts = sp.GetRequiredService<IOptions<FhirPackageManagerOptions>>();
-            return opts.Value;
+            FhirPackageManagerOptions configuredOptions = hasPreRegisteredOptions
+                ? sp.GetRequiredService<FhirPackageManagerOptions>()
+                : sp.GetRequiredService<IOptions<FhirPackageManagerOptions>>().Value;
+            return FhirPackageManagerConfiguration.Create(configuredOptions);
         });
+
+        if (!hasPreRegisteredOptions)
+        {
+            services.TryAddSingleton(sp =>
+            {
+                FhirPackageManagerConfiguration configuration =
+                    sp.GetRequiredService<FhirPackageManagerConfiguration>();
+                return FhirPackageManagerConfiguration.Create(
+                    configuration.Options,
+                    configuration.InstallLimits).Options;
+            });
+        }
 
         // Register HttpClient via the typed HttpClient factory
         services.AddHttpClient("FhirPackages", (sp, client) =>
@@ -69,7 +86,8 @@ public static class ServiceCollectionExtensions
             client.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
         }).ConfigurePrimaryHttpMessageHandler(sp =>
         {
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerOptions options =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>().Options;
             return new HttpClientHandler
             {
                 AllowAutoRedirect = false,
@@ -80,10 +98,12 @@ public static class ServiceCollectionExtensions
         // Register IPackageCache as DiskPackageCache
         services.TryAddSingleton<IPackageCache>(sp =>
         {
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerConfiguration configuration =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>();
+            FhirPackageManagerOptions options = configuration.Options;
             ILogger<DiskPackageCache> logger = sp.GetRequiredService<ILogger<DiskPackageCache>>();
             TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
-            PackageInstallLimits installLimits = PackageInstallLimits.ResolveManager(options.InstallLimits);
+            PackageInstallLimits installLimits = configuration.InstallLimits;
             return new DiskPackageCache(options.CachePath, logger, timeProvider, installLimits);
         });
         services.TryAddSingleton<IHardenedPackageCache>(sp =>
@@ -97,7 +117,8 @@ public static class ServiceCollectionExtensions
         // Register IRegistryClient as a composite RedundantRegistryClient
         services.TryAddSingleton<IRegistryClient>(sp =>
         {
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerOptions options =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>().Options;
             IHttpClientFactory httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             HttpClient httpClient = httpClientFactory.CreateClient("FhirPackages");
             ILoggerFactory loggerFactory = sp.GetRequiredService<ILoggerFactory>();
@@ -131,7 +152,15 @@ public static class ServiceCollectionExtensions
             IPackageCache cache = sp.GetRequiredService<IPackageCache>();
             ILogger<DependencyResolver> logger = sp.GetRequiredService<ILogger<DependencyResolver>>();
             TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
-            return new DependencyResolver(registryClient, versionResolver, cache, logger, timeProvider);
+            PackageFixupPolicy fixupPolicy =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>().FixupPolicy;
+            return new DependencyResolver(
+                registryClient,
+                versionResolver,
+                cache,
+                logger,
+                fixupPolicy,
+                timeProvider);
         });
 
         // Register IPackageIndexer as PackageIndexer
@@ -152,9 +181,11 @@ public static class ServiceCollectionExtensions
             IVersionResolver versionResolver = sp.GetRequiredService<IVersionResolver>();
             IDependencyResolver dependencyResolver = sp.GetRequiredService<IDependencyResolver>();
             IPackageIndexer packageIndexer = sp.GetRequiredService<IPackageIndexer>();
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerConfiguration configuration =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>();
+            FhirPackageManagerOptions options = configuration.Options;
             ILogger<FhirPackageManager> logger = sp.GetRequiredService<ILogger<FhirPackageManager>>();
-            PackageInstallLimits installLimits = PackageInstallLimits.ResolveManager(options.InstallLimits);
+            PackageInstallLimits installLimits = configuration.InstallLimits;
             IHttpClientFactory httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             HttpClient httpClient = httpClientFactory.CreateClient("FhirPackages");
 

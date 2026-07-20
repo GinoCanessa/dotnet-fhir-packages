@@ -14,6 +14,7 @@ Use the **FhirPkg** NuGet package to integrate FHIR package management into your
 | [SDK Overview](sdk-overview.md) | Introduction, quick start, DI setup, configuration, and architecture. |
 | [SDK API Reference](sdk-api-reference.md) | Complete reference for all public interfaces, models, enums, and options. |
 | [Package Request Process](process.md) | End-to-end walkthrough of resolution, download, extraction, caching, and indexing. |
+| [Version Resolution Policy](versioning-policy.md) | Configuration snapshots, fixups, pre-release rules, and FHIR-release filtering. |
 
 ## CLI (Command-Line Tool)
 

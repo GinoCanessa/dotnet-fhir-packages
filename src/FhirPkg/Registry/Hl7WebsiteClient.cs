@@ -2,6 +2,7 @@
 
 using System.Net;
 using FhirPkg.Models;
+using FhirPkg.Resolution;
 using Microsoft.Extensions.Logging;
 
 namespace FhirPkg.Registry;
@@ -129,8 +130,9 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
         Logger.LogInformation(
             "Resolving {PackageId} via HL7 website fallback", directive.PackageId);
 
-        // Determine the FHIR release: explicit option takes priority over inference.
-        FhirRelease? release = options?.FhirRelease ?? InferReleaseFromPackageName(directive.PackageId);
+        FhirRelease? release =
+            InferReleaseFromPackageName(directive.PackageId)
+            ?? options?.FhirRelease;
 
         if (release is null)
         {
@@ -147,6 +149,38 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
             return Task.FromResult<ResolvedDirective?>(null);
         }
 
+        string? canonicalVersion = FhirReleaseMapping.ToVersionString(release.Value);
+        if (canonicalVersion is null)
+        {
+            return Task.FromResult<ResolvedDirective?>(null);
+        }
+
+        PackageVersionInfo versionInfo = new()
+        {
+            Name = directive.PackageId,
+            Version = canonicalVersion,
+            FhirVersion = canonicalVersion,
+            FhirVersions = [canonicalVersion],
+        };
+        PackageListing listing = new()
+        {
+            PackageId = directive.PackageId,
+            DistTags = new Dictionary<string, string>
+            {
+                ["latest"] = canonicalVersion,
+            },
+            Versions = new Dictionary<string, PackageVersionInfo>
+            {
+                [canonicalVersion] = versionInfo,
+            },
+        };
+        PackageVersionSelection? selection =
+            PackageVersionSelector.Select(directive, listing, options);
+        if (selection is null)
+        {
+            return Task.FromResult<ResolvedDirective?>(null);
+        }
+
         string tarballUrl = $"{BaseUrl}/{releasePath}/{Uri.EscapeDataString(directive.PackageId)}.tgz";
 
         Logger.LogInformation(
@@ -155,7 +189,7 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
 
         ResolvedDirective result = new ResolvedDirective
         {
-            Reference = directive.ToReference(),
+            Reference = new PackageReference(directive.PackageId, selection.Key),
             TarballUri = new Uri(tarballUrl),
             SourceRegistry = Endpoint,
         };

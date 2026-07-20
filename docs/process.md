@@ -161,19 +161,38 @@ The **`VersionResolver`** receives the `PackageDirective` and a
 registry and selects the best match:
 
 1. **Exact** — returns the version verbatim if it exists in the listing.
-2. **Latest** — returns the highest non-pre-release version (or the highest
-   pre-release if `AllowPreRelease` is true and no release exists).
-3. **Wildcard / Range** — delegates to `FhirSemVer.MaxSatisfying` which evaluates
-   glob patterns (`4.0.x`) and NPM ranges (`^4.0.0`, `~4.0.0`, `>=4.0.0`) against
-   all published versions and returns the highest match.
-4. **CI Build / CI Build Branch** — handled directly by the `FhirCiBuildClient`;
+2. **Latest** — uses `dist-tags.latest` when that candidate is eligible,
+   otherwise returns the highest eligible version.
+3. **Wildcard** — delegates to `FhirSemVer.MaxSatisfying`, which evaluates glob
+   patterns (`4.0.x`) against all published versions and returns the highest
+   match.
+4. **Range** — delegates to `FhirSemVer.SatisfyingRange`, then selects the
+   highest match from ranges such as `^4.0.0`, `~4.0.0`, and `>=4.0.0`.
+5. **CI Build / CI Build Branch** — handled directly by the `FhirCiBuildClient`;
    the version resolver returns `null` and the CI client resolves the build.
 
+#### Supported Range Grammar
+
+The supported subset is exact versions; wildcards (`4.0.x`, `4.x`, `4.0`,
+`*`); caret and tilde ranges; inclusive hyphen ranges (`1.0.0 - 2.0.0`);
+comparators (`<`, `<=`, `>`, `>=`, `=`); whitespace-separated comparator
+intersections (`>=1.0.0 <2.0.0`); and single-pipe alternatives
+(`^1.0.0|~2.3.0`). Comparator operators may be separated from their exact
+operand by whitespace. Caret, tilde, hyphen, and comparator operands must be
+exact versions.
+
+Caret ceilings use the first non-zero component: `^1.2.3` is below `2.0.0`,
+`^0.2.3` is below `0.3.0`, and `^0.0.3` is below `0.0.4`. Hyphen bounds are
+inclusive. Matching preserves the registry candidate order until the resolver
+explicitly selects the highest result.
+
 Pre-release versions follow the FHIR ordering hierarchy:
-`Release > Ballot > Draft > Snapshot > CiBuild > Other`. Pre-releases are
-excluded by default unless `AllowPreRelease` is set. When a
-`PreferredFhirRelease` is specified, the resolver filters the listing to versions
-targeting that FHIR release (e.g., R4, R5).
+`Release > Ballot > Draft > Snapshot > CiBuild > Other`. When
+`AllowPreRelease` is false, pre-releases are excluded for every request type,
+including exact requests. When a `PreferredFhirRelease` is specified, explicit
+`fhirVersion`/`fhirVersions` metadata is authoritative. Package-name inference
+is used only when that metadata is absent, and candidates with missing or
+incompatible release information are rejected.
 
 ### Resolution Result
 

@@ -35,6 +35,7 @@ public class DependencyResolver : IDependencyResolver
     private readonly IPackageCache _cache;
     private readonly ILogger _logger;
     private readonly TimeProvider _timeProvider;
+    private readonly PackageFixupPolicy _fixupPolicy;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DependencyResolver"/> class.
@@ -53,16 +54,35 @@ public class DependencyResolver : IDependencyResolver
         IPackageCache cache,
         ILogger logger,
         TimeProvider? timeProvider = null)
+        : this(
+            registryClient,
+            versionResolver,
+            cache,
+            logger,
+            PackageFixupPolicy.Default,
+            timeProvider)
+    {
+    }
+
+    internal DependencyResolver(
+        IRegistryClient registryClient,
+        IVersionResolver versionResolver,
+        IPackageCache cache,
+        ILogger logger,
+        PackageFixupPolicy fixupPolicy,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(registryClient);
         ArgumentNullException.ThrowIfNull(versionResolver);
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(fixupPolicy);
 
         _registryClient = registryClient;
         _versionResolver = versionResolver;
         _cache = cache;
         _logger = logger;
+        _fixupPolicy = fixupPolicy;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -81,6 +101,7 @@ public class DependencyResolver : IDependencyResolver
         HashSet<string> visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         IReadOnlyDictionary<string, string> dependencies = rootManifest.Dependencies ?? new Dictionary<string, string>();
+        PackageFixupPolicy fixupPolicy = options.FixupPolicy ?? _fixupPolicy;
 
         _logger.LogInformation(
             "Resolving dependencies for '{PackageName}@{PackageVersion}' ({DependencyCount} direct dependencies).",
@@ -92,6 +113,7 @@ public class DependencyResolver : IDependencyResolver
             missing,
             visited,
             options,
+            fixupPolicy,
             currentDepth: 0,
             cancellationToken).ConfigureAwait(false);
 
@@ -191,6 +213,7 @@ public class DependencyResolver : IDependencyResolver
         Dictionary<string, string> missing,
         HashSet<string> visited,
         DependencyResolveOptions options,
+        PackageFixupPolicy fixupPolicy,
         int currentDepth,
         CancellationToken cancellationToken)
     {
@@ -207,7 +230,9 @@ public class DependencyResolver : IDependencyResolver
             cancellationToken.ThrowIfCancellationRequested();
 
             // Apply known fixups (e.g. hl7.fhir.r4.core@4.0.0 → 4.0.1)
-            PackageReference fixedRef = PackageFixups.Apply(new PackageReference(rawPackageId, rawVersionSpec));
+            PackageReference fixedRef = PackageFixups.Apply(
+                new PackageReference(rawPackageId, rawVersionSpec),
+                fixupPolicy);
             string packageId = fixedRef.Name;
             string versionSpec = fixedRef.Version ?? "latest";
 
@@ -293,6 +318,7 @@ public class DependencyResolver : IDependencyResolver
 
                 await ResolveRecursiveAsync(
                     transitiveDeps, resolved, missing, visited, options,
+                    fixupPolicy,
                     currentDepth + 1, cancellationToken).ConfigureAwait(false);
             }
         }
