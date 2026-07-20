@@ -50,6 +50,40 @@ public class PackageVersionSelectorTests
     }
 
     [Fact]
+    public void Select_LatestTagVersion_IsCaseSensitive()
+    {
+        PackageListing listing = CreateListing(
+            "example.package",
+            (
+                "1.0.0-alpha",
+                CreateInfo(
+                    "example.package",
+                    "1.0.0-alpha",
+                    "4.0.1")),
+            (
+                "1.0.0-Alpha",
+                CreateInfo(
+                    "example.package",
+                    "1.0.0-Alpha",
+                    "4.0.1")));
+        listing = listing with
+        {
+            DistTags = new Dictionary<string, string>
+            {
+                ["latest"] = "1.0.0-Alpha",
+            },
+        };
+
+        PackageVersionSelection? result = PackageVersionSelector.Select(
+            PackageDirective.Parse("example.package#latest"),
+            listing,
+            null);
+
+        result.ShouldNotBeNull();
+        result.Key.ShouldBe("1.0.0-Alpha");
+    }
+
+    [Fact]
     public void Select_PreferredReleaseMatchesAnyArrayEntry()
     {
         PackageVersionInfo info = CreateInfo("example.package", "1.0.0", "4.0.1") with

@@ -537,7 +537,11 @@ public sealed class FhirPackageManager :
                     .ConfigureAwait(false);
 
                 // Install all resolved packages from the lock file
-                await InstallClosureAsync(closure, installPolicy, cancellationToken).ConfigureAwait(false);
+                closure = await InstallClosureAsync(
+                        closure,
+                        installPolicy,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 return closure;
             }
 
@@ -552,6 +556,12 @@ public sealed class FhirPackageManager :
             AllowPreRelease = installPolicy.AllowPreRelease,
             PreferredFhirRelease = installPolicy.PreferredFhirRelease,
             FixupPolicy = _fixupPolicy,
+            RootReference =
+                new PackageReference(
+                    manifest.Name,
+                    manifest.Version),
+            InstallCachedPackages =
+                installPolicy.OverwriteExisting,
         };
 
         closure = await _dependencyResolver.ResolveAsync(manifest, resolveOptions, cancellationToken)
@@ -561,7 +571,13 @@ public sealed class FhirPackageManager :
             closure.Resolved.Count, closure.Missing.Count);
 
         // Step 4: Install all resolved packages
-        await InstallClosureAsync(closure, installPolicy, cancellationToken).ConfigureAwait(false);
+        closure = await InstallClosureAsync(
+                closure,
+                installPolicy,
+                cancellationToken,
+                manifest,
+                resolveOptions)
+            .ConfigureAwait(false);
 
         // Step 5: Write lock file if configured
         if (effectiveOptions.WriteLockFile)
@@ -1090,11 +1106,18 @@ public sealed class FhirPackageManager :
     private async Task<PackageRecord?> InstallDirectiveAsync(
         string directive,
         ResolvedPackageInstallPolicy policy,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool applyFixups = true,
+        PackageReference? expectedResolvedReference = null)
     {
         try
         {
-            return await InstallDirectiveCoreAsync(directive, policy, cancellationToken)
+            return await InstallDirectiveCoreAsync(
+                    directive,
+                    policy,
+                    cancellationToken,
+                    applyFixups,
+                    expectedResolvedReference)
                 .ConfigureAwait(false);
         }
         catch (PackageInstallException)
@@ -1107,15 +1130,21 @@ public sealed class FhirPackageManager :
     private async Task<PackageRecord?> InstallDirectiveCoreAsync(
         string directive,
         ResolvedPackageInstallPolicy policy,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool applyFixups,
+        PackageReference? expectedResolvedReference)
     {
         _logger.LogDebug("Installing directive '{Directive}' through the unified install contract.", directive);
 
         PackageDirective parsedDirective = DirectiveParser.Parse(directive);
-        PackageReference requestedReference = PackageFixups.Apply(
-            parsedDirective.ToReference(),
-            _fixupPolicy);
-        if (!requestedReference.Equals(parsedDirective.ToReference()))
+        PackageReference parsedReference = parsedDirective.ToReference();
+        PackageReference requestedReference = applyFixups
+            ? PackageFixups.Apply(
+                parsedReference,
+                _fixupPolicy)
+            : parsedReference;
+        if (applyFixups
+            && !requestedReference.Equals(parsedReference))
         {
             parsedDirective = DirectiveParser.Parse(requestedReference.FhirDirective);
         }
@@ -1150,7 +1179,16 @@ public sealed class FhirPackageManager :
                     "Local package alias {Name}#{Version} is already cached.",
                     requestedReference.Name,
                     requestedReference.Version);
-                return await GetCachedPackageAsync(localKey, cancellationToken).ConfigureAwait(false);
+                PackageRecord? cachedRecord = await GetCachedPackageAsync(
+                        localKey,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await InstallCachedDependenciesIfRequestedAsync(
+                        cachedRecord,
+                        policy,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return cachedRecord;
             }
 
             _logger.LogWarning(
@@ -1169,7 +1207,16 @@ public sealed class FhirPackageManager :
                     "Package {Name}#{Version} is already cached.",
                     requestedReference.Name,
                     requestedReference.Version);
-                return await GetCachedPackageAsync(requestedKey, cancellationToken).ConfigureAwait(false);
+                PackageRecord? cachedRecord = await GetCachedPackageAsync(
+                        requestedKey,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await InstallCachedDependenciesIfRequestedAsync(
+                        cachedRecord,
+                        policy,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return cachedRecord;
             }
         }
 
@@ -1188,8 +1235,52 @@ public sealed class FhirPackageManager :
             return null;
         }
 
+        if (expectedResolvedReference is PackageReference expected
+            && (!resolved.Reference.Name.Equals(
+                    expected.Name,
+                    StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    resolved.Reference.Version,
+                    expected.Version,
+                    StringComparison.Ordinal)))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPackageIdentity,
+                PackageInstallStage.IdentityValidation,
+                $"Resolved dependency '{resolved.Reference.FhirDirective}' did not match the active closure identity '{expected.FhirDirective}'.",
+                requestedReference.FhirDirective);
+        }
+
+        if (!applyFixups
+            && expectedResolvedReference is null
+            && (!resolved.Reference.Name.Equals(
+                    requestedReference.Name,
+                    StringComparison.OrdinalIgnoreCase)
+                || parsedDirective.VersionType == VersionType.Exact
+                && !string.Equals(
+                    resolved.Reference.Version,
+                    requestedReference.Version,
+                    StringComparison.Ordinal)))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPackageIdentity,
+                PackageInstallStage.IdentityValidation,
+                $"Resolved dependency '{resolved.Reference.FhirDirective}' did not match the active closure node '{requestedReference.FhirDirective}'.",
+                requestedReference.FhirDirective);
+        }
+
         bool preservesAlias = parsedDirective.VersionType
             is VersionType.CiBuild or VersionType.CiBuildBranch;
+        PackageReference? expectedManifestReference =
+            expectedResolvedReference;
+        if (preservesAlias
+            && expectedManifestReference is null
+            && PackageDirective.ClassifyVersion(
+                resolved.Reference.Version) == VersionType.Exact)
+        {
+            expectedManifestReference = resolved.Reference;
+        }
+
         PackageReference cacheReference = preservesAlias
             ? requestedReference
             : resolved.Reference;
@@ -1202,7 +1293,11 @@ public sealed class FhirPackageManager :
             Kind = preservesAlias
                 ? PackageIdentityExpectationKind.Alias
                 : PackageIdentityExpectationKind.Exact,
-            Reference = preservesAlias ? requestedReference : resolved.Reference
+            Reference = preservesAlias ? requestedReference : resolved.Reference,
+            ExpectedManifestReference =
+                preservesAlias
+                    ? expectedManifestReference
+                    : null,
         };
 
         PackageInstallRequest request = new PackageInstallRequest
@@ -1323,6 +1418,17 @@ public sealed class FhirPackageManager :
         PackageRecord? cachedRecord = isInstalled
             ? await GetCachedPackageAsync(request.CacheKey, cancellationToken).ConfigureAwait(false)
             : null;
+        bool cachedMatchesExpectedIdentity =
+            !isInstalled
+            || request.IdentityExpectation.ExpectedManifestReference
+                is not PackageReference expectedManifest
+            || cachedRecord is not null
+            && cachedRecord.Manifest.Name.Equals(
+                expectedManifest.Name,
+                StringComparison.OrdinalIgnoreCase)
+            && cachedRecord.Manifest.Version.Equals(
+                expectedManifest.Version,
+                StringComparison.Ordinal);
         CacheMetadataEntry? existingMetadata = null;
 
         if (request.Freshness == PackageInstallFreshness.Immutable
@@ -1330,6 +1436,11 @@ public sealed class FhirPackageManager :
             && !request.Policy.OverwriteExisting
             && cachedRecord is not null)
         {
+            await InstallCachedDependenciesIfRequestedAsync(
+                    cachedRecord,
+                    request.Policy,
+                    cancellationToken)
+                .ConfigureAwait(false);
             ReportProgress(
                 request.Policy.Progress,
                 cacheReference.Name,
@@ -1347,6 +1458,7 @@ public sealed class FhirPackageManager :
 
             if (!request.Policy.OverwriteExisting
                 && cachedRecord is not null
+                && cachedMatchesExpectedIdentity
                 && sourcePublicationDate.HasValue
                 && existingMetadata?.SourcePublicationDate is DateTimeOffset cachedPublicationDate
                 && cachedPublicationDate >= sourcePublicationDate.Value)
@@ -1354,6 +1466,11 @@ public sealed class FhirPackageManager :
                 _logger.LogInformation(
                     "Mutable alias {CacheKey} is current according to source publication metadata.",
                     request.CacheKey.MetadataKey);
+                await InstallCachedDependenciesIfRequestedAsync(
+                        cachedRecord,
+                        request.Policy,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 ReportProgress(
                     request.Policy.Progress,
                     cacheReference.Name,
@@ -1386,7 +1503,9 @@ public sealed class FhirPackageManager :
             IdentityExpectation = request.IdentityExpectation,
             CorruptCacheBehavior = request.Policy.CorruptCacheBehavior,
             SkipIfArchiveUnchanged =
-                request.Freshness == PackageInstallFreshness.RefreshableAlias,
+                request.Freshness
+                    == PackageInstallFreshness.RefreshableAlias
+                && cachedMatchesExpectedIdentity,
             Progress = request.Policy.Progress
         };
 
@@ -1463,6 +1582,21 @@ public sealed class FhirPackageManager :
         return record;
     }
 
+    private async Task InstallCachedDependenciesIfRequestedAsync(
+        PackageRecord? record,
+        ResolvedPackageInstallPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        if (record is not null && policy.IncludeDependencies)
+        {
+            await InstallDependenciesAsync(
+                    record,
+                    policy,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
     private async Task<IReadOnlyList<PackageInstallResult>> InstallManyResolvedAsync(
         IReadOnlyList<string> directives,
         ResolvedPackageInstallPolicy policy,
@@ -1476,50 +1610,11 @@ public sealed class FhirPackageManager :
             await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                PackageRecord? record = await InstallDirectiveAsync(
+                results[index] = await InstallResultAsync(
                         directive,
                         policy,
                         cancellationToken)
                     .ConfigureAwait(false);
-                results[index] = record is not null
-                    ? new PackageInstallResult
-                    {
-                        Directive = directive,
-                        Package = record,
-                        Status = PackageInstallStatus.Installed
-                    }
-                    : new PackageInstallResult
-                    {
-                        Directive = directive,
-                        Status = PackageInstallStatus.NotFound,
-                        ErrorMessage = $"Package '{directive}' could not be resolved.",
-                        ErrorCode = PackageInstallErrorCode.ResolutionFailed,
-                        ErrorStage = PackageInstallStage.Resolution
-                    };
-            }
-            catch (PackageInstallException exception)
-            {
-                _logger.LogError(exception, "Failed to install '{Directive}'.", directive);
-                results[index] = new PackageInstallResult
-                {
-                    Directive = directive,
-                    Status = PackageInstallStatus.Failed,
-                    ErrorMessage = exception.Message,
-                    ErrorCode = exception.ErrorCode,
-                    ErrorStage = exception.Stage
-                };
-            }
-            catch (ArgumentException exception)
-            {
-                _logger.LogError(exception, "Invalid package directive '{Directive}'.", directive);
-                results[index] = new PackageInstallResult
-                {
-                    Directive = directive,
-                    Status = PackageInstallStatus.Failed,
-                    ErrorMessage = exception.Message,
-                    ErrorCode = PackageInstallErrorCode.InvalidPackageIdentity,
-                    ErrorStage = PackageInstallStage.IdentityValidation
-                };
             }
             finally
             {
@@ -1535,6 +1630,89 @@ public sealed class FhirPackageManager :
             installed,
             directives.Count);
         return results;
+    }
+
+    private async Task<PackageInstallResult> InstallResultAsync(
+        string directive,
+        ResolvedPackageInstallPolicy policy,
+        CancellationToken cancellationToken,
+        bool applyFixups = true,
+        PackageReference? expectedResolvedReference = null)
+    {
+        try
+        {
+            PackageRecord? record = await InstallDirectiveAsync(
+                    directive,
+                    policy,
+                    cancellationToken,
+                    applyFixups,
+                    expectedResolvedReference)
+                .ConfigureAwait(false);
+            return record is not null
+                ? new PackageInstallResult
+                {
+                    Directive = directive,
+                    Package = record,
+                    Status = PackageInstallStatus.Installed
+                }
+                : new PackageInstallResult
+                {
+                    Directive = directive,
+                    Status = PackageInstallStatus.NotFound,
+                    ErrorMessage =
+                        $"Package '{directive}' could not be resolved.",
+                    ErrorCode = PackageInstallErrorCode.ResolutionFailed,
+                    ErrorStage = PackageInstallStage.Resolution
+                };
+        }
+        catch (DependencyInstallationException exception)
+        {
+            _logger.LogError(
+                exception,
+                "Package '{Directive}' committed, but dependency installation failed.",
+                directive);
+            return new PackageInstallResult
+            {
+                Directive = directive,
+                Package = exception.RootPackage,
+                Status = PackageInstallStatus.Failed,
+                ErrorMessage = exception.Message,
+                ErrorCode = exception.ErrorCode,
+                ErrorStage = exception.Stage,
+                DependencyFailures = exception.DependencyFailures
+            };
+        }
+        catch (PackageInstallException exception)
+        {
+            _logger.LogError(
+                exception,
+                "Failed to install '{Directive}'.",
+                directive);
+            return new PackageInstallResult
+            {
+                Directive = directive,
+                Status = PackageInstallStatus.Failed,
+                ErrorMessage = exception.Message,
+                ErrorCode = exception.ErrorCode,
+                ErrorStage = exception.Stage
+            };
+        }
+        catch (ArgumentException exception)
+        {
+            _logger.LogError(
+                exception,
+                "Invalid package directive '{Directive}'.",
+                directive);
+            return new PackageInstallResult
+            {
+                Directive = directive,
+                Status = PackageInstallStatus.Failed,
+                ErrorMessage = exception.Message,
+                ErrorCode =
+                    PackageInstallErrorCode.InvalidPackageIdentity,
+                ErrorStage = PackageInstallStage.IdentityValidation
+            };
+        }
     }
 
     private async Task<PackageDownloadResult> DownloadAsync(
@@ -1699,7 +1877,7 @@ public sealed class FhirPackageManager :
             exception);
 
     /// <summary>
-    /// Recursively installs dependencies of a cached package.
+    /// Resolves and installs the active dependency closure of a committed package.
     /// </summary>
     private async Task InstallDependenciesAsync(
         PackageRecord record,
@@ -1716,60 +1894,506 @@ public sealed class FhirPackageManager :
         _logger.LogDebug("Installing {Count} dependencies for {Name}#{Version}.",
             manifest.Dependencies.Count, record.Reference.Name, record.Reference.Version);
 
-        foreach ((string? depName, string? depVersion) in manifest.Dependencies)
+        PackageClosure closure =
+            await ResolveDependencyClosureAsync(
+                    record,
+                    policy,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        ResolvedPackageInstallPolicy childPolicy =
+            policy.WithoutDependencies();
+        Dictionary<string, PackageInstallResult> bootstrapFailures =
+            new(StringComparer.Ordinal);
+        List<string> bootstrapFailureOrder = [];
+        HashSet<string> failedBootstrapPackages =
+            new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> failedBootstrapReferences =
+            new(StringComparer.Ordinal);
+        HashSet<string> bootstrapStates =
+            new(StringComparer.Ordinal);
+        HashSet<string> bootstrappedReferences =
+            new(StringComparer.Ordinal);
+        while (closure.BootstrapInstallOrder.Count > 0)
+        {
+            List<PackageReference> candidates =
+                closure.BootstrapInstallOrder
+                    .Where(reference =>
+                    {
+                        string key =
+                            CreateDependencyReferenceKey(reference);
+                        return !bootstrappedReferences.Contains(key)
+                            && !failedBootstrapReferences.Contains(key);
+                    })
+                    .ToList();
+            if (candidates.Count == 0)
+                break;
+
+            string bootstrapState = string.Join(
+                "\n",
+                candidates.Select(
+                    reference =>
+                        reference.FhirDirective));
+            if (!bootstrapStates.Add(bootstrapState))
+            {
+                break;
+            }
+
+            bool bootstrapSucceeded = false;
+            foreach (PackageReference reference in candidates)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                PackageInstallResult result = await InstallResultAsync(
+                        reference.FhirDirective,
+                        childPolicy,
+                        cancellationToken,
+                        applyFixups: false,
+                        expectedResolvedReference:
+                            GetExpectedClosureIdentity(
+                                closure,
+                                reference))
+                    .ConfigureAwait(false);
+                if (result.Status
+                    is not (
+                        PackageInstallStatus.Failed
+                        or PackageInstallStatus.NotFound))
+                {
+                    bootstrappedReferences.Add(
+                        CreateDependencyReferenceKey(reference));
+                    bootstrapSucceeded = true;
+                    continue;
+                }
+
+                string failureKey =
+                    CreateDependencyReferenceKey(reference);
+                if (bootstrapFailures.TryAdd(
+                        failureKey,
+                        result))
+                {
+                    bootstrapFailureOrder.Add(failureKey);
+                }
+                failedBootstrapPackages.Add(reference.Name);
+                failedBootstrapReferences.Add(
+                    failureKey);
+            }
+
+            if (!bootstrapSucceeded)
+                break;
+
+            closure = await ResolveDependencyClosureAsync(
+                    record,
+                    policy,
+                    cancellationToken,
+                    preferCachedAliases: true)
+                .ConfigureAwait(false);
+        }
+
+        HashSet<string> activeBootstrapReferences =
+            closure.BootstrapInstallOrder
+                .Select(CreateDependencyReferenceKey)
+                .ToHashSet(StringComparer.Ordinal);
+        failedBootstrapReferences.IntersectWith(
+            activeBootstrapReferences);
+        failedBootstrapPackages.Clear();
+        foreach (PackageReference reference
+                 in closure.BootstrapInstallOrder)
+        {
+            if (failedBootstrapReferences.Contains(
+                    CreateDependencyReferenceKey(reference)))
+            {
+                failedBootstrapPackages.Add(reference.Name);
+            }
+        }
+
+        List<PackageInstallResult> failures =
+            bootstrapFailureOrder
+                .Where(activeBootstrapReferences.Contains)
+                .Select(key => bootstrapFailures[key])
+                .ToList();
+        failures.AddRange(
+            closure.Failures
+                .Where(
+                    failure =>
+                        !failedBootstrapReferences.Contains(
+                            CreateDependencyReferenceKey(
+                                failure.PackageId,
+                                failure.VersionSpecifier)))
+                .Select(CreateClosureFailureResult)
+                .ToList());
+        HashSet<string> structuredFailurePackages =
+            closure.Failures
+                .Select(failure => failure.PackageId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        structuredFailurePackages.UnionWith(
+            failedBootstrapPackages);
+        foreach (KeyValuePair<string, string> missing in closure.Missing)
+        {
+            if (structuredFailurePackages.Add(missing.Key))
+            {
+                failures.Add(new PackageInstallResult
+                {
+                    Directive = missing.Key,
+                    Status = PackageInstallStatus.NotFound,
+                    ErrorMessage = missing.Value,
+                    ErrorCode =
+                        PackageInstallErrorCode.DependencyInstallationFailed,
+                    ErrorStage =
+                        PackageInstallStage.DependencyInstallation
+                });
+            }
+        }
+
+        IEnumerable<PackageReference> installOrder =
+            closure.InstallOrderIsComplete
+                ? closure.InstallOrder
+                : closure.Resolved.Values
+                    .OrderBy(
+                        reference => reference.Name,
+                        StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(
+                        reference => reference.Version,
+                        StringComparer.Ordinal);
+        HashSet<string> attemptedPackages =
+            new(StringComparer.OrdinalIgnoreCase);
+        foreach (PackageReference reference in installOrder)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            string depDirective = string.IsNullOrEmpty(depVersion) ? depName : $"{depName}#{depVersion}";
-            _logger.LogDebug("Installing dependency: {Directive}.", depDirective);
+            if (reference.Name.Equals(
+                    record.Manifest.Name,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.Equals(
+                        reference.Version,
+                        record.Manifest.Version,
+                        StringComparison.Ordinal))
+                {
+                    continue;
+                }
 
-            try
-            {
-                await InstallDirectiveAsync(depDirective, policy, cancellationToken).ConfigureAwait(false);
+                failures.Add(new PackageInstallResult
+                {
+                    Directive = reference.FhirDirective,
+                    Status = PackageInstallStatus.Failed,
+                    ErrorMessage =
+                        $"The active dependency graph requires '{reference.FhirDirective}', but the committed root is '{record.Reference.FhirDirective}'.",
+                    ErrorCode =
+                        PackageInstallErrorCode.DependencyInstallationFailed,
+                    ErrorStage =
+                        PackageInstallStage.DependencyInstallation
+                });
+                continue;
             }
-            catch (PackageInstallException exception)
+
+            if (!attemptedPackages.Add(reference.Name))
             {
-                _logger.LogWarning(exception, "Failed to install dependency '{Directive}' for {Name}#{Version}.",
-                    depDirective, record.Reference.Name, record.Reference.Version);
+                continue;
             }
-            catch (ArgumentException exception)
+
+            if (!reference.HasVersion)
             {
-                _logger.LogWarning(exception, "Failed to install dependency '{Directive}' for {Name}#{Version}.",
-                    depDirective, record.Reference.Name, record.Reference.Version);
+                failures.Add(new PackageInstallResult
+                {
+                    Directive = reference.Name,
+                    Status = PackageInstallStatus.Failed,
+                    ErrorMessage =
+                        "The dependency closure did not contain an exact version.",
+                    ErrorCode =
+                        PackageInstallErrorCode.DependencyInstallationFailed,
+                    ErrorStage =
+                        PackageInstallStage.DependencyInstallation
+                });
+                continue;
+            }
+
+            string directive = reference.FhirDirective;
+            PackageInstallResult result = await InstallResultAsync(
+                    directive,
+                    childPolicy,
+                    cancellationToken,
+                    applyFixups: false,
+                    expectedResolvedReference:
+                        GetExpectedClosureIdentity(
+                            closure,
+                            reference))
+                .ConfigureAwait(false);
+            if (result.Status
+                is PackageInstallStatus.Failed
+                    or PackageInstallStatus.NotFound)
+            {
+                failures.Add(result);
+                _logger.LogWarning(
+                    "Failed to install dependency '{Directive}' for {Name}#{Version}: {Failure}.",
+                    directive,
+                    record.Reference.Name,
+                    record.Reference.Version,
+                    result.GetFailureDescription()
+                        ?? "Unknown dependency installation failure.");
             }
         }
+
+        if (failures.Count > 0)
+        {
+            throw new DependencyInstallationException(
+                record,
+                failures,
+                closure.Failures);
+        }
     }
+
+    private async Task<PackageClosure> ResolveDependencyClosureAsync(
+        PackageRecord record,
+        ResolvedPackageInstallPolicy policy,
+        CancellationToken cancellationToken,
+        bool preferCachedAliases = false)
+    {
+        try
+        {
+            return await _dependencyResolver.ResolveAsync(
+                    record.Manifest,
+                    new DependencyResolveOptions
+                    {
+                        ConflictStrategy = policy.ConflictStrategy,
+                        MaxDepth = policy.MaxDepth,
+                        AllowPreRelease = policy.AllowPreRelease,
+                        PreferredFhirRelease =
+                            policy.PreferredFhirRelease,
+                        FixupPolicy = _fixupPolicy,
+                        RootReference = record.Reference,
+                        InstallCachedPackages =
+                            policy.OverwriteExisting,
+                        PreferCachedAliases =
+                            preferCachedAliases,
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (PackageInstallException exception)
+        {
+            throw new DependencyInstallationException(
+                record,
+                [CreateResolverExceptionResult(exception)]);
+        }
+        catch (Exception exception)
+            when (exception is ArgumentException
+                or FormatException
+                or InvalidDataException
+                or JsonException
+                or IOException
+                or HttpRequestException)
+        {
+            throw new DependencyInstallationException(
+                record,
+                [
+                    new PackageInstallResult
+                    {
+                        Directive = record.Reference.FhirDirective,
+                        Status = PackageInstallStatus.Failed,
+                        ErrorMessage = exception.Message,
+                        ErrorCode =
+                            PackageInstallErrorCode.DependencyInstallationFailed,
+                        ErrorStage =
+                            PackageInstallStage.DependencyInstallation
+                    }
+                ]);
+        }
+    }
+
+    private static string CreateDependencyReferenceKey(
+        PackageReference reference) =>
+        CreateDependencyReferenceKey(
+            reference.Name,
+            reference.Version);
+
+    private static string CreateDependencyReferenceKey(
+        string packageId,
+        string? version) =>
+        $"{packageId.ToLowerInvariant()}\0{version}";
+
+    private static PackageInstallResult CreateClosureFailureResult(
+        DependencyResolutionFailure failure)
+    {
+        string version = failure.VersionSpecifier
+            ?? failure.SelectedVersion
+            ?? "latest";
+        string directive = $"{failure.PackageId}#{version}";
+        return new PackageInstallResult
+        {
+            Directive = directive,
+            Status =
+                failure.Code
+                    == DependencyResolutionFailureCode.PackageNotFound
+                    ? PackageInstallStatus.NotFound
+                    : PackageInstallStatus.Failed,
+            ErrorMessage = failure.Message,
+            ErrorCode =
+                PackageInstallErrorCode.DependencyInstallationFailed,
+            ErrorStage = PackageInstallStage.DependencyInstallation
+        };
+    }
+
+    private static PackageInstallResult CreateResolverExceptionResult(
+        PackageInstallException exception) =>
+        new()
+        {
+            Directive = exception.Directive
+                ?? "dependency closure",
+            Status = PackageInstallStatus.Failed,
+            ErrorMessage = exception.Message,
+            ErrorCode = exception.ErrorCode,
+            ErrorStage = exception.Stage
+        };
 
     /// <summary>
     /// Installs all packages referenced in a closure that are not already cached.
     /// </summary>
-    private async Task InstallClosureAsync(
+    private async Task<PackageClosure> InstallClosureAsync(
         PackageClosure closure,
         ResolvedPackageInstallPolicy policy,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        PackageManifest? manifest = null,
+        DependencyResolveOptions? resolveOptions = null)
     {
-        List<string> directives = closure.Resolved.Values
-            .Where(r => r.HasVersion)
-            .Select(r => r.FhirDirective)
-            .ToList();
+        List<PackageInstallResult> results = [];
+        Dictionary<string, PackageInstallResult> bootstrapFailures =
+            new(StringComparer.Ordinal);
+        List<string> bootstrapFailureOrder = [];
+        ResolvedPackageInstallPolicy childPolicy =
+            policy.WithoutDependencies();
+        if (manifest is not null
+            && resolveOptions is not null
+            && closure.BootstrapInstallOrder.Count > 0)
+        {
+            HashSet<string> completed =
+                new(StringComparer.Ordinal);
+            HashSet<string> failed =
+                new(StringComparer.Ordinal);
+            HashSet<string> states =
+                new(StringComparer.Ordinal);
+            while (closure.BootstrapInstallOrder.Count > 0)
+            {
+                List<PackageReference> candidates =
+                    closure.BootstrapInstallOrder
+                        .Where(reference =>
+                        {
+                            string key =
+                                CreateDependencyReferenceKey(
+                                    reference);
+                            return !completed.Contains(key)
+                                && !failed.Contains(key);
+                        })
+                        .ToList();
+                if (candidates.Count == 0)
+                    break;
 
-        if (directives.Count == 0)
-            return;
+                string state = string.Join(
+                    "\n",
+                    candidates.Select(
+                        reference =>
+                            reference.FhirDirective));
+                if (!states.Add(state))
+                    break;
 
-        _logger.LogDebug("Installing {Count} packages from closure.", directives.Count);
+                bool bootstrapSucceeded = false;
+                foreach (PackageReference reference in candidates)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    PackageInstallResult result =
+                        await InstallResultAsync(
+                                reference.FhirDirective,
+                                childPolicy,
+                                cancellationToken,
+                                applyFixups: false,
+                                expectedResolvedReference:
+                                    GetExpectedClosureIdentity(
+                                        closure,
+                                        reference))
+                            .ConfigureAwait(false);
+                    if (result.Status
+                        is PackageInstallStatus.Failed
+                            or PackageInstallStatus.NotFound)
+                    {
+                        string failureKey =
+                            CreateDependencyReferenceKey(
+                                reference);
+                        if (bootstrapFailures.TryAdd(
+                                failureKey,
+                                result))
+                        {
+                            bootstrapFailureOrder.Add(
+                                failureKey);
+                        }
 
-        // The closure already contains all transitive dependencies.
-        IReadOnlyList<PackageInstallResult> results = await InstallManyResolvedAsync(
-                directives,
-                policy.WithoutDependencies(),
-                cancellationToken)
-            .ConfigureAwait(false);
+                        failed.Add(failureKey);
+                    }
+                    else
+                    {
+                        completed.Add(
+                            CreateDependencyReferenceKey(
+                                reference));
+                        bootstrapSucceeded = true;
+                    }
+                }
+
+                if (!bootstrapSucceeded)
+                    break;
+
+                resolveOptions.PreferCachedAliases = true;
+                closure = await _dependencyResolver.ResolveAsync(
+                        manifest,
+                        resolveOptions,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        HashSet<string> activeBootstrapReferences =
+            closure.BootstrapInstallOrder
+                .Select(CreateDependencyReferenceKey)
+                .ToHashSet(StringComparer.Ordinal);
+        results.AddRange(
+            bootstrapFailureOrder
+                .Where(activeBootstrapReferences.Contains)
+                .Select(key => bootstrapFailures[key]));
+
+        IEnumerable<PackageReference> installOrder =
+            closure.InstallOrderIsComplete
+                ? closure.InstallOrder
+                : closure.Resolved.Values
+                    .OrderBy(
+                        reference => reference.Name,
+                        StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(
+                        reference => reference.Version,
+                        StringComparer.Ordinal);
+        List<PackageReference> references =
+            installOrder
+                .Where(reference => reference.HasVersion)
+                .ToList();
+        _logger.LogDebug(
+            "Installing {Count} packages from closure.",
+            references.Count);
+
+        foreach (PackageReference reference in references)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            results.Add(
+                await InstallResultAsync(
+                        reference.FhirDirective,
+                        childPolicy,
+                        cancellationToken,
+                        applyFixups: false,
+                        expectedResolvedReference:
+                            GetExpectedClosureIdentity(
+                                closure,
+                                reference))
+                    .ConfigureAwait(false));
+        }
 
         PackageInstallResult? failure = results.FirstOrDefault(
             result => result.Status
                 is PackageInstallStatus.Failed or PackageInstallStatus.NotFound);
         if (failure is null)
-            return;
+            return closure;
 
         PackageInstallErrorCode errorCode = failure.ErrorCode
             ?? (failure.Status == PackageInstallStatus.NotFound
@@ -1786,6 +2410,23 @@ public sealed class FhirPackageManager :
             failure.ErrorMessage
                 ?? $"Package '{failure.Directive}' could not be restored.",
             failure.Directive);
+    }
+
+    private static PackageReference? GetExpectedClosureIdentity(
+        PackageClosure closure,
+        PackageReference installationReference)
+    {
+        VersionType referenceType =
+            PackageDirective.ClassifyVersion(
+                installationReference.Version);
+        return (referenceType
+                    is VersionType.CiBuild
+                        or VersionType.CiBuildBranch)
+            && closure.Resolved.TryGetValue(
+                installationReference.Name,
+                out PackageReference selectedReference)
+                ? selectedReference
+                : (PackageReference?)null;
     }
 
     /// <summary>

@@ -27,6 +27,9 @@ public enum DependencyResolutionFailureCode
 
     /// <summary>The active graph repeated a prior state and could not reach a stable closure.</summary>
     UnstableResolution,
+
+    /// <summary>A dependency edge contained an invalid package identifier or version specifier.</summary>
+    InvalidDirective,
 }
 
 /// <summary>

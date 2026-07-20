@@ -223,7 +223,9 @@ internal static class InstallCommand
         }
 
         if (failures.Any(result =>
-            result.ErrorStage
+            result.ErrorCode
+                == PackageInstallErrorCode.DependencyInstallationFailed
+            || result.ErrorStage
                 == PackageInstallStage.DependencyInstallation))
         {
             return ExitCodes.DependencyResolutionFail;

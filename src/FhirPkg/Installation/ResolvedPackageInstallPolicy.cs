@@ -20,6 +20,10 @@ internal sealed record ResolvedPackageInstallPolicy
 
     internal required bool AllowPreRelease { get; init; }
 
+    internal required ConflictResolutionStrategy ConflictStrategy { get; init; }
+
+    internal required int MaxDepth { get; init; }
+
     internal required IProgress<PackageProgress>? Progress { get; init; }
 
     internal static ResolvedPackageInstallPolicy Resolve(
@@ -39,6 +43,28 @@ internal sealed record ResolvedPackageInstallPolicy
         }
 
         InstallOptions effectiveOptions = installOptions ?? new InstallOptions();
+        ConflictResolutionStrategy conflictStrategy =
+            effectiveOptions is RestoreOptions restoreOptions
+                ? restoreOptions.ConflictStrategy
+                : ConflictResolutionStrategy.HighestWins;
+        int maxDepth = effectiveOptions is RestoreOptions depthOptions
+            ? depthOptions.MaxDepth
+            : 20;
+        if (!Enum.IsDefined(conflictStrategy))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPolicy,
+                PackageInstallStage.PolicyValidation,
+                "ConflictStrategy is not a supported value.");
+        }
+        if (maxDepth < 0)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPolicy,
+                PackageInstallStage.PolicyValidation,
+                "MaxDepth cannot be negative.");
+        }
+
         if (effectiveOptions.PreferredFhirRelease is FhirRelease preferredFhirRelease
             && !Enum.IsDefined(preferredFhirRelease))
         {
@@ -77,6 +103,8 @@ internal sealed record ResolvedPackageInstallPolicy
             OverwriteExisting = effectiveOptions.OverwriteExisting,
             PreferredFhirRelease = effectiveOptions.PreferredFhirRelease,
             AllowPreRelease = effectiveOptions.AllowPreRelease,
+            ConflictStrategy = conflictStrategy,
+            MaxDepth = maxDepth,
             Progress = effectiveOptions.Progress
         };
     }

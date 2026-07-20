@@ -1,5 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using FhirPkg.Installation;
 using FhirPkg.Models;
 using Spectre.Console;
 
@@ -34,9 +35,30 @@ internal static class ConsoleOutput
                 $"    [red]{Markup.Escape(failureDescription)}[/]");
         }
 
+        if (result.DependencyFailures.Count > 0)
+        {
+            AnsiConsole.MarkupLine(
+                "    [red bold]Failed dependencies:[/]");
+            foreach (PackageInstallResult dependencyFailure
+                     in result.DependencyFailures)
+            {
+                string description =
+                    dependencyFailure.GetFailureDescription()
+                    ?? "Unknown dependency installation failure.";
+                AnsiConsole.MarkupLine(
+                    $"      [red]✗[/] {Markup.Escape(dependencyFailure.Directive)}: " +
+                    Markup.Escape(description));
+            }
+        }
+
         if (result.Package is { } pkg)
         {
-            AnsiConsole.MarkupLine($"    [grey]→ {Markup.Escape(pkg.DirectoryPath)}[/]");
+            string prefix = result.ErrorStage
+                    == PackageInstallStage.DependencyInstallation
+                ? "root committed at"
+                : "→";
+            AnsiConsole.MarkupLine(
+                $"    [grey]{prefix} {Markup.Escape(pkg.DirectoryPath)}[/]");
         }
     }
 

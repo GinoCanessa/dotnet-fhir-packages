@@ -273,6 +273,19 @@ public class DependencyResolverTests
         result.Resolved.ContainsKey("shared.child").ShouldBeTrue();
         result.Resolved.ContainsKey("losing.child").ShouldBeFalse();
         result.Missing.ContainsKey("stale.missing").ShouldBeFalse();
+        result.InstallOrder.ShouldNotContain(
+            reference => reference.Name == "losing.child");
+        List<PackageReference> installOrder =
+            result.InstallOrder.ToList();
+        installOrder.IndexOf(
+                installOrder.Single(
+                    reference =>
+                        reference.Name == "winning.child"))
+            .ShouldBeLessThan(
+                installOrder.IndexOf(
+                    installOrder.Single(
+                        reference =>
+                            reference.Name == "pivot.package")));
         result.Failures.ShouldBeEmpty();
         result.IsComplete.ShouldBeTrue();
     }
@@ -736,6 +749,682 @@ public class DependencyResolverTests
         failure.Message.ShouldNotContain("sensitive");
     }
 
+    [Fact]
+    public async Task ResolveAsync_InvalidDependencyEdge_DoesNotSuppressValidSibling()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["valid.package"] = CreateListing(
+                CreateVersion(
+                    "valid.package",
+                    "1.0.0",
+                    Dependencies())),
+        };
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            CreateRegistry(listings),
+            CreateCache());
+        PackageManifest root = CreateRoot(
+            Dependencies(
+                ("../invalid.package", "1.0.0"),
+                ("valid.package", "1.0.0")));
+
+        PackageClosure result = await resolver.ResolveAsync(
+            root,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved.ContainsKey("valid.package").ShouldBeTrue();
+        DependencyResolutionFailure failure =
+            result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            DependencyResolutionFailureCode.InvalidDirective);
+        failure.PackageId.ShouldBe("../invalid.package");
+        result.IsComplete.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_NpmAliasDependency_ReturnsInvalidDirective()
+    {
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            CreateRegistry(
+                new Dictionary<string, PackageListing>(
+                    StringComparer.OrdinalIgnoreCase)),
+            CreateCache());
+        PackageManifest root = CreateRoot(
+            Dependencies(
+                ("dependency.alias", "npm:target.package@1.0.0")));
+
+        PackageClosure result = await resolver.ResolveAsync(
+            root,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        DependencyResolutionFailure failure =
+            result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            DependencyResolutionFailureCode.InvalidDirective);
+        failure.PackageId.ShouldBe("dependency.alias");
+        failure.VersionSpecifier.ShouldBe(
+            "npm:target.package@1.0.0");
+        result.Resolved.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ExactVersionMetadata_IsCaseSensitive()
+    {
+        PackageVersionInfo lowerCase = CreateVersion(
+            "case.package",
+            "1.0.0-alpha",
+            Dependencies(("wrong.child", "1.0.0")));
+        PackageVersionInfo upperCase = CreateVersion(
+            "case.package",
+            "1.0.0-Alpha",
+            Dependencies(("correct.child", "1.0.0")));
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["case.package"] = new PackageListing
+            {
+                PackageId = "case.package",
+                Versions = new Dictionary<string, PackageVersionInfo>(
+                    StringComparer.Ordinal)
+                {
+                    [lowerCase.Version] = lowerCase,
+                    [upperCase.Version] = upperCase,
+                },
+                VersionCandidates = [lowerCase, upperCase],
+            },
+            ["correct.child"] = CreateListing(
+                CreateVersion(
+                    "correct.child",
+                    "1.0.0",
+                    Dependencies())),
+            ["wrong.child"] = CreateListing(
+                CreateVersion(
+                    "wrong.child",
+                    "1.0.0",
+                    Dependencies())),
+        };
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            CreateRegistry(listings),
+            CreateCache());
+        PackageManifest root = CreateRoot(
+            Dependencies(("case.package", "1.0.0-Alpha")));
+
+        PackageClosure result = await resolver.ResolveAsync(
+            root,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved["case.package"].Version.ShouldBe(
+            "1.0.0-Alpha");
+        result.Resolved.ContainsKey("correct.child").ShouldBeTrue();
+        result.Resolved.ContainsKey("wrong.child").ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_CachedExactVersion_SurvivesRegistryFailure()
+    {
+        Mock<IVersionResolver> versionResolver = new();
+        versionResolver.Setup(resolver => resolver.ResolveVersionAsync(
+                "cached.package",
+                "1.0.0",
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RegistryOperationException(
+                "resolve",
+                "cached.package",
+                [
+                    new RegistryAttemptFailure(
+                        "https://registry.example/",
+                        RegistryFailureCategory.Network),
+                ]));
+        Mock<IPackageCache> cache = CreateCache(
+            reference =>
+                reference.Name == "cached.package"
+                && reference.Version == "1.0.0"
+                    ? CreateManifest(
+                        "cached.package",
+                        "1.0.0",
+                        Dependencies())
+                    : null);
+        Mock<IRegistryClient> registry = CreateRegistry(
+            new Dictionary<string, PackageListing>(
+                StringComparer.OrdinalIgnoreCase));
+        DependencyResolver resolver = CreateResolver(
+            versionResolver,
+            registry,
+            cache);
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("cached.package", "1.0.0"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved["cached.package"].Version.ShouldBe("1.0.0");
+        result.InstallOrder.ShouldBeEmpty();
+        result.Failures.ShouldBeEmpty();
+        registry.Verify(client => client.GetPackageListingAsync(
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_OfflineCachedAlias_UsesManifestWithoutInstall()
+    {
+        Mock<IRegistryClient> registry = CreateRegistry(
+            new Dictionary<string, PackageListing>(
+                StringComparer.OrdinalIgnoreCase));
+        registry.Setup(client => client.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RegistryOperationException(
+                "resolve",
+                "ci.package",
+                [
+                    new RegistryAttemptFailure(
+                        "https://registry.example/",
+                        RegistryFailureCategory.Network),
+                ]));
+        Mock<IPackageCache> cache = CreateCache(
+            reference =>
+                reference.Name == "ci.package"
+                && reference.Version == "current"
+                    ? CreateManifest(
+                        "ci.package",
+                        "2.0.0",
+                        Dependencies())
+                    : null);
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            registry,
+            cache);
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("ci.package", "current"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved["ci.package"].Version.ShouldBe("2.0.0");
+        result.InstallOrder.ShouldBeEmpty();
+        result.Failures.ShouldBeEmpty();
+        registry.Verify(client => client.ResolveAsync(
+            It.IsAny<PackageDirective>(),
+            It.IsAny<VersionResolveOptions?>(),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_CaseDistinctCachedAlias_DoesNotSatisfyWinner()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["first.parent"] = CreateListing(
+                CreateVersion(
+                    "first.parent",
+                    "1.0.0",
+                    Dependencies(
+                        ("case.package", "1.0.0-alpha")))),
+            ["second.parent"] = CreateListing(
+                CreateVersion(
+                    "second.parent",
+                    "1.0.0",
+                    Dependencies(
+                        ("case.package", "current")))),
+            ["case.package"] = CreateListing(
+                CreateVersion(
+                    "case.package",
+                    "1.0.0-alpha",
+                    Dependencies())),
+        };
+        Mock<IPackageCache> cache = CreateCache(
+            reference =>
+                reference.Name == "case.package"
+                && reference.Version == "current"
+                    ? CreateManifest(
+                        "case.package",
+                        "1.0.0-Alpha",
+                        Dependencies())
+                    : null);
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            CreateRegistry(listings),
+            cache);
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(
+                    ("first.parent", "1.0.0"),
+                    ("second.parent", "1.0.0"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved["case.package"].Version.ShouldBe(
+            "1.0.0-alpha");
+        result.InstallOrder.ShouldContain(
+            new PackageReference(
+                "case.package",
+                "1.0.0-alpha"));
+        result.InstallOrder.ShouldNotContain(
+            new PackageReference(
+                "case.package",
+                "current"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResolveAsync_OnlineCachedAlias_UsesRegistryIdentity(
+        bool installCachedPackages)
+    {
+        Mock<IRegistryClient> registry = CreateRegistry(
+            new Dictionary<string, PackageListing>(
+                StringComparer.OrdinalIgnoreCase));
+        registry.Setup(client => client.ResolveAsync(
+                It.Is<PackageDirective>(
+                    directive =>
+                        directive.PackageId == "ci.package"
+                        && directive.RequestedVersion == "current"),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ResolvedDirective
+            {
+                Reference =
+                    new PackageReference("ci.package", "3.0.0"),
+                TarballUri =
+                    new Uri("https://registry.example/ci.package.tgz"),
+                Dependencies = Dependencies(),
+            });
+        Mock<IPackageCache> cache = CreateCache(
+            reference =>
+                reference.Name == "ci.package"
+                && reference.Version == "current"
+                    ? CreateManifest(
+                        "ci.package",
+                        "2.0.0",
+                        Dependencies())
+                    : null);
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            registry,
+            cache);
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("ci.package", "current"))),
+            new DependencyResolveOptions
+            {
+                InstallCachedPackages = installCachedPackages,
+            },
+            TestContext.Current.CancellationToken);
+
+        result.Resolved["ci.package"].Version.ShouldBe("3.0.0");
+        result.InstallOrder.ShouldBe(
+            [new PackageReference("ci.package", "current")]);
+        registry.Verify(client => client.ResolveAsync(
+            It.IsAny<PackageDirective>(),
+            It.IsAny<VersionResolveOptions?>(),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_UncachedCiAlias_PreservesInstallReference()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["child.package"] = CreateListing(
+                CreateVersion(
+                    "child.package",
+                    "1.0.0",
+                    Dependencies())),
+        };
+        Mock<IRegistryClient> registry = CreateRegistry(listings);
+        registry.Setup(client => client.ResolveAsync(
+                It.Is<PackageDirective>(
+                    directive =>
+                        directive.PackageId == "ci.package"
+                        && directive.RequestedVersion == "current"),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ResolvedDirective
+            {
+                Reference =
+                    new PackageReference("ci.package", "2.0.0"),
+                TarballUri =
+                    new Uri("https://registry.example/ci.package.tgz"),
+                Dependencies =
+                    Dependencies(("child.package", "1.0.0")),
+            });
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            registry,
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("ci.package", "current"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved["ci.package"].Version.ShouldBe("2.0.0");
+        result.InstallOrder.ShouldBe(
+            [
+                new PackageReference("child.package", "1.0.0"),
+                new PackageReference("ci.package", "current"),
+            ]);
+        result.Failures.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_CiAliasWithoutMetadata_RequiresBootstrap()
+    {
+        Mock<IRegistryClient> registry = CreateRegistry(
+            new Dictionary<string, PackageListing>(
+                StringComparer.OrdinalIgnoreCase));
+        registry.Setup(client => client.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ResolvedDirective
+            {
+                Reference =
+                    new PackageReference("ci.package", "2.0.0"),
+                TarballUri =
+                    new Uri("https://registry.example/ci.package.tgz"),
+            });
+        bool bootstrapInstalled = false;
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            registry,
+            CreateCache(
+                reference =>
+                    bootstrapInstalled
+                    && reference.Name == "ci.package"
+                    && reference.Version == "current"
+                        ? CreateManifest(
+                            "ci.package",
+                            "2.0.0",
+                            Dependencies())
+                        : null));
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("ci.package", "current"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved["ci.package"].Version.ShouldBe("2.0.0");
+        result.InstallOrder.ShouldBeEmpty();
+        result.BootstrapInstallOrder.ShouldBe(
+            [new PackageReference("ci.package", "current")]);
+        DependencyResolutionFailure failure =
+            result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            DependencyResolutionFailureCode.MetadataUnavailable);
+        registry.Verify(client => client.GetPackageListingAsync(
+            "ci.package",
+            It.IsAny<CancellationToken>()), Times.Never);
+
+        bootstrapInstalled = true;
+        PackageClosure resolvedAfterBootstrap =
+            await resolver.ResolveAsync(
+                CreateRoot(
+                    Dependencies(("ci.package", "current"))),
+                new DependencyResolveOptions
+                {
+                    InstallCachedPackages = true,
+                    PreferCachedAliases = true,
+                },
+                TestContext.Current.CancellationToken);
+
+        resolvedAfterBootstrap.Resolved["ci.package"].Version
+            .ShouldBe("2.0.0");
+        resolvedAfterBootstrap.BootstrapInstallOrder.ShouldBeEmpty();
+        resolvedAfterBootstrap.Failures.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_OpaqueCiAlias_RequiresBootstrapInstall()
+    {
+        Mock<IRegistryClient> registry = CreateRegistry(
+            new Dictionary<string, PackageListing>(
+                StringComparer.OrdinalIgnoreCase));
+        registry.Setup(client => client.ResolveAsync(
+                It.Is<PackageDirective>(
+                    directive =>
+                        directive.PackageId == "ci.package"
+                        && directive.RequestedVersion == "current"),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ResolvedDirective
+            {
+                Reference =
+                    new PackageReference("ci.package", "current"),
+                TarballUri =
+                    new Uri("https://registry.example/ci.package.tgz"),
+            });
+        bool bootstrapInstalled = false;
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            registry,
+            CreateCache(
+                reference =>
+                    bootstrapInstalled
+                    && reference.Name == "ci.package"
+                    && reference.Version == "current"
+                        ? CreateManifest(
+                            "ci.package",
+                            "2.0.0",
+                            Dependencies())
+                        : null));
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("ci.package", "current"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved.ShouldBeEmpty();
+        result.BootstrapInstallOrder.ShouldBe(
+            [new PackageReference("ci.package", "current")]);
+        DependencyResolutionFailure failure =
+            result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            DependencyResolutionFailureCode.MetadataUnavailable);
+
+        bootstrapInstalled = true;
+        PackageClosure resolvedAfterBootstrap =
+            await resolver.ResolveAsync(
+                CreateRoot(
+                    Dependencies(("ci.package", "current"))),
+                new DependencyResolveOptions
+                {
+                    InstallCachedPackages = true,
+                    PreferCachedAliases = true,
+                },
+                TestContext.Current.CancellationToken);
+
+        resolvedAfterBootstrap.Resolved["ci.package"].Version
+            .ShouldBe("2.0.0");
+        resolvedAfterBootstrap.BootstrapInstallOrder.ShouldBeEmpty();
+        resolvedAfterBootstrap.Failures.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_CompatibleRootBackEdge_IsSatisfiedByRoot()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["child.package"] = CreateListing(
+                CreateVersion(
+                    "child.package",
+                    "1.0.0",
+                    Dependencies(("root.package", "^1.0.0")))),
+        };
+        Mock<IVersionResolver> versionResolver =
+            CreateExactVersionResolver();
+        DependencyResolver resolver = CreateResolver(
+            versionResolver,
+            CreateRegistry(listings),
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("child.package", "1.0.0"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved.Keys.ShouldBe(["child.package"]);
+        result.InstallOrder.ShouldBe(
+            [new PackageReference("child.package", "1.0.0")]);
+        result.Failures.ShouldBeEmpty();
+        versionResolver.Verify(value => value.ResolveVersionAsync(
+            "root.package",
+            It.IsAny<string>(),
+            It.IsAny<VersionResolveOptions?>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ConflictingRootBackEdge_ReturnsTypedFailure()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["child.package"] = CreateListing(
+                CreateVersion(
+                    "child.package",
+                    "1.0.0",
+                    Dependencies(("root.package", "2.0.0")))),
+        };
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            CreateRegistry(listings),
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("child.package", "1.0.0"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved.Keys.ShouldBe(["child.package"]);
+        DependencyResolutionFailure failure =
+            result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            DependencyResolutionFailureCode.VersionConflict);
+        failure.PackageId.ShouldBe("root.package");
+        failure.VersionSpecifier.ShouldBe("2.0.0");
+        failure.SelectedVersion.ShouldBe("1.0.0");
+    }
+
+    [Fact]
+    public async Task ResolveAsync_RootLatestBackEdge_UsesRegistryLatest()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["child.package"] = CreateListing(
+                CreateVersion(
+                    "child.package",
+                    "1.0.0",
+                    Dependencies(("root.package", "latest")))),
+        };
+        Mock<IVersionResolver> versionResolver =
+            CreateExactVersionResolver();
+        versionResolver.Setup(resolver => resolver.ResolveVersionAsync(
+                "root.package",
+                "latest",
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(FhirSemVer.Parse("2.0.0"));
+        DependencyResolver resolver = CreateResolver(
+            versionResolver,
+            CreateRegistry(listings),
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("child.package", "1.0.0"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        DependencyResolutionFailure failure =
+            result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            DependencyResolutionFailureCode.VersionConflict);
+        failure.PackageId.ShouldBe("root.package");
+        failure.VersionSpecifier.ShouldBe("latest");
+        failure.SelectedVersion.ShouldBe("1.0.0");
+    }
+
+    [Fact]
+    public async Task ResolveAsync_RootAliasBackEdge_MatchesInstallReference()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["child.package"] = CreateListing(
+                CreateVersion(
+                    "child.package",
+                    "1.0.0",
+                    Dependencies(("root.package", "current")))),
+        };
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            CreateRegistry(listings),
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("child.package", "1.0.0"))),
+            new DependencyResolveOptions
+            {
+                RootReference =
+                    new PackageReference("root.package", "current"),
+            },
+            TestContext.Current.CancellationToken);
+
+        result.Failures.ShouldBeEmpty();
+        result.InstallOrder.ShouldBe(
+            [new PackageReference("child.package", "1.0.0")]);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_RootCiBranchBackEdge_IsCaseSensitive()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["child.package"] = CreateListing(
+                CreateVersion(
+                    "child.package",
+                    "1.0.0",
+                    Dependencies(
+                        ("root.package", "current$main")))),
+        };
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            CreateRegistry(listings),
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("child.package", "1.0.0"))),
+            new DependencyResolveOptions
+            {
+                RootReference =
+                    new PackageReference(
+                        "root.package",
+                        "current$Main"),
+            },
+            TestContext.Current.CancellationToken);
+
+        DependencyResolutionFailure failure =
+            result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            DependencyResolutionFailureCode.VersionConflict);
+        failure.PackageId.ShouldBe("root.package");
+    }
+
     private static DependencyResolver CreateResolver(
         Mock<IVersionResolver> versionResolver,
         Mock<IRegistryClient> registry,
@@ -861,6 +1550,7 @@ public class DependencyResolverTests
                     Dependencies(
                         ("losing.child", "1.0.0"),
                         ("stale.missing", "1.0.0"),
+                        ("stale.invalid", string.Empty),
                         ("shared.child", "1.0.0"))),
                 CreateVersion(
                     "pivot.package",

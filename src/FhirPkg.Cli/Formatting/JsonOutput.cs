@@ -33,6 +33,15 @@ internal static class JsonOutput
             result.ErrorMessage,
             result.ErrorCode,
             result.ErrorStage,
+            DependencyFailures = result.DependencyFailures.Select(
+                failure => new
+                {
+                    failure.Directive,
+                    Status = failure.Status.ToString(),
+                    failure.ErrorMessage,
+                    failure.ErrorCode,
+                    failure.ErrorStage,
+                }),
             Package = result.Package is { } pkg
                 ? new { pkg.Reference.Name, pkg.Reference.Version, pkg.DirectoryPath, pkg.SizeBytes }
                 : null
@@ -54,6 +63,15 @@ internal static class JsonOutput
                 r.ErrorMessage,
                 r.ErrorCode,
                 r.ErrorStage,
+                DependencyFailures = r.DependencyFailures.Select(
+                    failure => new
+                    {
+                        failure.Directive,
+                        Status = failure.Status.ToString(),
+                        failure.ErrorMessage,
+                        failure.ErrorCode,
+                        failure.ErrorStage,
+                    }),
                 Package = r.Package is { } pkg
                     ? new { pkg.Reference.Name, pkg.Reference.Version, pkg.DirectoryPath, pkg.SizeBytes }
                     : null

@@ -15,7 +15,7 @@ internal sealed class PackageFixupPolicy
     private readonly IReadOnlyDictionary<string, string> _versionFixups;
 
     internal static PackageFixupPolicy Default { get; } = Create(
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["hl7.fhir.r4.core@4.0.0"] = "4.0.1",
             ["hl7.fhir.r4b.core@4.3.0-snapshot1"] = "4.3.0",
@@ -30,7 +30,7 @@ internal sealed class PackageFixupPolicy
     {
         ArgumentNullException.ThrowIfNull(configuredFixups);
 
-        Dictionary<string, string> parsed = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> parsed = new(StringComparer.Ordinal);
         foreach ((string directive, string targetVersion) in configuredFixups)
         {
             int separatorIndex = directive.LastIndexOf('@');
@@ -83,7 +83,7 @@ internal sealed class PackageFixupPolicy
         && !parsed.IsWildcard;
 
     private static string CreateKey(string packageName, string version) =>
-        $"{packageName}\0{version}";
+        $"{packageName.ToLowerInvariant()}\0{version}";
 
     private static string CanonicalizeVersion(string version) =>
         version.EndsWith(CiBuildSuffix, StringComparison.OrdinalIgnoreCase)

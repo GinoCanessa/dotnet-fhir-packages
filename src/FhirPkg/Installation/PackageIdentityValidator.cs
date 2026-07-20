@@ -66,7 +66,30 @@ internal static class PackageIdentityValidator
                 "Package identity expectation kind does not match its reference.");
         }
 
-        return normalizedExpectation;
+        if (expectation.ExpectedManifestReference
+            is not PackageReference expectedManifest)
+        {
+            return normalizedExpectation;
+        }
+
+        PackageIdentityExpectation normalizedManifestExpectation =
+            CreateExpectation(expectedManifest, directive);
+        if (normalizedManifestExpectation.Kind
+                != PackageIdentityExpectationKind.Exact
+            || !normalizedManifestExpectation.Reference.Name.Equals(
+                normalizedExpectation.Reference.Name,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw InvalidIdentity(
+                directive,
+                "Pinned alias manifest identity must be an exact version of the same package.");
+        }
+
+        return normalizedExpectation with
+        {
+            ExpectedManifestReference =
+                normalizedManifestExpectation.Reference,
+        };
     }
 
     internal static async Task<PackageIdentityValidationResult> ValidateExpectedAsync(
@@ -114,16 +137,21 @@ internal static class PackageIdentityValidator
                 $"expected name '{expectation.Reference.Name}'.");
         }
 
-        if (normalizedExpectation.Kind == PackageIdentityExpectationKind.Exact
+        PackageReference? expectedVersionReference =
+            normalizedExpectation.Kind
+                == PackageIdentityExpectationKind.Exact
+                ? normalizedExpectation.Reference
+                : normalizedExpectation.ExpectedManifestReference;
+        if (expectedVersionReference is PackageReference expectedVersion
             && !string.Equals(
                 manifestReference.Version,
-                expectation.Reference.Version,
+                expectedVersion.Version,
                 StringComparison.Ordinal))
         {
             throw InvalidIdentity(
                 directive,
                 $"Manifest package version '{manifestReference.Version}' does not match " +
-                $"expected version '{expectation.Reference.Version}'.");
+                $"expected version '{expectedVersion.Version}'.");
         }
 
         return new PackageIdentityValidationResult(

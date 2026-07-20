@@ -40,4 +40,10 @@ public class DependencyResolveOptions
     public FhirRelease? PreferredFhirRelease { get; set; }
 
     internal PackageFixupPolicy? FixupPolicy { get; set; }
+
+    internal PackageReference? RootReference { get; set; }
+
+    internal bool InstallCachedPackages { get; set; }
+
+    internal bool PreferCachedAliases { get; set; }
 }

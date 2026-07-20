@@ -336,10 +336,22 @@ public sealed class HardenedInstallationIntegrationTests
         };
         PackageInstallResult dependencyFailure = new()
         {
-            Directive = "dependency.package#1.0.0",
+            Directive = "root.package#1.0.0",
             Status = PackageInstallStatus.Failed,
-            ErrorCode = PackageInstallErrorCode.ResolutionFailed,
-            ErrorStage = PackageInstallStage.DependencyInstallation
+            ErrorCode =
+                PackageInstallErrorCode.DependencyInstallationFailed,
+            ErrorStage = PackageInstallStage.DependencyInstallation,
+            DependencyFailures =
+            [
+                new PackageInstallResult
+                {
+                    Directive = "dependency.package#1.0.0",
+                    Status = PackageInstallStatus.NotFound,
+                    ErrorCode =
+                        PackageInstallErrorCode.ResolutionFailed,
+                    ErrorStage = PackageInstallStage.Resolution,
+                }
+            ],
         };
 
         InstallCommand.GetExitCode(

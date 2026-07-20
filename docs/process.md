@@ -332,9 +332,27 @@ missed or resurrected by clear.
 
 ## 7 — Dependency Installation
 
-When `InstallOptions.IncludeDependencies` is true, the SDK reads the installed
-package's manifest for its `Dependencies` map and recursively installs each
-dependency by calling `InstallAsync` for every entry.
+When `InstallOptions.IncludeDependencies` is true, the SDK first commits the
+requested root package, then resolves an active dependency closure from that
+root manifest. Exact closure nodes are installed once, sequentially in
+dependency-first order, with implicit recursion disabled.
+
+Mutable CI aliases preserve the requested cache reference while the closure
+tracks the selected exact manifest identity. That identity is pinned through
+download and archive validation so a moving alias cannot install content from a
+different graph. CI sources that cannot expose an exact identity or
+authoritative dependency metadata before download are installed as a bounded
+bootstrap step and the closure is resolved again from the committed manifest.
+Cached exact and alias manifests can satisfy resolution during registry
+outages; overwrite requests still require a fresh source resolution.
+
+If closure resolution or any child installation fails, the SDK attempts the
+remaining active nodes and then throws `DependencyInstallationException`.
+The exception carries the committed root `PackageRecord`, failed child
+`PackageInstallResult` values, and structured closure failures. Cancellation
+continues to propagate as cancellation. In `InstallManyAsync`, the corresponding
+root result has `Status == Failed`, retains the committed root in `Package`, and
+lists child failures in `DependencyFailures`.
 
 For full transitive dependency graphs (the `RestoreAsync` workflow), the SDK uses
 a dedicated **`DependencyResolver`** — see

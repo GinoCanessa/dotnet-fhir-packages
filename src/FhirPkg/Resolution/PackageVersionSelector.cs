@@ -94,7 +94,7 @@ internal static class PackageVersionSelector
         List<PackageVersionInfo> eligible = candidates
             .Where(candidate => candidate.Version.Equals(
                 version,
-                StringComparison.OrdinalIgnoreCase))
+                StringComparison.Ordinal))
             .Where(candidate =>
             {
                 PackageVersionSelection? selection = CreateCandidate(
@@ -141,7 +141,7 @@ internal static class PackageVersionSelector
         IEnumerable<PackageVersionSelection> candidates,
         string requestedVersion) =>
         candidates.FirstOrDefault(candidate =>
-            candidate.Key.Equals(requestedVersion, StringComparison.OrdinalIgnoreCase));
+            candidate.Key.Equals(requestedVersion, StringComparison.Ordinal));
 
     private static PackageVersionSelection SelectLatest(
         IReadOnlyCollection<PackageVersionSelection> candidates,
@@ -159,7 +159,7 @@ internal static class PackageVersionSelector
             && listing.DistTags.TryGetValue("latest", out string? latestKey))
         {
             PackageVersionSelection? tagged = candidates.FirstOrDefault(candidate =>
-                candidate.Key.Equals(latestKey, StringComparison.OrdinalIgnoreCase));
+                candidate.Key.Equals(latestKey, StringComparison.Ordinal));
             if (tagged is not null)
             {
                 return tagged;

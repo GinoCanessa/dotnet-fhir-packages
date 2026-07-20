@@ -68,6 +68,12 @@ var resolved = await manager.ResolveAsync("hl7.fhir.us.core#latest");
 Console.WriteLine($"Resolved to {resolved?.Reference.Version} at {resolved?.TarballUri}");
 ```
 
+When dependency installation is requested, a failed child makes the aggregate
+root operation fail. `PackageInstallResult.Package` retains the committed root
+and `DependencyFailures` lists failed child directives. Single-package
+`InstallAsync` overloads throw `DependencyInstallationException` with the same
+partial-state information.
+
 ### Dependency Injection
 
 Register all SDK services with a single call:

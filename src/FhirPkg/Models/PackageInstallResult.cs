@@ -12,7 +12,10 @@ public record PackageInstallResult
     /// <summary>The original directive that was requested.</summary>
     public required string Directive { get; init; }
 
-    /// <summary>The installed package record, if successful.</summary>
+    /// <summary>
+    /// The installed package record. For dependency-stage failures, this is the
+    /// committed root package retained as partial state.
+    /// </summary>
     public PackageRecord? Package { get; init; }
 
     /// <summary>The result status of the installation.</summary>
@@ -26,6 +29,12 @@ public record PackageInstallResult
 
     /// <summary>Installation stage associated with <see cref="ErrorCode"/>.</summary>
     public PackageInstallStage? ErrorStage { get; init; }
+
+    /// <summary>
+    /// Failed child operations when the root package committed but dependency
+    /// installation did not complete.
+    /// </summary>
+    public IReadOnlyList<PackageInstallResult> DependencyFailures { get; init; } = [];
 
     /// <summary>
     /// Returns a stable typed failure description suitable for human-readable

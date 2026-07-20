@@ -54,5 +54,8 @@ public enum PackageInstallErrorCode
     UnsupportedManagerCapability,
 
     /// <summary>The configured cache does not implement the hardened capability.</summary>
-    UnsupportedCacheCapability
+    UnsupportedCacheCapability,
+
+    /// <summary>One or more requested dependencies could not be installed.</summary>
+    DependencyInstallationFailed,
 }

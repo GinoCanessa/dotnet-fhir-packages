@@ -33,6 +33,27 @@ public record PackageClosure
     public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; } = [];
 
     /// <summary>
+    /// Active package installation references in deterministic dependency-first
+    /// order. Mutable CI references preserve their requested alias while
+    /// <see cref="Resolved"/> retains the selected exact manifest identity.
+    /// </summary>
+    public IReadOnlyList<PackageReference> InstallOrder { get; init; } = [];
+
+    /// <summary>
+    /// Alias dependencies that must be installed before their exact manifest
+    /// identity and transitive dependencies can be resolved.
+    /// </summary>
+    public IReadOnlyList<PackageReference> BootstrapInstallOrder { get; init; } =
+        [];
+
+    /// <summary>
+    /// Indicates whether <see cref="InstallOrder"/> is the complete
+    /// authoritative set, including the valid case where it is empty because
+    /// every resolved dependency is already installed.
+    /// </summary>
+    public bool InstallOrderIsComplete { get; init; }
+
+    /// <summary>
     /// Indicates whether all requested dependencies were successfully resolved.
     /// </summary>
     public bool IsComplete => Missing.Count == 0 && Failures.Count == 0;

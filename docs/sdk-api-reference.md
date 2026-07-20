@@ -627,6 +627,22 @@ public record PackageInstallResult
     public PackageRecord? Package { get; init; }
     public PackageInstallStatus Status { get; init; }
     public string? ErrorMessage { get; init; }
+    public PackageInstallErrorCode? ErrorCode { get; init; }
+    public PackageInstallStage? ErrorStage { get; init; }
+    public IReadOnlyList<PackageInstallResult> DependencyFailures { get; init; }
+}
+```
+
+For dependency-stage failures, `Status` is `Failed`, `Package` is the root
+package already committed to the cache, and `DependencyFailures` enumerates
+failed active child directives.
+
+```csharp
+public sealed class DependencyInstallationException : PackageInstallException
+{
+    public PackageRecord RootPackage { get; }
+    public IReadOnlyList<PackageInstallResult> DependencyFailures { get; }
+    public IReadOnlyList<DependencyResolutionFailure> DependencyResolutionFailures { get; }
 }
 ```
 
@@ -641,9 +657,20 @@ public record PackageClosure
     public required IReadOnlyDictionary<string, PackageReference> Resolved { get; init; }
     public required IReadOnlyDictionary<string, string> Missing { get; init; }
     public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; }
+    public IReadOnlyList<PackageReference> InstallOrder { get; init; }
+    public IReadOnlyList<PackageReference> BootstrapInstallOrder { get; init; }
+    public bool InstallOrderIsComplete { get; init; }
     public bool IsComplete { get; }  // true when Missing and Failures are empty
 }
 ```
+
+`Resolved` always carries selected exact manifest identities. `InstallOrder`
+may preserve a mutable CI alias as the cache/install reference.
+`BootstrapInstallOrder` identifies CI aliases whose exact identity or
+authoritative dependency metadata is only available after installation; the
+manager installs those aliases and re-resolves before installing the final
+active order. An empty
+`InstallOrder` is authoritative when `InstallOrderIsComplete` is `true`.
 
 `Missing` is retained as a backward-compatible package-to-message projection.
 Use `Failures` for stable failure categories and structured context.
@@ -926,6 +953,7 @@ versions.
 | `MetadataUnavailable` | Dependency metadata could not be proven complete |
 | `RegistryUnavailable` | Registry failures prevented authoritative version resolution |
 | `UnstableResolution` | A version-dependent graph repeated a prior state |
+| `InvalidDirective` | A dependency edge contained an invalid package identity or version specifier |
 
 ### PackageProgressPhase
 

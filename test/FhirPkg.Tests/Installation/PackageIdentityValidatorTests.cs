@@ -120,6 +120,38 @@ public class PackageIdentityValidatorTests : IDisposable
             PackageInstallErrorCode.InvalidPackageIdentity);
     }
 
+    [Fact]
+    public async Task ValidateExpectedAsync_PinnedAliasVersion_IsEnforced()
+    {
+        string manifestPath = await WriteManifestAsync(
+            """{"name":"example.package","version":"2.0.1"}""");
+        PackageIdentityExpectation expectation = new()
+        {
+            Kind = PackageIdentityExpectationKind.Alias,
+            Reference =
+                new PackageReference(
+                    "example.package",
+                    "current"),
+            ExpectedManifestReference =
+                new PackageReference(
+                    "example.package",
+                    "2.0.0"),
+        };
+
+        PackageInstallException exception =
+            await Should.ThrowAsync<PackageInstallException>(
+                () => PackageIdentityValidator.ValidateExpectedAsync(
+                    manifestPath,
+                    expectation,
+                    "example.package#current",
+                    TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(
+            PackageInstallErrorCode.InvalidPackageIdentity);
+        exception.Stage.ShouldBe(
+            PackageInstallStage.IdentityValidation);
+    }
+
     [Theory]
     [InlineData("latest")]
     [InlineData("current")]

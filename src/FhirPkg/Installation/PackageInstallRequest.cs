@@ -41,6 +41,8 @@ internal sealed record PackageIdentityExpectation
     internal required PackageIdentityExpectationKind Kind { get; init; }
 
     internal required PackageReference Reference { get; init; }
+
+    internal PackageReference? ExpectedManifestReference { get; init; }
 }
 
 internal sealed record PackageInstallRequest

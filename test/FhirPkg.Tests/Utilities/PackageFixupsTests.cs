@@ -165,6 +165,31 @@ public class PackageFixupsTests
     }
 
     [Fact]
+    public void ConfiguredPolicy_VersionPrereleaseText_IsCaseSensitive()
+    {
+        PackageFixupPolicy policy = PackageFixupPolicy.Create(
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["Example.Package@1.0.0-alpha"] = "1.0.1-alpha",
+                ["example.package@1.0.0-Alpha"] = "1.0.1-Alpha",
+            });
+
+        PackageReference lower = PackageFixups.Apply(
+            new PackageReference(
+                "EXAMPLE.PACKAGE",
+                "1.0.0-alpha"),
+            policy);
+        PackageReference upper = PackageFixups.Apply(
+            new PackageReference(
+                "example.package",
+                "1.0.0-Alpha"),
+            policy);
+
+        lower.Version.ShouldBe("1.0.1-alpha");
+        upper.Version.ShouldBe("1.0.1-Alpha");
+    }
+
+    [Fact]
     public void ConfiguredPolicy_CanonicalizesCiBuildSourcesAndTargets()
     {
         PackageFixupPolicy policy = PackageFixupPolicy.Create(

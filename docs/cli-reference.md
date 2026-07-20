@@ -110,6 +110,11 @@ fhir-pkg install hl7.fhir.us.core#current
 fhir-pkg install hl7.fhir.r4.core#4.0.1 --json
 ```
 
+With `--with-dependencies`, the root package is committed before its active
+dependency closure is installed. If any requested dependency fails, the command
+returns exit code `6`, lists each failed child directive, and reports the root
+cache path as committed partial state.
+
 #### Output
 
 **Console mode** — shows a status icon per package:
