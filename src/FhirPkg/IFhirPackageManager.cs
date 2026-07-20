@@ -94,7 +94,14 @@ public interface IFhirPackageManager
     /// </summary>
     /// <param name="packageId">The package identifier to look up (e.g., "hl7.fhir.us.core").</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A <see cref="PackageListing"/> with all known versions, or <c>null</c> if not found.</returns>
+    /// <returns>
+    /// A merged <see cref="PackageListing"/> with all known versions, or <c>null</c>
+    /// when every successful source reports absence. Check
+    /// <see cref="PackageListing.IsComplete"/> before making global selections.
+    /// </returns>
+    /// <exception cref="RegistryOperationException">
+    /// No registry produced a listing and at least one registry attempt failed.
+    /// </exception>
     Task<PackageListing?> GetPackageListingAsync(
         string packageId,
         CancellationToken cancellationToken = default);
@@ -104,7 +111,13 @@ public interface IFhirPackageManager
     /// </summary>
     /// <param name="directive">Package directive (name#version or name@version).</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A <see cref="ResolvedDirective"/> with the exact version and tarball URI, or <c>null</c> if not found.</returns>
+    /// <returns>
+    /// A <see cref="ResolvedDirective"/> with exact, source-coherent metadata, or
+    /// <c>null</c> when all successful sources report absence.
+    /// </returns>
+    /// <exception cref="RegistryOperationException">
+    /// Registry failures prevent an authoritative resolution.
+    /// </exception>
     Task<ResolvedDirective?> ResolveAsync(
         string directive,
         CancellationToken cancellationToken = default);

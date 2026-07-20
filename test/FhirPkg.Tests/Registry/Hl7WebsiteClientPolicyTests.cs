@@ -53,4 +53,22 @@ public class Hl7WebsiteClientPolicyTests
         result.ShouldNotBeNull();
         result.Reference.Version.ShouldBe("4.0.1");
     }
+
+    [Fact]
+    public async Task GetPackageListingAsync_ReturnsCanonicalSourceCandidate()
+    {
+        Hl7WebsiteClient client = CreateClient();
+
+        PackageListing? listing = await client.GetPackageListingAsync(
+            "hl7.fhir.r4.core",
+            TestContext.Current.CancellationToken);
+
+        listing.ShouldNotBeNull();
+        listing.SourceRegistry.ShouldNotBeNull();
+        listing.SourceRegistry.Url.ShouldBe("https://hl7.org/");
+        listing.SourceRegistry.Type.ShouldBe(RegistryType.FhirHttp);
+        listing.VersionCandidates.Count.ShouldBe(1);
+        listing.VersionCandidates[0].Version.ShouldBe("4.0.1");
+        listing.VersionCandidates[0].IsSourceLatest.ShouldBeTrue();
+    }
 }

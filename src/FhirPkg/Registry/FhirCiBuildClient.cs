@@ -224,7 +224,8 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
         {
             Reference = new PackageReference(directive.PackageId, "current"),
             TarballUri = new Uri(tarballUrl),
-            SourceRegistry = Endpoint,
+            SourceRegistry = Endpoint.ToProvenance(),
+            SourceClient = this,
         };
     }
 
@@ -300,7 +301,8 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
         {
             Reference = new PackageReference(directive.PackageId, newest.IgVersion ?? "current"),
             TarballUri = new Uri(tarballUrl),
-            SourceRegistry = Endpoint,
+            SourceRegistry = Endpoint.ToProvenance(),
+            SourceClient = this,
             PublicationDate = TryParseDate(newest.DateISO8601 ?? newest.Date),
         };
     }

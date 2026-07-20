@@ -1017,6 +1017,38 @@ public abstract class RegistryClientBase : IRegistryClient
 
     // ── Version resolution helpers ──────────────────────────────────────
 
+    /// <summary>Adds source provenance to a registry listing without changing its JSON shape.</summary>
+    protected PackageListing WithSourceProvenance(PackageListing listing)
+    {
+        ArgumentNullException.ThrowIfNull(listing);
+
+        Dictionary<string, PackageVersionInfo> versions =
+            new(StringComparer.OrdinalIgnoreCase);
+        List<PackageVersionInfo> candidates = [];
+        foreach ((string key, PackageVersionInfo versionInfo) in listing.Versions)
+        {
+            bool isLatest = listing.DistTags is not null
+                && listing.DistTags.TryGetValue("latest", out string? latest)
+                && key.Equals(latest, StringComparison.OrdinalIgnoreCase);
+            PackageVersionInfo candidate = versionInfo with
+            {
+                Version = key,
+                SourceRegistry = Endpoint.ToProvenance(),
+                SourceClient = this,
+                IsSourceLatest = versionInfo.IsSourceLatest || isLatest,
+            };
+            versions[key] = candidate;
+            candidates.Add(candidate);
+        }
+
+        return listing with
+        {
+            Versions = versions,
+            SourceRegistry = Endpoint.ToProvenance(),
+            VersionCandidates = candidates,
+        };
+    }
+
     /// <summary>Resolves the best matching version from a <see cref="PackageListing"/>.</summary>
     protected static string? ResolveVersion(
         PackageDirective directive, PackageListing listing, VersionResolveOptions? options)

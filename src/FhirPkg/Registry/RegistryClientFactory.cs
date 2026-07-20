@@ -83,7 +83,10 @@ public static class RegistryClientFactory
                 loggerFactory.CreateLogger<Hl7WebsiteClient>()));
         }
 
-        return new RedundantRegistryClient(clients, loggerFactory.CreateLogger<RedundantRegistryClient>());
+        return new RedundantRegistryClient(
+            clients,
+            options.MaxParallelRegistryQueries,
+            loggerFactory.CreateLogger<RedundantRegistryClient>());
     }
 
     /// <summary>

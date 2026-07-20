@@ -308,7 +308,9 @@ public class DependencyResolver : IDependencyResolver
 
             // Recurse into this package's own dependencies
             IReadOnlyDictionary<string, string>? transitiveDeps = await GetTransitiveDependenciesAsync(
-                resolvedRef, cancellationToken).ConfigureAwait(false);
+                resolvedRef,
+                versionResolveOptions,
+                cancellationToken).ConfigureAwait(false);
 
             if (transitiveDeps is not null && transitiveDeps.Count > 0)
             {
@@ -368,6 +370,7 @@ public class DependencyResolver : IDependencyResolver
     /// </summary>
     private async Task<IReadOnlyDictionary<string, string>?> GetTransitiveDependenciesAsync(
         PackageReference reference,
+        VersionResolveOptions versionResolveOptions,
         CancellationToken cancellationToken)
     {
         // First try reading from cache
@@ -379,11 +382,43 @@ public class DependencyResolver : IDependencyResolver
         PackageListing? listing = await _registryClient.GetPackageListingAsync(reference.Name, cancellationToken)
             .ConfigureAwait(false);
 
-        if (listing is not null &&
-            reference.Version is not null &&
-            listing.Versions.TryGetValue(reference.Version, out PackageVersionInfo? versionInfo))
+        if (listing is not null && reference.Version is not null)
         {
-            return versionInfo.Dependencies;
+            PackageVersionInfo? versionInfo =
+                PackageVersionSelector.SelectExactSourceCandidate(
+                    reference.Name,
+                    reference.Version,
+                    listing.VersionCandidates,
+                    versionResolveOptions);
+            if (versionInfo is null
+                && listing.VersionCandidates.Count == 0)
+            {
+                listing.Versions.TryGetValue(
+                    reference.Version,
+                    out versionInfo);
+            }
+
+            if (versionInfo is not null)
+            {
+                return versionInfo.Dependencies;
+            }
+
+            if (!listing.IsComplete)
+            {
+                IReadOnlyList<RegistryAttemptFailure> failures =
+                    listing.QueryFailures.Count > 0
+                        ? listing.QueryFailures
+                        :
+                        [
+                            new RegistryAttemptFailure(
+                                null,
+                                RegistryFailureCategory.Unexpected)
+                        ];
+                throw new RegistryOperationException(
+                    "get-package-listing",
+                    reference.Name,
+                    failures);
+            }
         }
 
         return null;

@@ -149,16 +149,28 @@ available for plain NPM registries.
 
 ### Fallback Behavior
 
-The redundant client tries each registry in order for resolution, download, and
-listing operations. If a client returns `null` or throws an exception the next
-client is tried. For **search** operations, all clients are queried and results
-are merged (deduplicated by package name, first occurrence wins).
+The redundant client distinguishes an authoritative absence from a failed
+attempt. Eligible listing sources are queried under
+`MaxParallelRegistryQueries`; successful listings are merged into a union of
+version keys while every complete source version record remains intact with its
+registry provenance.
+Public provenance retains only the registry origin and type; configured
+credentials, headers, paths, queries, and user information are not copied into
+results.
+
+- If all successful sources report absence, the result is `null`.
+- If no source produces a result and any attempt fails, the SDK throws
+  `RegistryOperationException` with sanitized attempt snapshots.
+- If at least one listing succeeds and another source fails, the merged listing
+  is returned with `IsComplete == false` and `QueryFailures`.
+- Search results are merged by package name. Downloads use the exact source that
+  supplied the selected version; legacy fallback applies only when provenance is
+  absent.
 
 ### Resolving a Version
 
-The **`VersionResolver`** receives the `PackageDirective` and a
-`PackageListing` (the list of all published versions for the package) from the
-registry and selects the best match:
+The **`VersionResolver`** receives the `PackageDirective` and the merged
+`PackageListing` from the registry and selects the best source candidate:
 
 1. **Exact** — returns the version verbatim if it exists in the listing.
 2. **Latest** — uses `dist-tags.latest` when that candidate is eligible,
@@ -170,6 +182,20 @@ registry and selects the best match:
    highest match from ranges such as `^4.0.0`, `~4.0.0`, and `>=4.0.0`.
 5. **CI Build / CI Build Branch** — handled directly by the `FhirCiBuildClient`;
    the version resolver returns `null` and the CI client resolves the build.
+
+Exact requests may resolve from an incomplete listing when one successful
+source supplies a complete policy-compatible candidate. Exact misses and all
+latest, wildcard, and range selections fail with `RegistryOperationException`
+when the listing is incomplete, because a failed source could change the
+answer.
+
+When multiple sources publish the selected version, resolution chooses one
+whole policy-compatible candidate after the version is selected. It normally
+follows source priority; if the leading candidate omits dependency metadata, a
+later compatible candidate that supplies it is selected as a whole. Tarball
+URL, checksum, integrity value, dependencies, FHIR metadata, publication date,
+and source registry all come from that same candidate; metadata from
+conflicting copies is never spliced together.
 
 #### Supported Range Grammar
 
@@ -201,6 +227,7 @@ A successful resolution produces a **`ResolvedDirective`** containing:
 - `PackageReference` — the exact name and version.
 - `TarballUri` — the download URL.
 - `ShaSum` — the expected SHA-1 hash of the tarball (may be null).
+- `Integrity` — the source's Subresource Integrity value (may be null).
 - `SourceRegistry` — which registry provided the result.
 - `PublicationDate` — when the version was published.
 

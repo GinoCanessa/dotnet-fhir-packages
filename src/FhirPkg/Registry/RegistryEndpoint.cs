@@ -50,6 +50,20 @@ public record RegistryEndpoint
     /// </summary>
     public string? UserAgent { get; init; }
 
+    internal RegistryEndpoint ToProvenance()
+    {
+        string origin = RegistryAttemptFailure.SanitizeOrigin(Url);
+        string safeUrl = origin == "unknown"
+            ? "urn:fhir-package-registry:unknown"
+            : origin + "/";
+
+        return new RegistryEndpoint
+        {
+            Url = safeUrl,
+            Type = Type,
+        };
+    }
+
     // ── Well-known endpoints ────────────────────────────────────────────
 
     /// <summary>

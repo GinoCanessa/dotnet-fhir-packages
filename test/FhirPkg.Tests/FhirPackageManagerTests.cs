@@ -856,6 +856,37 @@ public class FhirPackageManagerTests
     }
 
     [Fact]
+    public async Task InstallManyAsync_AllRegistryTransportsFail_ReturnsFailedResult()
+    {
+        _cacheMock.Setup(cache => cache.IsInstalledAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        _registryMock.Setup(registry => registry.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RegistryOperationException(
+                "resolve",
+                "missing.package",
+                [
+                    new RegistryAttemptFailure(
+                        "https://registry.example/private?secret=value",
+                        RegistryFailureCategory.Network)
+                ]));
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results = await manager.InstallManyAsync(
+            ["missing.package#1.0.0"],
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        results.Count.ShouldBe(1);
+        results[0].Status.ShouldBe(PackageInstallStatus.Failed);
+        results[0].ErrorCode.ShouldBe(PackageInstallErrorCode.ResolutionFailed);
+        results[0].ErrorStage.ShouldBe(PackageInstallStage.Resolution);
+    }
+
+    [Fact]
     public async Task InstallAsync_CancellationIsNotWrapped()
     {
         using CancellationTokenSource source = new CancellationTokenSource();

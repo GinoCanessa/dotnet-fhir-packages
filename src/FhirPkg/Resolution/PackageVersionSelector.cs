@@ -19,7 +19,14 @@ internal static class PackageVersionSelector
         ArgumentNullException.ThrowIfNull(directive);
         ArgumentNullException.ThrowIfNull(listing);
 
-        List<PackageVersionSelection> eligible = listing.Versions
+        IEnumerable<KeyValuePair<string, PackageVersionInfo>> candidateEntries =
+            listing.VersionCandidates.Count > 0
+                ? listing.VersionCandidates.Select(candidate =>
+                    new KeyValuePair<string, PackageVersionInfo>(
+                        candidate.Version,
+                        candidate))
+                : listing.Versions;
+        List<PackageVersionSelection> eligible = candidateEntries
             .Select(entry => CreateCandidate(entry.Key, entry.Value))
             .Where(candidate => candidate is not null)
             .Cast<PackageVersionSelection>()
@@ -74,6 +81,37 @@ internal static class PackageVersionSelector
         return Select(directive, listing, options);
     }
 
+    internal static PackageVersionInfo? SelectExactSourceCandidate(
+        string packageId,
+        string version,
+        IEnumerable<PackageVersionInfo> candidates,
+        VersionResolveOptions? options)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(version);
+        ArgumentNullException.ThrowIfNull(candidates);
+
+        List<PackageVersionInfo> eligible = candidates
+            .Where(candidate => candidate.Version.Equals(
+                version,
+                StringComparison.OrdinalIgnoreCase))
+            .Where(candidate =>
+            {
+                PackageVersionSelection? selection = CreateCandidate(
+                    candidate.Version,
+                    candidate);
+                return selection is not null
+                    && IsEligible(packageId, selection, options);
+            })
+            .ToList();
+
+        // Prefer an explicit dependency declaration, but move the whole source
+        // candidate so artifact and dependency metadata remain coherent.
+        return eligible.FirstOrDefault(candidate =>
+                candidate.Dependencies is not null)
+            ?? eligible.FirstOrDefault();
+    }
+
     private static PackageVersionSelection? CreateCandidate(
         string key,
         PackageVersionInfo versionInfo) =>
@@ -109,6 +147,14 @@ internal static class PackageVersionSelector
         IReadOnlyCollection<PackageVersionSelection> candidates,
         PackageListing listing)
     {
+        PackageVersionSelection? highestSourceLatest = candidates
+            .Where(candidate => candidate.VersionInfo.IsSourceLatest)
+            .MaxBy(candidate => candidate.Version);
+        if (highestSourceLatest is not null)
+        {
+            return highestSourceLatest;
+        }
+
         if (listing.DistTags is not null
             && listing.DistTags.TryGetValue("latest", out string? latestKey))
         {

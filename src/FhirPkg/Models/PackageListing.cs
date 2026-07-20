@@ -3,6 +3,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FhirPkg.Registry;
 
 namespace FhirPkg.Models;
 
@@ -26,6 +27,34 @@ public record PackageListing
     /// <summary>All published versions, keyed by version string.</summary>
     [JsonPropertyName("versions")]
     public required IReadOnlyDictionary<string, PackageVersionInfo> Versions { get; init; }
+
+    /// <summary>
+    /// Gets credential-free registry-origin provenance when the listing represents one source.
+    /// </summary>
+    [JsonIgnore]
+    public RegistryEndpoint? SourceRegistry { get; init; }
+
+    /// <summary>
+    /// Gets whether every eligible registry was queried successfully.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsComplete { get; init; } = true;
+
+    /// <summary>
+    /// Gets sanitized failures from registry queries that prevented a complete listing.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<RegistryAttemptFailure> QueryFailures { get; init; } = [];
+
+    /// <summary>
+    /// Gets complete, source-specific version records in configured source-priority order.
+    /// </summary>
+    /// <remarks>
+    /// Each candidate is kept intact so artifact, integrity, dependency, and FHIR metadata
+    /// are never combined across registries.
+    /// </remarks>
+    [JsonIgnore]
+    public IReadOnlyList<PackageVersionInfo> VersionCandidates { get; init; } = [];
 
     /// <summary>
     /// Returns the version tagged as "latest", or falls back to the highest version key
@@ -111,6 +140,19 @@ public record PackageVersionInfo
     /// <summary>Dependencies of this package version.</summary>
     [JsonPropertyName("dependencies")]
     public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
+
+    /// <summary>
+    /// Gets credential-free registry-origin provenance for this complete version record.
+    /// </summary>
+    [JsonIgnore]
+    public RegistryEndpoint? SourceRegistry { get; init; }
+
+    [JsonIgnore]
+    internal IRegistryClient? SourceClient { get; init; }
+
+    /// <summary>Gets whether this version was declared as latest by its source registry.</summary>
+    [JsonIgnore]
+    public bool IsSourceLatest { get; init; }
 }
 
 internal sealed class PackageVersionInfoJsonConverter : JsonConverter<PackageVersionInfo>

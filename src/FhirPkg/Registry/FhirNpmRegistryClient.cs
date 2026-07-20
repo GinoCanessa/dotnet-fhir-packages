@@ -119,6 +119,7 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
 
         if (listing is not null)
         {
+            listing = WithSourceProvenance(listing);
             Logger.LogDebug(
                 "Package {PackageId} has {VersionCount} version(s), latest = {Latest}",
                 packageId,
@@ -190,7 +191,9 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
             Reference = new PackageReference(directive.PackageId, resolvedVersion),
             TarballUri = new Uri(tarballUrl),
             ShaSum = versionInfo.Distribution?.ShaSum,
-            SourceRegistry = Endpoint,
+            Integrity = versionInfo.Distribution?.Integrity,
+            SourceRegistry = Endpoint.ToProvenance(),
+            SourceClient = this,
             PublicationDate = DateTime.TryParse(versionInfo.PublicationDate, out DateTime pubDate) ? pubDate : null,
         };
     }

@@ -88,9 +88,21 @@ public class VersionResolver : IVersionResolver
             return null;
         }
 
+        if (!listing.IsComplete && versionType != VersionType.Exact)
+        {
+            throw CreateIncompleteResolutionException(packageId, listing);
+        }
+
         PackageDirective directive =
             PackageDirective.Parse($"{packageId}#{versionSpecifier}");
-        return PackageVersionSelector.Select(directive, listing, options)?.Version;
+        PackageVersionSelection? selection =
+            PackageVersionSelector.Select(directive, listing, options);
+        if (selection is null && !listing.IsComplete)
+        {
+            throw CreateIncompleteResolutionException(packageId, listing);
+        }
+
+        return selection?.Version;
     }
 
     /// <inheritdoc />
@@ -107,6 +119,25 @@ public class VersionResolver : IVersionResolver
             versionSpecifier,
             availableVersions,
             options)?.Version;
+    }
+
+    private static RegistryOperationException CreateIncompleteResolutionException(
+        string packageId,
+        PackageListing listing)
+    {
+        IReadOnlyList<RegistryAttemptFailure> failures =
+            listing.QueryFailures.Count > 0
+                ? listing.QueryFailures
+                :
+                [
+                    new RegistryAttemptFailure(
+                        null,
+                        RegistryFailureCategory.Unexpected)
+                ];
+        return new RegistryOperationException(
+            "resolve",
+            packageId,
+            failures);
     }
 
 }

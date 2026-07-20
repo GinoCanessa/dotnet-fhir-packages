@@ -7,13 +7,20 @@ using System.Text.Json.Serialization;
 namespace FhirPkg.Models;
 
 /// <summary>
-/// Represents NPM distribution metadata (shasum and tarball URL).
+/// Represents NPM distribution metadata.
 /// </summary>
 /// <param name="ShaSum">The SHA-1 hash of the package tarball.</param>
 /// <param name="TarballUrl">The URL to download the package tarball.</param>
 public record NpmDistribution(
     [property: JsonPropertyName("shasum")] string? ShaSum,
-    [property: JsonPropertyName("tarball")] string? TarballUrl);
+    [property: JsonPropertyName("tarball")] string? TarballUrl)
+{
+    /// <summary>
+    /// The Subresource Integrity value supplied by the registry, when available.
+    /// </summary>
+    [JsonPropertyName("integrity")]
+    public string? Integrity { get; init; }
+}
 
 /// <summary>
 /// Represents NPM repository metadata.

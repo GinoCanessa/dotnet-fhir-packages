@@ -520,6 +520,10 @@ public record PackageListing
     public string? Description { get; init; }
     public IReadOnlyDictionary<string, string>? DistTags { get; init; }
     public required IReadOnlyDictionary<string, PackageVersionInfo> Versions { get; init; }
+    public RegistryEndpoint? SourceRegistry { get; init; }                  // JSON-ignored
+    public bool IsComplete { get; init; }                                   // default: true; JSON-ignored
+    public IReadOnlyList<RegistryAttemptFailure> QueryFailures { get; init; } // default: []; JSON-ignored
+    public IReadOnlyList<PackageVersionInfo> VersionCandidates { get; init; } // source-specific; JSON-ignored
     public string? LatestVersion { get; }   // computed: dist-tags["latest"] or last key
 }
 
@@ -538,12 +542,31 @@ public record PackageVersionInfo
     public string? Url { get; init; }
     public NpmDistribution? Distribution { get; init; }
     public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
+    public RegistryEndpoint? SourceRegistry { get; init; } // JSON-ignored
+    public bool IsSourceLatest { get; init; }               // JSON-ignored
+}
+
+public record NpmDistribution(string? ShaSum, string? TarballUrl)
+{
+    public string? Integrity { get; init; }
 }
 ```
 
 Registry JSON may provide `fhirVersion` as a scalar or array, or use the plural
 `fhirVersions` field. `FhirVersion` exposes the first value for compatibility;
 `FhirVersions` exposes the complete normalized set.
+
+Composite listings preserve every source copy in `VersionCandidates`. The
+representative `Versions` dictionary follows configured source priority, while
+resolution selects one complete source candidate atomically. If
+the highest-priority compatible candidate omits dependency metadata, the first
+later compatible candidate that supplies it is selected as a whole, including
+its tarball, checksum, integrity value, and provenance. If
+`IsComplete` is false, exact hits may still be used, but exact misses and global
+latest/wildcard/range selections throw `RegistryOperationException`.
+Returned `SourceRegistry` values are credential-free provenance snapshots: they
+retain only the registry origin and protocol type, never configured
+authorization, custom headers, user information, paths, queries, or fragments.
 
 ### CatalogEntry
 
@@ -574,8 +597,12 @@ public record ResolvedDirective
     public required PackageReference Reference { get; init; }
     public required Uri TarballUri { get; init; }
     public string? ShaSum { get; init; }
+    public string? Sha256Sum { get; init; }
+    public string? Integrity { get; init; }
     public RegistryEndpoint? SourceRegistry { get; init; }
     public DateTime? PublicationDate { get; init; }
+    public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
+    public IReadOnlyList<string>? FhirVersions { get; init; }
 }
 ```
 
@@ -1066,6 +1093,30 @@ deadline spanning headers, redirects, and response-body reads; expiry throws
 `RegistryResponseTimeoutException`. Registry clients do not automatically
 follow publish redirects. `PublishAsync` consumes or advances the supplied
 stream but never owns or disposes it.
+
+Composite reads return `null` only when every successful source authoritatively
+reports absence. If failures prevent any positive result, they throw:
+
+```csharp
+public sealed class RegistryOperationException : HttpRequestException
+{
+    public string Operation { get; }
+    public string PackageId { get; }
+    public IReadOnlyList<RegistryAttemptFailure> Failures { get; }
+}
+
+public sealed class RegistryAttemptFailure
+{
+    public string EndpointOrigin { get; } // origin only; no path/query/user info
+    public RegistryFailureCategory Category { get; }
+    public string Message { get; }        // category-derived, sanitized
+}
+```
+
+Raw inner exceptions, response bodies, endpoint credentials, and custom header
+values are logged internally but are not retained in public aggregate state.
+Nested `RedundantRegistryClient` instances are flattened in priority order so
+`MaxParallelRegistryQueries` remains a single cap across the full client tree.
 
 ### RegistryEndpoint
 
