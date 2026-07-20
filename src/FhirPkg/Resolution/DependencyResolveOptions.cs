@@ -19,8 +19,10 @@ public class DependencyResolveOptions
     public ConflictResolutionStrategy ConflictStrategy { get; set; } = ConflictResolutionStrategy.HighestWins;
 
     /// <summary>
-    /// Maximum recursion depth for transitive dependency resolution.
-    /// Prevents runaway resolution in deeply nested or circular dependency graphs.
+    /// Maximum root-relative depth for transitive dependency resolution.
+    /// Direct dependencies are depth zero, so a value of zero allows direct
+    /// dependencies while reporting their children as depth-limit failures.
+    /// Negative values are rejected.
     /// Default: 20.
     /// </summary>
     public int MaxDepth { get; set; } = 20;

@@ -640,7 +640,28 @@ public record PackageClosure
     public required DateTime Timestamp { get; init; }
     public required IReadOnlyDictionary<string, PackageReference> Resolved { get; init; }
     public required IReadOnlyDictionary<string, string> Missing { get; init; }
-    public bool IsComplete { get; }  // true when Missing is empty
+    public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; }
+    public bool IsComplete { get; }  // true when Missing and Failures are empty
+}
+```
+
+`Missing` is retained as a backward-compatible package-to-message projection.
+Use `Failures` for stable failure categories and structured context.
+
+```csharp
+public sealed record DependencyResolutionFailure
+{
+    public required DependencyResolutionFailureCode Code { get; init; }
+    public required string PackageId { get; init; }
+    public required string Message { get; init; }
+    public string? VersionSpecifier { get; init; }
+    public string? SelectedVersion { get; init; }
+    public string? ParentPackageId { get; init; }
+    public string? ParentVersion { get; init; }
+    public int? Depth { get; init; }
+    public int? MaxDepth { get; init; }
+    public IReadOnlyList<string> RequestedVersions { get; init; }
+    public IReadOnlyList<RegistryAttemptFailure> RegistryFailures { get; init; }
 }
 ```
 
@@ -893,7 +914,18 @@ versions.
 |-------|-------------|
 | `HighestWins` | Keep the highest version (default) |
 | `FirstWins` | Keep the first version encountered |
-| `Error` | Fail with an error on conflict |
+| `Error` | Record a typed conflict failure and keep the first version for partial traversal |
+
+### DependencyResolutionFailureCode
+
+| Value | Description |
+|-------|-------------|
+| `PackageNotFound` | A requested version could not be resolved |
+| `VersionConflict` | Active parent edges selected different exact versions under the `Error` strategy |
+| `DepthLimitExceeded` | An active edge exceeded the root-relative maximum depth |
+| `MetadataUnavailable` | Dependency metadata could not be proven complete |
+| `RegistryUnavailable` | Registry failures prevented authoritative version resolution |
+| `UnstableResolution` | A version-dependent graph repeated a prior state |
 
 ### PackageProgressPhase
 
@@ -1255,9 +1287,14 @@ public class DependencyResolveOptions
 
 Key behaviors:
 
-- **Circular dependency detection** — tracks resolution set; skips
-  already-visited packages.
-- **Depth limiting** — enforces `MaxDepth` to prevent runaway recursion.
+- **Active graph replacement** — winner changes prune losing-only descendants
+  and stale failures while preserving shared descendants.
+- **Cycle handling** — shared DAG paths remain active; repeated whole-graph
+  states produce a typed failure rather than looping.
+- **Depth limiting** — direct dependencies are depth zero; truncation is a
+  typed failure and negative limits are rejected.
+- **Metadata provenance** — selected registry candidates are exhausted before
+  cache fallback, and partial listings keep the closure incomplete.
 - **Known version fixups** — automatically corrects known problematic versions
   (e.g., `hl7.fhir.r4.core@4.0.0` → `4.0.1`).
 

@@ -56,12 +56,12 @@ flowchart TD
 ### Resolution Steps
 
 1. **Read the root manifest** — Parse `package.json` from the root package
-2. **For each dependency:**
-   a. Check if already in the resolution closure (prevents circular dependencies)
-   b. Resolve the version (query registries, check cache)
-   c. Install to cache if not present
-   d. Add to closure
-   e. Recursively process the dependency's own dependencies
+2. **For each active dependency edge:**
+   a. Resolve the version through the registry policy
+   b. Select the package version using the configured conflict strategy
+   c. Read the selected version's registry metadata, then fall back to cache
+   d. Replace child edges if the selected version changes
+   e. Recompute reachability so losing-only descendants and failures disappear
 3. **Return the closure** — A complete list of all resolved packages
 
 ### Package Closure
@@ -84,19 +84,35 @@ A package closure is the complete set of resolved transitive dependencies:
 The closure records:
 
 - **Resolved dependencies:** Package name → exact resolved version
-- **Missing dependencies:** Packages that could not be resolved
-- **Completeness:** A closure is complete when there are no missing dependencies
+- **Structured failures:** Missing versions, conflicts, depth truncation,
+  incomplete metadata, registry failures, and unstable graph states
+- **Missing dependencies:** A compatibility map projected from structured
+  failures
+- **Completeness:** A closure is complete when there are no failures
 
 ## Circular Dependency Prevention
 
-Before resolving each dependency, implementations check whether the package is already in the current resolution set:
+The resolver tracks active parent edges rather than using one global visited
+set. A cycle does not expand forever, but encountering a package through one
+path does not suppress a valid shared-DAG path through another parent:
 
 ```
 Resolving: A → B → C → A  (circular!)
                          ↑ Already in closure — skip
 ```
 
-This prevents infinite recursion. The package is simply not re-processed.
+Version-dependent cycles that cannot reach a stable active graph are returned
+as typed unstable-resolution failures.
+
+## Depth Semantics
+
+Depth is measured from the root's dependency edges:
+
+- Direct dependencies are depth `0`.
+- Their children are depth `1`.
+- `MaxDepth = 0` resolves direct dependencies but reports their children as
+  depth-limit failures.
+- Negative values are rejected.
 
 ## Version Conflicts
 

@@ -375,28 +375,37 @@ directly from the lock file — installing only packages not yet in the cache.
 
 ### Recursive Resolution
 
-When a full resolution is needed, the `DependencyResolver` performs a recursive
-depth-first traversal:
+When a full resolution is needed, the `DependencyResolver` maintains an active
+dependency graph:
 
 1. For each dependency in the root manifest, parse and apply fixups.
 2. Resolve the version specifier to an exact version via the registry chain.
-3. If the package is already in the resolved set, apply the **conflict strategy**:
+3. Retain every active parent edge for each package and apply the **conflict
+   strategy**:
    - `HighestWins` — keep the higher semantic version.
    - `FirstWins` — keep the first-encountered version.
-   - `Error` — throw an exception on any conflict.
-4. Fetch the resolved package's own manifest (from cache if available, otherwise
-   from the registry).
-5. Recurse into that package's dependencies (incrementing the depth counter).
-6. Circular dependencies are detected by tracking `package@version` pairs in a
-   visited set; revisiting a pair short-circuits the traversal.
-7. Depth is capped at `RestoreOptions.MaxDepth` (default 20).
+   - `Error` — retain the first version for traversal and record a typed
+     conflict failure.
+4. Read the winner's dependency metadata from all registry candidates before
+   falling back to the cache.
+5. Replace the package's active child edges when its selected version changes.
+   Descendants reachable only from the losing version are pruned, while shared
+   descendants remain active.
+6. Cycles do not suppress later shared-DAG paths. A repeated whole-graph state
+   is reported as an unstable-resolution failure instead of looping.
+7. Depth is root-relative: direct dependencies are depth `0`. A `MaxDepth` of
+   `0` resolves direct dependencies and reports grandchildren as depth-limit
+   failures. Negative values are rejected.
 
 The result is a **`PackageClosure`** containing:
 
 - `Resolved` — a map of all successfully resolved packages (name → exact
   reference).
-- `Missing` — a map of packages that could not be resolved (name → reason).
-- `IsComplete` — true when `Missing` is empty.
+- `Failures` — structured missing-package, conflict, depth, metadata, registry,
+  and unstable-graph failures.
+- `Missing` — a backward-compatible package → message projection of
+  `Failures`.
+- `IsComplete` — true only when both `Failures` and `Missing` are empty.
 
 ### Batch Installation
 

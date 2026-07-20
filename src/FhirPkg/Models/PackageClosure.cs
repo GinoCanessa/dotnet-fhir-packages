@@ -21,10 +21,19 @@ public record PackageClosure
     /// <summary>
     /// Packages that could not be resolved, keyed by package identifier with the reason as value.
     /// </summary>
+    /// <remarks>
+    /// This compatibility projection combines the structured entries in
+    /// <see cref="Failures"/> by package identifier.
+    /// </remarks>
     public required IReadOnlyDictionary<string, string> Missing { get; init; }
+
+    /// <summary>
+    /// Structured failures that prevented the active dependency graph from being complete.
+    /// </summary>
+    public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; } = [];
 
     /// <summary>
     /// Indicates whether all requested dependencies were successfully resolved.
     /// </summary>
-    public bool IsComplete => Missing.Count == 0;
+    public bool IsComplete => Missing.Count == 0 && Failures.Count == 0;
 }

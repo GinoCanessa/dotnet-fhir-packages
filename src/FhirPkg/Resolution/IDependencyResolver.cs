@@ -23,8 +23,9 @@ public interface IDependencyResolver
     /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>
-    /// A <see cref="PackageClosure"/> containing all resolved packages and any
-    /// packages that could not be resolved.
+    /// A <see cref="PackageClosure"/> containing the active resolved graph and
+    /// structured failures for missing versions, conflicts, depth truncation,
+    /// incomplete metadata, registry failures, or an unstable graph.
     /// </returns>
     Task<PackageClosure> ResolveAsync(
         PackageManifest rootManifest,

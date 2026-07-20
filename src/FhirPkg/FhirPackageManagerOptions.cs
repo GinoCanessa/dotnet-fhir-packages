@@ -181,8 +181,9 @@ public class RestoreOptions : InstallOptions
     public bool WriteLockFile { get; set; } = true;
 
     /// <summary>
-    /// Maximum recursion depth for transitive dependency resolution.
-    /// Prevents infinite loops in circular dependency graphs. Default: 20.
+    /// Maximum root-relative depth for transitive dependency resolution.
+    /// Direct dependencies are depth zero. Negative values are rejected.
+    /// Default: 20.
     /// </summary>
     public int MaxDepth { get; set; } = 20;
 }
