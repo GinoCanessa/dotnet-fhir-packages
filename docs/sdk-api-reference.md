@@ -225,7 +225,10 @@ Console.WriteLine($"{resolved?.Reference.Version} → {resolved?.TarballUri}");
 
 #### `PublishAsync`
 
-Publishes a `.tgz` tarball to the specified registry endpoint.
+Publishes a `.tgz` tarball once to the exact supplied endpoint. Publication
+does not reuse or fall back through the manager's redundant read chain:
+`RegistryEndpoint.Type`, authorization, custom headers, and URL all come from
+this call.
 
 ```csharp
 var result = await manager.PublishAsync("./my-package.tgz", new RegistryEndpoint
@@ -235,6 +238,13 @@ var result = await manager.PublishAsync("./my-package.tgz", new RegistryEndpoint
     AuthHeaderValue = "Bearer my-token",
 });
 ```
+
+`RegistryType.FhirNpm` sends the validated archive as the raw gzip request body.
+`RegistryType.Npm` validates a standard `package/package.json` layout and exact
+name/version, rejects private or invalid-semver packages, and sends a standard
+NPM packument with `latest`, SHA-1, SHA-512 integrity, and a streamed base64
+attachment. Publish input is bounded by `InstallLimits`, consumed from its
+current position, and left open.
 
 ### Constructors (FhirPackageManager)
 
@@ -1183,10 +1193,10 @@ redirect-controlled transport, even when no credentials are configured.
 
 | Client | Registry Type | Description |
 |--------|--------------|-------------|
-| `FhirNpmRegistryClient` | `FhirNpm` | Primary/secondary FHIR registries |
+| `FhirNpmRegistryClient` | `FhirNpm` | FHIR registries; raw-gzip publication |
 | `FhirCiBuildClient` | `FhirCiBuild` | CI builds from build.fhir.org |
 | `Hl7WebsiteClient` | `FhirHttp` | HL7 website fallback (core packages only) |
-| `NpmRegistryClient` | `Npm` | Standard NPM registries |
+| `NpmRegistryClient` | `Npm` | Standard NPM registries; packument publication |
 | `RedundantRegistryClient` | *(composite)* | Chains multiple clients with automatic fallback |
 
 ---

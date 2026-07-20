@@ -51,7 +51,12 @@ public static class RegistryClientFactory
         {
             foreach (RegistryEndpoint endpoint in options.Registries)
             {
-                clients.Add(CreateClientForEndpoint(endpoint, transport, loggerFactory, timeProvider));
+                clients.Add(CreateClientForEndpoint(
+                    endpoint,
+                    transport,
+                    loggerFactory,
+                    options.InstallLimits,
+                    timeProvider));
             }
         }
         else
@@ -118,6 +123,39 @@ public static class RegistryClientFactory
         RegistryHttpTransport transport,
         ILoggerFactory loggerFactory,
         TimeProvider? timeProvider = null)
+        => CreateClientForEndpointCore(
+            endpoint,
+            transport,
+            loggerFactory,
+            installLimits: null,
+            timeProvider);
+
+    internal static IRegistryClient CreateClientForEndpoint(
+        RegistryEndpoint endpoint,
+        RegistryHttpTransport transport,
+        ILoggerFactory loggerFactory,
+        PackageInstallLimits installLimits,
+        TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+        ArgumentNullException.ThrowIfNull(installLimits);
+
+        return CreateClientForEndpointCore(
+            endpoint,
+            transport,
+            loggerFactory,
+            installLimits,
+            timeProvider);
+    }
+
+    private static IRegistryClient CreateClientForEndpointCore(
+        RegistryEndpoint endpoint,
+        RegistryHttpTransport transport,
+        ILoggerFactory loggerFactory,
+        PackageInstallLimits? installLimits,
+        TimeProvider? timeProvider)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(transport);
@@ -141,7 +179,8 @@ public static class RegistryClientFactory
             RegistryType.Npm => new NpmRegistryClient(
                 transport,
                 endpoint,
-                loggerFactory.CreateLogger<NpmRegistryClient>()),
+                loggerFactory.CreateLogger<NpmRegistryClient>(),
+                installLimits ?? PackageInstallLimits.FromEnvironment()),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(endpoint), endpoint.Type, $"Unsupported registry type: {endpoint.Type}.")
         };

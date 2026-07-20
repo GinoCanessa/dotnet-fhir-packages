@@ -10,6 +10,7 @@ using Xunit;
 
 namespace FhirPkg.Tests.Registry;
 
+[Collection("EnvironmentVariable")]
 public class PackageRegistryResolutionTests
 {
     [Fact]

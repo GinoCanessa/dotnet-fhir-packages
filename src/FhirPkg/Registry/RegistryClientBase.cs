@@ -288,9 +288,34 @@ public abstract class RegistryClientBase : IRegistryClient
         using StreamContent httpContent = new StreamContent(
             new NonDisposingStream(stream));
         httpContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        return await PutContentAsync(
+                requestUri,
+                httpContent,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends an HTTP PUT with caller-provided content and returns the response message.
+    /// The content is consumed during the request and must not be reused.
+    /// </summary>
+    /// <param name="requestUri">The absolute or relative request URI.</param>
+    /// <param name="content">The request content.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The HTTP response message. The caller must dispose it.</returns>
+    protected async Task<HttpResponseMessage> PutContentAsync(
+        string requestUri,
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        Logger.LogDebug(
+            "PUT content {Uri} ({ContentType})",
+            requestUri,
+            content.Headers.ContentType?.MediaType ?? "(unspecified)");
 
         using HttpRequestMessage request = CreateRequestMessage(HttpMethod.Put, requestUri);
-        request.Content = httpContent;
+        request.Content = content;
         EnsureDefaultHeadersAreSafe();
         EnsureBodyRequestHasControlledTransport();
         using CancellationTokenSource timeoutSource = CreateTimeoutSource();

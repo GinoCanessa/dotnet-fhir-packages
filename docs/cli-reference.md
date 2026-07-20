@@ -527,7 +527,7 @@ Published:  2024-01-15
 
 ### publish
 
-Publish a FHIR package tarball to a registry.
+Publish a FHIR package tarball to a FHIR-NPM registry.
 
 ```
 fhir-pkg publish <tarball> --registry <url> --auth <value>
@@ -545,6 +545,12 @@ fhir-pkg publish <tarball> --registry <url> --auth <value>
 |--------|-------|------|---------|----------|-------------|
 | `--registry <url>` | `-r` | `string` | — | **Yes** | Registry URL to publish to. |
 | `--auth <value>` | — | `string` | — | **Yes** | Authorization header value (e.g., `"Bearer <token>"`). |
+
+The CLI uses `RegistryType.FhirNpm`, validates the archive under the configured
+package limits, and sends the `.tgz` as the raw request body to exactly the
+specified endpoint. It does not fall back to configured read registries.
+Standard NPM packument publication is available through the SDK by passing a
+`RegistryEndpoint` whose type is `RegistryType.Npm`.
 
 #### Examples
 

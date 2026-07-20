@@ -702,16 +702,29 @@ public sealed class FhirPackageManager :
         _logger.LogInformation("Publishing tarball '{TarballPath}' to registry '{RegistryUrl}'.",
             tarballPath, registry.Url);
 
-        // Extract the manifest to determine the package reference
-        PackageReference reference = await ExtractReferenceFromTarballAsync(tarballPath, cancellationToken).ConfigureAwait(false);
+        await using FileStream tarballStream = new FileStream(
+            tarballPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            81_920,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        PackageReference reference =
+            await ExtractReferenceFromTarballAsync(
+                    tarballStream,
+                    cancellationToken)
+                .ConfigureAwait(false);
 
         _logger.LogDebug("Publishing as {Name}#{Version}.", reference.Name, reference.Version);
 
-        // Find the appropriate registry client for the target endpoint
-        IRegistryClient targetClient = FindRegistryClient(registry);
+        IRegistryClient targetClient =
+            RegistryClientFactory.CreateClientForEndpoint(
+                registry,
+                _registryTransport,
+                _loggerFactory,
+                _managerInstallLimits);
 
-        // Open a fresh stream for the actual publish
-        await using FileStream tarballStream = File.OpenRead(tarballPath);
+        tarballStream.Position = 0;
         PublishResult result = await targetClient.PublishAsync(reference, tarballStream, cancellationToken).ConfigureAwait(false);
 
         if (result.Success)
@@ -1859,34 +1872,49 @@ public sealed class FhirPackageManager :
     /// Extracts a <see cref="PackageReference"/> from a tarball by reading its manifest.
     /// </summary>
     private async Task<PackageReference> ExtractReferenceFromTarballAsync(
-        string tarballPath,
+        FileStream tarballStream,
         CancellationToken cancellationToken)
     {
+        long archiveLength = tarballStream.Length;
+        if (archiveLength > _managerInstallLimits.MaxCompressedBytes)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.CompressedSizeLimitExceeded,
+                PackageInstallStage.Acquisition,
+                $"Package publish exceeds the configured compressed size limit of {_managerInstallLimits.MaxCompressedBytes} bytes.",
+                "package publish");
+        }
+
         // Create a temporary directory (prefer system temp, fall back to cache)
         string tempDir = TempDirectory.Create("fhirpkg", _cache.CacheDirectory);
         try
         {
-            await using FileStream stream = File.OpenRead(tarballPath);
-            await TarballExtractor.ExtractAsync(stream, tempDir, cancellationToken).ConfigureAwait(false);
-
-            string manifestPath = Path.Combine(tempDir, "package", ManifestFileName);
-            if (!File.Exists(manifestPath))
-            {
-                // Try without the package/ subdirectory
-                manifestPath = Path.Combine(tempDir, ManifestFileName);
-            }
-
-            if (!File.Exists(manifestPath))
-            {
-                throw new InvalidOperationException(
-                    $"No {ManifestFileName} found in tarball '{tarballPath}'.");
-            }
-
-            string json = await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false);
-            PackageManifest manifest = JsonSerializer.Deserialize<PackageManifest>(json, s_jsonOptions)
-                ?? throw new InvalidOperationException($"Failed to parse manifest in '{tarballPath}'.");
-
-            return new PackageReference(manifest.Name, manifest.Version);
+            ArchiveExtractionMetrics metrics =
+                await TarballExtractor.ExtractAsync(
+                        tarballStream,
+                        tempDir,
+                        _managerInstallLimits,
+                        "package publish",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            PackageArchiveInventory inventory = metrics.Inventory
+                ?? throw new PackageInstallException(
+                    PackageInstallErrorCode.InvalidArchive,
+                    PackageInstallStage.ArchiveValidation,
+                    "Package archive inventory was not produced.",
+                    "package publish");
+            PackageArchiveLayoutResult layout =
+                TarballExtractor.ValidateAndNormalizePackageStructure(
+                    tempDir,
+                    inventory,
+                    "package publish");
+            PackageIdentityValidationResult identity =
+                await PackageIdentityValidator.DiscoverAsync(
+                        layout.ManifestPath,
+                        "package publish",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            return identity.ManifestReference;
         }
         finally
         {
@@ -1894,23 +1922,6 @@ public sealed class FhirPackageManager :
             try { Directory.Delete(tempDir, recursive: true); }
             catch (Exception ex) { _logger.LogWarning(ex, "Failed to clean up temp directory '{TempDir}'", tempDir); }
         }
-    }
-
-    /// <summary>
-    /// Finds the registry client that matches the given endpoint, or falls back to creating a new one.
-    /// </summary>
-    private IRegistryClient FindRegistryClient(RegistryEndpoint registry)
-    {
-        // If the composite client matches, use it (the RedundantRegistryClient will route internally)
-        if (string.Equals(_registryClient.Endpoint.Url, registry.Url, StringComparison.OrdinalIgnoreCase))
-            return _registryClient;
-
-        // For publish operations, create one endpoint-specific client over the
-        // manager's redirect-controlled transport.
-        return RegistryClientFactory.CreateClientForEndpoint(
-            registry,
-            _registryTransport,
-            _loggerFactory);
     }
 
     /// <summary>

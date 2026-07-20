@@ -300,6 +300,24 @@ The package "nonexistent.package.xyz#1.0.0" is not known by this server
 
 ---
 
+### Package Publication
+
+FHIR-NPM publication uses an endpoint-exact authenticated request:
+
+```http
+PUT /{package-id}
+Content-Type: application/gzip
+
+<raw .tgz bytes>
+```
+
+`FhirNpmRegistryClient` uses this raw-gzip shape. `NpmRegistryClient` targets
+standard NPM-compatible servers instead and sends a JSON packument containing
+`dist-tags`, `versions`, `_attachments`, SHA-1 `shasum`, and SHA-512
+`integrity`. The manager never retries a publish against another registry.
+
+---
+
 ### NPM v1 Search API
 
 NPM-compatible search endpoint. Available on the secondary registry.
