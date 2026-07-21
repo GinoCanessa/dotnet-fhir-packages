@@ -253,7 +253,7 @@ Resolved 12 packages:
   hl7.fhir.us.core                  6.1.0      R4
   ...
 
-✓ Restore complete (12 resolved, 0 missing)
+✓ Restore complete — 12 package(s) resolved.
 ```
 
 **JSON mode** — structured closure:
@@ -328,7 +328,7 @@ hl7.fhir.us.core            6.1.0      R4      2026-03-05
 {
   "count": 2,
   "packages": [
-    { "name": "hl7.fhir.r4.core", "version": "4.0.1", "fhirVersion": "R4", "installed": "2026-03-01" }
+    { "name": "hl7.fhir.r4.core", "version": "4.0.1", "fhirVersion": "R4", "installedAt": "2026-03-01" }
   ]
 }
 ```
@@ -462,17 +462,21 @@ hl7.fhir.us.davinci-pas     2.0.1      R4      Da Vinci Prior Authorization
 **JSON mode:**
 
 ```json
-[
-  {
-    "name": "hl7.fhir.us.core",
-    "version": "6.1.0",
-    "fhirVersion": "R4",
-    "description": "US Core Implementation Guide",
-    "canonical": "http://hl7.org/fhir/us/core",
-    "kind": "IG",
-    "date": "2024-01-15"
-  }
-]
+{
+  "count": 1,
+  "results": [
+    {
+      "name": "hl7.fhir.us.core",
+      "version": "6.1.0",
+      "fhirVersion": "R4",
+      "description": "US Core Implementation Guide",
+      "canonical": "http://hl7.org/fhir/us/core",
+      "kind": "IG",
+      "date": "2024-01-15",
+      "url": "https://packages.fhir.org/hl7.fhir.us.core/6.1.0"
+    }
+  ]
+}
 ```
 
 ---
@@ -670,6 +674,17 @@ fhir-pkg publish ./output/my.ig.package-1.0.0.tgz \
 
 An `already current` mutable-CI result is successful and returns code `0`.
 
+Notes on specific codes:
+
+- `2 InvalidArgs` is returned by explicit command validation — currently
+  `restore` with a negative `--max-depth` or an unsupported `--fhir-version`.
+  Malformed parser input (a missing required option, an unknown flag, a bad
+  arity) is reported by the command-line parser and exits with `1`.
+- `8 AuthError` is currently produced only by `publish` (on an
+  `UnauthorizedAccessException`). Other commands surface registry auth or HTTP
+  failures as `4 NetworkError`.
+- Cancellation (Ctrl-C) exits with `1 GeneralError`.
+
 Use exit codes in scripts:
 
 ```bash
@@ -694,7 +709,8 @@ if ($LASTEXITCODE -ne 0) {
 ## Configuration File
 
 `fhir-pkg` reads an optional `.fhir-pkg.json` file for default settings. The
-tool checks two locations:
+tool checks two locations, in order, and uses the **first file that exists** —
+the two files are never merged:
 
 1. The **current working directory** (project-level config)
 2. The **user's home directory** (user-level defaults)
@@ -702,10 +718,9 @@ tool checks two locations:
 **Precedence order** (highest to lowest):
 
 1. Command-line options
-2. Environment variables
-3. `.fhir-pkg.json` in current directory
-4. `.fhir-pkg.json` in home directory
-5. Built-in defaults
+2. Environment variables (for settings that have one — e.g. `PACKAGE_CACHE_FOLDER`)
+3. The first `.fhir-pkg.json` found (current directory, else home directory)
+4. Built-in defaults
 
 ### Schema
 
@@ -743,15 +758,26 @@ tool checks two locations:
 | Variable | Description | Equivalent Option |
 |----------|-------------|-------------------|
 | `PACKAGE_CACHE_FOLDER` | Override the default cache directory. | `--package-cache-folder` |
-| `FHIR_REGISTRY` | Custom registry URL added to the default chain. | `--registry` |
-| `FHIR_REGISTRY_TOKEN` | Bearer token for registry authentication. | `--auth "Bearer ..."` |
-| `FHIR_PKG_NO_CI` | Set to `1` to disable CI build resolution. | `--no-ci` |
-| `FHIR_PKG_VERBOSE` | Set to `1` to enable verbose logging. | `--verbose` |
-| `FHIR_PKG_JSON` | Set to `1` to default to JSON output. | `--json` |
-| `NO_COLOR` | Set to any value to disable colored output. | `--no-color` |
-| `HTTPS_PROXY` | HTTPS proxy URL. | — |
-| `HTTP_PROXY` | HTTP proxy URL. | — |
+| `FHIR_PKG_VERBOSE` | Set to `1`, `true`, or `yes` (case-insensitive) to enable verbose logging. | `--verbose` |
+| `FHIR_PKG_JSON` | Set to `1`, `true`, or `yes` (case-insensitive) to default to JSON output. | `--json` |
+| `NO_COLOR` | Set to `1`, `true`, or `yes` (case-insensitive) to disable colored output. | `--no-color` |
+| `FHIRPKG_MAX_COMPRESSED_BYTES` | Max compressed (downloaded) archive size, in bytes (default 104857600). | — |
+| `FHIRPKG_MAX_EXPANDED_BYTES` | Max total expanded archive size, in bytes (default 1073741824). | — |
+| `FHIRPKG_MAX_ENTRY_BYTES` | Max expanded size of a single archive entry, in bytes (default 134217728). | — |
+| `FHIRPKG_MAX_ARCHIVE_ENTRIES` | Max number of entries in an archive (default 50000). | — |
+| `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH` | Max length of a normalized entry path, in characters (default 1024). | — |
+| `FHIRPKG_MAX_ARCHIVE_DEPTH` | Max directory-nesting depth of any entry (default 32). | — |
+| `HTTPS_PROXY` | HTTPS proxy URL (honored by .NET's `HttpClient`). | — |
+| `HTTP_PROXY` | HTTP proxy URL (honored by .NET's `HttpClient`). | — |
 | `NO_PROXY` | Comma-separated list of hosts to bypass proxy. | — |
+
+A custom registry and its credentials are configured with `--registry`/`-r` and
+`--auth` (or the `registries` array in `.fhir-pkg.json`) — there is no
+`FHIR_REGISTRY` or `FHIR_REGISTRY_TOKEN` variable. CI build resolution is
+disabled with `install --no-ci` or `"includeCiBuilds": false` — there is no
+`FHIR_PKG_NO_CI` variable. Each `FHIRPKG_MAX_*` value must be a positive base-10
+integer (invariant culture); a non-positive or non-numeric value aborts the
+operation.
 
 ---
 

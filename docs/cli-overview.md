@@ -107,7 +107,7 @@ consuming from scripts:
 fhir-pkg list
 
 # JSON output
-fhir-pkg list --json | jq '.[].name'
+fhir-pkg list --json | jq '.packages[].name'
 ```
 
 ## Environment Variables
@@ -115,19 +115,28 @@ fhir-pkg list --json | jq '.[].name'
 | Variable | Description |
 |----------|-------------|
 | `PACKAGE_CACHE_FOLDER` | Override the default cache directory |
-| `FHIR_REGISTRY` | Custom registry URL |
-| `FHIR_REGISTRY_TOKEN` | Bearer token for registry authentication |
-| `FHIR_PKG_NO_CI` | Disable CI build resolution |
-| `FHIR_PKG_VERBOSE` | Enable verbose logging |
-| `FHIR_PKG_JSON` | Default to JSON output |
-| `NO_COLOR` | Disable colored output |
-| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Proxy configuration |
+| `FHIR_PKG_VERBOSE` | Enable verbose logging (see note) |
+| `FHIR_PKG_JSON` | Default to JSON output (see note) |
+| `NO_COLOR` | Disable colored output (see note) |
+| `FHIRPKG_MAX_*` | Override archive-safety limits (see the [CLI reference](cli-reference.md#environment-variables)) |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Proxy configuration (honored by .NET's `HttpClient`) |
+
+> **Note:** The boolean variables `FHIR_PKG_VERBOSE`, `FHIR_PKG_JSON`, and
+> `NO_COLOR` are enabled only by the values `1`, `true`, or `yes`
+> (case-insensitive); any other value — including `0` or `false` — leaves the
+> feature off. A custom registry and its credentials are configured with
+> `--registry`/`-r` and `--auth`, or the `registries` array in `.fhir-pkg.json`
+> — there is no `FHIR_REGISTRY` or `FHIR_REGISTRY_TOKEN` variable. CI build
+> resolution is disabled with `install --no-ci` or `"includeCiBuilds": false` in
+> `.fhir-pkg.json` — there is no `FHIR_PKG_NO_CI` variable.
 
 ## Configuration File
 
 `fhir-pkg` looks for an optional `.fhir-pkg.json` configuration file in the
-current directory and in the user's home directory. CLI options take precedence
-over the config file, and the config file takes precedence over built-in defaults.
+current directory and, if none is found there, in the user's home directory.
+Only the first file found is used — the two are never merged. CLI options take
+precedence over the config file, and the config file takes precedence over
+built-in defaults.
 
 **Precedence order:** CLI options → environment variables → `.fhir-pkg.json`
 (current dir) → `.fhir-pkg.json` (home dir) → built-in defaults.
