@@ -49,15 +49,16 @@ Accept both `#` and `@` as version separators. Strip NPM alias prefixes (`alias@
 
 ```mermaid
 flowchart TD
-    A[Package Name] --> B{4 segments starting<br/>with hl7.fhir.rN?}
-    B -->|Yes| C{Segment 4 is a<br/>known core type?}
+    A[Package Name] --> B{Starts with hl7.fhir.rN?}
+    B -->|Yes| C{4+ segments and<br/>segment 4 is a core type?}
     C -->|Yes| D[Core Full<br/>e.g., hl7.fhir.r4.core]
-    C -->|No| E[IG with Suffix<br/>e.g., hl7.fhir.uv.ig.r4]
-    B -->|No| F{3 segments starting<br/>with hl7.fhir.rN?}
-    F -->|Yes| G[Core Partial<br/>e.g., hl7.fhir.r4]
-    F -->|No| H{Starts with<br/>scope.fhir.realm?}
-    H -->|Yes| I[IG without Suffix<br/>e.g., hl7.fhir.us.core]
-    H -->|No| J[IG - non-HL7<br/>e.g., us.nlm.vsac]
+    C -->|No| K{Exactly 3 segments?}
+    K -->|Yes| G[Core Partial<br/>e.g., hl7.fhir.r4]
+    K -->|No| H{HL7-scope name?<br/>hl7.fhir/cda/v2/other, ihe, who}
+    B -->|No| H
+    H -->|Ends with .rN| E[Guide with FHIR Suffix<br/>e.g., hl7.fhir.uv.extensions.r4]
+    H -->|Otherwise| I[Guide without Suffix<br/>e.g., hl7.fhir.us.core]
+    H -->|No match| J[Non-HL7 Guide<br/>e.g., us.nlm.vsac]
 ```
 
 Known core types: `core`, `expansions`, `examples`, `search`, `corexml`, `elements`
@@ -72,7 +73,7 @@ Known core types: `core`, `expansions`, `examples`, `search`, `corexml`, `elemen
 | `latest`, _(empty)_ | Latest | Published |
 | `current` | CI Build | CI |
 | `current${branch}` | CI Build | CI (branch-specific) |
-| `dev` | Local Build | Cache first, fallback to CI |
+| `dev` | Local Build | Cache only (fails if not present in local cache) |
 
 ## Step 3: Resolve — Published IG Packages
 
@@ -149,8 +150,8 @@ If the directive uses a partial core name (e.g., `hl7.fhir.r4`), expand to full 
 
 | Partial | Expanded To |
 |---------|------------|
-| `hl7.fhir.r4` | `hl7.fhir.r4.core` + `hl7.fhir.r4.expansions` (minimum) |
-| `hl7.fhir.r5` | `hl7.fhir.r5.core` + `hl7.fhir.r5.expansions` (minimum) |
+| `hl7.fhir.r4` | `.core`, `.expansions`, `.examples`, `.search`, `.corexml`, `.elements` (all six) |
+| `hl7.fhir.r5` | `.core`, `.expansions`, `.examples`, `.search`, `.corexml`, `.elements` (all six) |
 
 ### Resolution
 
@@ -163,15 +164,16 @@ When a new FHIR release is published but registries haven't yet been updated, co
 | Release Type | URL Pattern |
 |-------------|-------------|
 | Named release | `https://hl7.org/fhir/{release}/{package}.tgz` |
-| Ballot | `https://hl7.org/fhir/{ballot}/{package}.tgz` |
-| Versioned | `https://hl7.org/fhir/{version}/{package}.tgz` |
+
+Only the six named-release directories are used — `DSTU2`, `STU3`, `R4`, `R4B`,
+`R5`, `R6` — selected from the release segment of the core package name. There
+are no ballot, `{version}`, or date-directory patterns.
 
 **Examples:**
 
 ```
 https://hl7.org/fhir/R4/hl7.fhir.r4.core.tgz
 https://hl7.org/fhir/R5/hl7.fhir.r5.expansions.tgz
-https://hl7.org/fhir/2024Sep/hl7.fhir.r6.core.tgz
 ```
 
 ## Step 5: Resolve — CI Build IG Packages
@@ -204,16 +206,11 @@ Response (abbreviated):
 
 3. **Select the newest** entry by date.
 
-4. **Construct download URLs** from the `repo` field (strip trailing `/qa.json`):
+4. **Construct the download URL** by parsing the `repo` field into org / repo / branch (the trailing `/qa.json` is dropped). The default-branch build omits the branch segment:
 
 ```
-Package:  https://build.fhir.org/ig/HL7/US-Core/main/package.tgz
-Manifest: https://build.fhir.org/ig/HL7/US-Core/main/package.manifest.json
-```
-
-For FHIR-version-specific variants:
-```
-https://build.fhir.org/ig/HL7/US-Core/main/package.r4.tgz
+Default branch:  https://build.fhir.org/ig/HL7/US-Core/package.tgz
+Named branch:    https://build.fhir.org/ig/HL7/US-Core/branches/{branch}/package.tgz
 ```
 
 ### From CI URL
@@ -251,7 +248,6 @@ CI builds of core packages use fixed URL patterns:
 | Default branch | `https://build.fhir.org/{package-name}.tgz` |
 | Named branch | `https://build.fhir.org/branches/{branch}/{package-name}.tgz` |
 | Manifest | `https://build.fhir.org/{package-name}.manifest.json` |
-| Version info | `https://build.fhir.org/version.info` |
 
 **Examples:**
 
@@ -264,9 +260,8 @@ https://build.fhir.org/hl7.fhir.r6.core.manifest.json
 ### Version Discovery
 
 1. Download the manifest: `{package-name}.manifest.json`
-2. Or download `version.info` (INI format with `FhirVersion`, `buildId`, `date`)
-3. Extract the build date for freshness comparison
-4. If neither is available, download the package and extract metadata
+2. Extract the build date for freshness comparison
+3. If the manifest is unavailable, download the package and extract `package.json`
 
 ## Parallel Resolution Strategy
 
@@ -298,5 +293,5 @@ sequenceDiagram
 ## Multiple Registry Considerations
 
 - **Sync delays:** The primary and secondary registries may briefly have different versions. Query both and use the most current information.
-- **Fallback:** If the primary registry is unreachable, fall back to the secondary (and vice versa).
+- **Redundancy:** Eligible registries are queried in parallel (bounded by `MaxParallelRegistryQueries`, default 3) and their listings merged; if one source fails but another succeeds, the merged listing is returned (flagged incomplete).
 - **Consistency:** The `dist-tags.latest` value may differ between registries during sync windows. Use the highest valid version found across all registries.

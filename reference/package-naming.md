@@ -38,12 +38,14 @@ hl7.fhir.r{version}
 
 **Example:** `hl7.fhir.r4`
 
-This is **not** a valid package name for download or caching. It must be expanded to full names before resolution. The standard expansion maps to at minimum:
+This is **not** a valid package name for download or caching. It must be expanded to full names before resolution. The expansion always produces all six core packages:
 
 - `hl7.fhir.r{N}.core`
 - `hl7.fhir.r{N}.expansions`
-
-Additional packages (`examples`, `search`, `corexml`, `elements`) are optionally included depending on the tooling context.
+- `hl7.fhir.r{N}.examples`
+- `hl7.fhir.r{N}.search`
+- `hl7.fhir.r{N}.corexml`
+- `hl7.fhir.r{N}.elements`
 
 ### IG Packages — Without FHIR Version Suffix
 
@@ -115,11 +117,11 @@ Clients can determine whether a package is Core or IG by inspecting the name:
 flowchart TD
     A[Package Name] --> B{Matches<br/>hl7.fhir.rN.TYPE?}
     B -->|Yes| C[Core Package]
-    B -->|No| D{Matches<br/>hl7.fhir.REALM.NAME?}
-    D -->|Yes| E[IG Package]
-    D -->|No| F{Starts with<br/>hl7.fhir.rN?}
+    B -->|No| F{hl7.fhir.rN with<br/>3 segments?}
     F -->|Yes| G[Partial Core<br/>Expand before use]
-    F -->|No| H[IG Package<br/>non-HL7]
+    F -->|No| D{HL7-scope name?<br/>hl7.fhir/cda/v2/other, ihe, who}
+    D -->|Yes| E[IG Package<br/>HL7-scope]
+    D -->|No| H[IG Package<br/>non-HL7]
 ```
 
 The secondary registry (`packages2.fhir.org`) also provides a `kind` field in catalog responses that explicitly indicates `"Core"` or `"IG"`.

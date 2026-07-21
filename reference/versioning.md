@@ -52,8 +52,7 @@ Versions with missing or wildcard components that resolve to the highest matchin
 **Valid wildcard characters:** `x`, `X`, `*`
 
 **Rules:**
-- `*` is terminal — it matches the current and all remaining segments
-- `x`/`X` matches only the current segment
+- `x`, `X`, and `*` are interchangeable and appear only as the trailing segment; a wildcard segment matches that segment and every segment after it (e.g. `4.x` matches any minor and patch)
 - Wildcard literals **never** appear in the cache; they always resolve to exact versions
 - Registry must be consulted each time a wildcard is resolved (no cache shortcut)
 
@@ -64,7 +63,7 @@ Special labels that map to dynamic versions:
 | Tag | Meaning | Resolution Source |
 |-----|---------|-------------------|
 | `latest` | Most recent published release | Registry `dist-tags.latest` |
-| `dev` | Most recent local build | Local cache; falls back to `current` |
+| `dev` | Most recent local build | Local cache only (no registry or CI fallback; fails if absent) |
 | `current` | Current CI build (default branch) | `build.fhir.org` |
 | `current${branch}` | CI build for a specific branch | `build.fhir.org` with branch filter |
 
@@ -163,7 +162,8 @@ flowchart TD
     B -->|Exact: 4.0.1| C[Direct lookup in<br/>registry/cache]
     B -->|Wildcard: 4.0.x| D[Query registry for<br/>all versions of package]
     B -->|latest| E[Query registry<br/>dist-tags.latest]
-    B -->|current/dev| F[Query build.fhir.org<br/>or local cache]
+    B -->|current| F[Query build.fhir.org]
+    B -->|dev| Fd[Local cache only]
     B -->|Range: ^3.0.1| G[Query registry, apply<br/>SemVer range matching]
     B -->|None| E
     D --> H[Apply semver.maxSatisfying<br/>to filter versions]

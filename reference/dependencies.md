@@ -155,21 +155,33 @@ Root
 | SUSHI | Loads both — each package gets its resolved version |
 | Java Publisher | Logs a warning about version mismatch |
 
+**This SDK** resolves conflicts with the `ConflictStrategy` option (default
+`HighestWins`; also `FirstWins` and `Error`). Under `HighestWins` the highest
+pinned version across active edges wins; `FirstWins` keeps the first-encountered
+version (root order is significant); `Error` reports a `VersionConflict` failure
+when active edges pin different exact versions.
+
 ## Known Package Fixups
 
-Some implementations apply workarounds for known package issues:
+This SDK applies the following fixups by default (via `PackageFixups`) before
+resolution, in addition to any configured `VersionFixups`:
 
 ### HL7 Core Package Version Fix
 
 `hl7.fhir.r4.core@4.0.0` is automatically upgraded to `4.0.1` because the `4.0.0` publication had errors.
 
+### R4B Snapshot Alias
+
+`hl7.fhir.r4b.core@4.3.0-snapshot1` is rewritten to `4.3.0` (the `snapshot1` pre-release aliases the release).
+
 ### Extension Package Mapping
 
-The Java Publisher maps generic extension packages to version-specific ones:
+Generic extension packages are remapped to the version-specific package for the resolved FHIR release:
 
 ```
-hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r4   (for R4 projects)
-hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r5   (for R5 projects)
+hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r4    (R4)
+hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r4b   (R4B)
+hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r5    (R5)
 ```
 
 And strips `-cibuild` suffixes from versions.
