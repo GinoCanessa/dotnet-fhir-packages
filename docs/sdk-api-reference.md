@@ -592,7 +592,7 @@ public record PackageListing
     public bool IsComplete { get; init; }                                   // default: true; JSON-ignored
     public IReadOnlyList<RegistryAttemptFailure> QueryFailures { get; init; } // default: []; JSON-ignored
     public IReadOnlyList<PackageVersionInfo> VersionCandidates { get; init; } // source-specific; JSON-ignored
-    public string? LatestVersion { get; }   // computed: dist-tags["latest"] or last key
+    public string? LatestVersion { get; }   // computed: dist-tags["latest"] or highest semantic version
 }
 
 public record PackageVersionInfo

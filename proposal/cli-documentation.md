@@ -6,13 +6,13 @@ The `fhir-pkg` command-line tool provides a terminal interface for managing FHIR
 
 ```bash
 # Install as a global .NET tool
-dotnet tool install --global fhir-pkg
+dotnet tool install --global fhir-pkg-cli
 
 # Or install as a local project tool
-dotnet tool install fhir-pkg
+dotnet tool install fhir-pkg-cli
 ```
 
-**Minimum Requirements:** .NET 9.0 Runtime
+**Minimum Requirements:** .NET 8.0 Runtime
 
 ---
 

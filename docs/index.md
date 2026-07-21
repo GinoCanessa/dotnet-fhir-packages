@@ -6,8 +6,8 @@ registries.
 
 ## SDK (Library)
 
-Use the **FhirPkg** NuGet package to integrate FHIR package management into your
-.NET applications.
+Use the **fhir-pkg-lib** NuGet package to integrate FHIR package management
+into your .NET applications.
 
 | Document | Description |
 |----------|-------------|
@@ -19,8 +19,8 @@ Use the **FhirPkg** NuGet package to integrate FHIR package management into your
 
 ## CLI (Command-Line Tool)
 
-Use the **fhir-pkg** .NET global tool to manage FHIR packages from the terminal
-or CI/CD pipelines.
+Use the **fhir-pkg-cli** .NET global tool to install the `fhir-pkg` command for
+the terminal or CI/CD pipelines.
 
 | Document | Description |
 |----------|-------------|
@@ -39,11 +39,11 @@ The CLI pulls in the following packages (resolved automatically on install):
 |---------|---------|
 | [System.CommandLine](https://www.nuget.org/packages/System.CommandLine) | Command-line argument parsing |
 | [Spectre.Console](https://www.nuget.org/packages/Spectre.Console) | Rich terminal output (tables, progress bars, colors) |
-| **FhirPkg** (SDK) | Core FHIR package management logic (see below) |
+| **fhir-pkg-lib** (SDK) | Core FHIR package management logic (see below) |
 
 ### SDK (NuGet Library)
 
-Integrating **FhirPkg** into your application requires a project targeting **net8.0**
+Integrating **fhir-pkg-lib** into your application requires a project targeting **net8.0**
 or later (net8.0, net9.0, and net10.0 are supported; net10.0 is recommended).
 
 | Package | Purpose |
@@ -54,7 +54,7 @@ or later (net8.0, net9.0, and net10.0 are supported; net10.0 is recommended).
 | [Microsoft.Extensions.Options](https://www.nuget.org/packages/Microsoft.Extensions.Options) | Options / configuration binding |
 
 All four packages are transitive — they are restored automatically when you add
-**FhirPkg** to your project.
+**fhir-pkg-lib** to your project.
 
 ### Development (Working With This Project)
 
@@ -76,13 +76,13 @@ All test dependencies are restored automatically by `dotnet restore`.
 **Install the SDK:**
 
 ```bash
-dotnet add package FhirPkg
+dotnet add package fhir-pkg-lib
 ```
 
 **Install the CLI:**
 
 ```bash
-dotnet tool install --global fhir-pkg
+dotnet tool install --global fhir-pkg-cli
 ```
 
 **Install a package (CLI):**

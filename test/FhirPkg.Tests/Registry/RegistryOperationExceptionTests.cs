@@ -1,5 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Collections;
+using System.Reflection;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using Shouldly;
@@ -63,6 +65,41 @@ public class RegistryOperationExceptionTests
             RegistryFailureCategory.InvalidResponse);
     }
 
+    [Fact]
+    public void Constructor_PublicPayloadGraphRetainsNoSensitiveValues()
+    {
+        RegistryEndpoint endpoint = new()
+        {
+            Url =
+                "******registry.example/private/path?token=secret#fragment",
+            Type = RegistryType.FhirNpm,
+            AuthHeaderValue = "******",
+            CustomHeaders = [("X-Api-Key", "secret-key")]
+        };
+        RegistryAttemptFailure failure =
+            RegistryAttemptFailure.Capture(
+                endpoint,
+                new InvalidDataException(
+                    "response body contained private-data"));
+        RegistryOperationException exception = new(
+            "resolve",
+            "example.package",
+            [failure]);
+
+        string payload = string.Join(
+            '\n',
+            EnumeratePublicStrings(
+                exception,
+                new HashSet<object>(
+                    ReferenceEqualityComparer.Instance)));
+
+        payload.ShouldNotContain("token=secret");
+        payload.ShouldNotContain("secret-key");
+        payload.ShouldNotContain("private/path");
+        payload.ShouldNotContain("private-data");
+        payload.ShouldNotContain("response body");
+    }
+
     [Theory]
     [InlineData("not a URI")]
     [InlineData(null)]
@@ -101,5 +138,66 @@ public class RegistryOperationExceptionTests
         provenance.ToString().ShouldNotContain("token");
         provenance.ToString().ShouldNotContain("secret");
         provenance.ToString().ShouldNotContain("private");
+    }
+
+    private static IEnumerable<string> EnumeratePublicStrings(
+        object? value,
+        HashSet<object> visited)
+    {
+        if (value is null)
+            yield break;
+
+        if (value is string text)
+        {
+            yield return text;
+            yield break;
+        }
+
+        if (value is Uri uri)
+        {
+            yield return uri.ToString();
+            yield break;
+        }
+
+        Type type = value.GetType();
+        if (!type.IsValueType && !visited.Add(value))
+            yield break;
+
+        if (value is IEnumerable enumerable)
+        {
+            foreach (object? item in enumerable)
+            {
+                foreach (string nested in
+                    EnumeratePublicStrings(item, visited))
+                {
+                    yield return nested;
+                }
+            }
+
+            yield break;
+        }
+
+        if (value is not Exception
+            && type.Assembly != typeof(RegistryOperationException).Assembly)
+        {
+            yield break;
+        }
+
+        foreach (PropertyInfo property in type.GetProperties(
+            BindingFlags.Instance | BindingFlags.Public))
+        {
+            if (!property.CanRead
+                || property.GetIndexParameters().Length != 0)
+            {
+                continue;
+            }
+
+            foreach (string nested in EnumeratePublicStrings(
+                property.GetValue(value),
+                visited))
+            {
+                yield return nested;
+            }
+        }
     }
 }

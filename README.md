@@ -30,8 +30,8 @@ managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
 
 | Package | Description |
 |---------|-------------|
-| **FhirPkg** | SDK library — add to your .NET projects |
-| **fhir-pkg** | CLI tool — install as a .NET global tool |
+| **fhir-pkg-lib** | SDK library — add to your .NET projects |
+| **fhir-pkg-cli** | CLI tool — installs the `fhir-pkg` command |
 
 ## Quick Start
 
@@ -39,7 +39,7 @@ managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
 
 ```bash
 # Install the tool
-dotnet tool install --global fhir-pkg
+dotnet tool install --global fhir-pkg-cli
 
 # Install a FHIR package
 fhir-pkg install hl7.fhir.r4.core#4.0.1
@@ -63,7 +63,7 @@ fhir-pkg info hl7.fhir.us.core --versions
 ### SDK
 
 ```bash
-dotnet add package FhirPkg
+dotnet add package fhir-pkg-lib
 ```
 
 ```csharp

@@ -25,13 +25,13 @@ search, publish, and maintain a local package cache. It is built on the
 ## Installation
 
 ```bash
-dotnet tool install --global fhir-pkg
+dotnet tool install --global fhir-pkg-cli
 ```
 
 To update:
 
 ```bash
-dotnet tool update --global fhir-pkg
+dotnet tool update --global fhir-pkg-cli
 ```
 
 ## Quick Start
