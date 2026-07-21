@@ -151,11 +151,13 @@ var manager = provider.GetRequiredService<IFhirPackageManager>();
 | `FhirPackageManagerOptions` | Singleton (configured via the callback) |
 | `HttpClient` | Via `IHttpClientFactory` |
 | `IPackageCache` | `DiskPackageCache` |
+| `IHardenedPackageCache` | Same `DiskPackageCache` singleton (cast; throws `UnsupportedCacheCapability` if unsupported) |
 | `IRegistryClient` | `RedundantRegistryClient` (chains all configured endpoints) |
 | `IVersionResolver` | `VersionResolver` |
 | `IDependencyResolver` | `DependencyResolver` |
 | `IPackageIndexer` | `PackageIndexer` |
 | `IFhirPackageManager` | `FhirPackageManager` |
+| `IHardenedFhirPackageManager` | Same `FhirPackageManager` singleton (cast; throws `UnsupportedManagerCapability` if unsupported) |
 | `IFhirPackageResourceManager` | Same `FhirPackageManager` singleton |
 
 ### Restore from a Project Manifest
@@ -184,6 +186,8 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
+| `InstallLimits` | `PackageInstallLimits` | 100 MiB compressed, 1 GiB expanded, 128 MiB/entry, 50,000 entries, path 1,024, depth 32 | Archive-processing safety limits (env-overridable) |
+| `CorruptCacheBehavior` | `CorruptCacheBehavior` | `Repair` | How an invalid cache target is handled (`Repair`, `Strict`) |
 | `CachePath` | `string?` | `PACKAGE_CACHE_FOLDER` env var, or `~/.fhir/packages` | Local package cache directory |
 | `Registries` | `List<RegistryEndpoint>` | `[]` | Custom registry endpoints (priority order) |
 | `IncludeCiBuilds` | `bool` | `true` | Query the FHIR CI build registry |
@@ -194,7 +198,7 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 | `MaxParallelRegistryQueries` | `int` | `3` | Concurrency limit for batch registry queries |
 | `ResourceCacheSize` | `int` | `200` | Max entries in in-memory resource cache (0 = disabled) |
 | `ResourceCacheSafeMode` | `SafeMode` | `Off` | Cache return behavior: `Off`, `Clone`, `Freeze` |
-| `VersionFixups` | `Dictionary<string, string>` | `{"hl7.fhir.r4.core@4.0.0": "4.0.1"}` | Known version corrections |
+| `VersionFixups` | `Dictionary<string, string>` | `{"hl7.fhir.r4.core@4.0.0": "4.0.1", "hl7.fhir.r4b.core@4.3.0-snapshot1": "4.3.0"}` | Known version corrections |
 
 ## Architecture
 

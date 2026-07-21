@@ -1,6 +1,8 @@
 # SDK API Reference
 
-This document covers every public type in the **FhirPkg** SDK. For a high-level
+This document is the public API reference for the **FhirPkg** SDK, covering its
+interfaces, options, models, enumerations, cache, registry, resolution,
+indexing, utilities, and dependency-injection types. For a high-level
 introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
 
 ---
@@ -399,7 +401,7 @@ public class FhirPackageManagerOptions
     public PackageInstallLimits InstallLimits { get; set; }
     public CorruptCacheBehavior CorruptCacheBehavior { get; set; }  // default: Repair
     public string? CachePath { get; set; }                          // default: null → PACKAGE_CACHE_FOLDER env var → ~/.fhir/packages
-    public List<RegistryEndpoint> Registries { get; set; }          // default: []
+    public List<RegistryEndpoint> Registries { get; init; }         // default: []
     public bool IncludeCiBuilds { get; set; }                       // default: true
     public bool IncludeHl7WebsiteFallback { get; set; }             // default: true
     public TimeSpan HttpTimeout { get; set; }                       // default: 30s
@@ -408,7 +410,7 @@ public class FhirPackageManagerOptions
     public int MaxParallelRegistryQueries { get; set; }             // default: 3
     public int ResourceCacheSize { get; set; }                      // default: 200
     public SafeMode ResourceCacheSafeMode { get; set; }             // default: SafeMode.Off
-    public Dictionary<string, string> VersionFixups { get; set; }   // defaults include R4 4.0.0→4.0.1 and R4B snapshot1→4.3.0
+    public Dictionary<string, string> VersionFixups { get; init; }  // defaults include R4 4.0.0→4.0.1 and R4B snapshot1→4.3.0
 }
 ```
 
@@ -585,6 +587,7 @@ public record PackageManifest
     public IReadOnlyDictionary<string, string>? DevDependencies { get; init; }
     public IReadOnlyList<string>? Keywords { get; init; }
     public NpmDistribution? Distribution { get; init; }
+    public NpmRepository? Repository { get; init; }
     public IReadOnlyDictionary<string, string>? DistTags { get; init; }
 
     // FHIR-specific fields
@@ -603,6 +606,12 @@ public record PackageManifest
     public static PackageManifest Deserialize(Stream stream);
     public string Serialize();
 }
+```
+
+`Repository` uses the `NpmRepository` record:
+
+```csharp
+public record NpmRepository(string? Type, string? Url, string? Directory);
 ```
 
 ### PackageListing & PackageVersionInfo
@@ -969,13 +978,23 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     public bool IsPreRelease { get; }
     public FhirPreReleaseType PreReleaseType { get; }
 
-    public static FhirSemVer? Parse(string version);
+    // Throws ArgumentException/FormatException on invalid input; never returns null.
+    public static FhirSemVer Parse(string versionString);
+    public static bool TryParse(string? versionString, out FhirSemVer? result);
 
-    // Returns the highest version matching this wildcard pattern
-    public FhirSemVer? MaxSatisfying(IEnumerable<FhirSemVer> versions);
+    public bool Satisfies(string versionSpecifier);
+    public bool Satisfies(FhirSemVer other);
 
-    // Returns the highest version satisfying this range
-    public FhirSemVer? SatisfyingRange(IEnumerable<FhirSemVer> versions);
+    // Highest version in 'versions' that satisfies 'specifier' (static; null if none).
+    public static FhirSemVer? MaxSatisfying(
+        IEnumerable<FhirSemVer> versions, string specifier, bool includePreRelease = false);
+
+    // ALL versions in 'versions' that satisfy the range expression (static).
+    public static IEnumerable<FhirSemVer> SatisfyingRange(
+        IEnumerable<FhirSemVer> versions, string rangeExpression);
+
+    public int CompareTo(FhirSemVer? other);
+    // Also defines ==, !=, <, >, <=, >= operators (via IComparable/IEquatable).
 }
 ```
 
@@ -1115,6 +1134,11 @@ versions.
 | `Indexing` | Indexing resources |
 | `Complete` | Installation complete |
 | `Failed` | Installation failed |
+| `Acquiring` | Acquiring content into bounded local staging |
+| `Validating` | Validating archive shape, layout, manifest, and identity |
+| `WaitingForLock` | Waiting to acquire the package mutation lock |
+| `Repairing` | Repairing an invalid existing cache entry |
+| `Committing` | Committing validated content to the cache |
 
 ### SafeMode
 
@@ -1137,6 +1161,73 @@ Controls how `MemoryResourceCache` returns cached objects.
 | `CoreXml` | Core XML schemas (R5+) |
 | `Elements` | Element definitions (R5+) |
 
+### CorruptCacheBehavior
+
+Controls how installation handles an existing cache entry that is invalid.
+
+| Value | Description |
+|-------|-------------|
+| `Repair` | Quarantine and replace the invalid entry after validation succeeds (default) |
+| `Strict` | Reject installation with a typed corruption error |
+| `Throw` | Alias for `Strict` |
+
+### PackageInstallErrorCode
+
+Stable failure categories carried by `PackageInstallException.ErrorCode` and
+`PackageInstallResult.ErrorCode`.
+
+| Value | Description |
+|-------|-------------|
+| `InvalidPolicy` | The effective installation policy is invalid |
+| `ResolutionFailed` | The package directive could not be resolved |
+| `DownloadFailed` | The package source could not be acquired |
+| `CompressedSizeLimitExceeded` | The compressed package size exceeded policy |
+| `ExpandedSizeLimitExceeded` | The expanded package size exceeded policy |
+| `EntrySizeLimitExceeded` | One archive entry exceeded policy |
+| `ArchiveEntryCountLimitExceeded` | The archive entry count exceeded policy |
+| `ArchivePathLengthLimitExceeded` | A normalized archive path exceeded policy |
+| `ArchiveDepthLimitExceeded` | An archive path nesting depth exceeded policy |
+| `ChecksumMismatch` | A package checksum did not match its expected value |
+| `InvalidArchive` | The package archive is structurally invalid |
+| `InvalidPackageIdentity` | The requested or discovered package identity is invalid |
+| `CorruptCache` | An existing cache target is corrupt |
+| `CoordinationFailed` | Package operation coordination failed |
+| `CommitFailed` | The validated package could not be committed to the cache |
+| `UnsupportedManagerCapability` | The manager does not support the requested capability |
+| `UnsupportedCacheCapability` | The configured cache does not implement the hardened capability |
+| `DependencyInstallationFailed` | One or more requested dependencies could not be installed |
+
+### PackageInstallStage
+
+Identifies the installation stage at which a failure occurred (carried by
+`PackageInstallException.Stage` and `PackageInstallResult.ErrorStage`).
+
+| Value | Description |
+|-------|-------------|
+| `PolicyValidation` | Manager and per-call policy validation |
+| `Resolution` | Directive resolution |
+| `Acquisition` | Package source acquisition |
+| `ChecksumValidation` | Checksum verification |
+| `ArchiveValidation` | Archive shape and content validation |
+| `IdentityValidation` | Manifest identity validation |
+| `CacheInspection` | Existing cache inspection |
+| `Coordination` | Cross-instance or cross-process coordination |
+| `Commit` | Cache promotion and metadata commit |
+| `DependencyInstallation` | Dependency installation |
+
+### RegistryFailureCategory
+
+Safe, public category for a failed registry attempt
+(`RegistryAttemptFailure.Category`).
+
+| Value | Description |
+|-------|-------------|
+| `Network` | The registry could not be reached |
+| `Timeout` | The registry operation exceeded its deadline |
+| `HttpResponse` | The registry returned an unsuccessful HTTP response |
+| `InvalidResponse` | The registry returned data that could not be processed |
+| `Unexpected` | The registry attempt failed for another reason |
+
 ---
 
 ## Cache
@@ -1146,7 +1237,7 @@ Controls how `MemoryResourceCache` returns cached objects.
 Interface for local package storage operations.
 
 ```csharp
-public interface IPackageCache
+public interface IPackageCache : IDisposable
 {
     string CacheDirectory { get; }
 
@@ -1229,6 +1320,24 @@ Task<PackageRecord> ImportAsync(
 
 The manager rejects an injected `IPackageCache` that does not implement this
 capability with `UnsupportedCacheCapability` before source access.
+
+`InspectAsync` returns a path-neutral `HardenedPackageCacheInspection`:
+
+```csharp
+public sealed record HardenedPackageCacheInspection
+{
+    public required HardenedPackageCacheState State { get; init; }
+    public bool IsRepairable { get; init; } = true;   // may transactionally repair corruption
+    public string? CorruptionReason { get; init; }    // non-sensitive; set when State is Corrupt
+}
+
+public enum HardenedPackageCacheState
+{
+    Missing = 0,   // no cache target exists for the identity
+    Valid   = 1,   // the cache target is valid and matches its identity
+    Corrupt = 2,   // the cache target exists but is invalid
+}
+```
 
 ### DiskPackageCache
 
@@ -1590,7 +1699,7 @@ names.
 ```csharp
 public static class FhirReleaseMapping
 {
-    public static string[] KnownCoreTypes { get; }  // ["core", "expansions", "examples", ...]
+    public static readonly string[] KnownCoreTypes;  // ["core", "expansions", "examples", "search", "corexml", "elements"]
 
     public static FhirRelease? FromVersionString(string version);
     public static string? ToVersionString(FhirRelease release);
@@ -1602,14 +1711,18 @@ public static class FhirReleaseMapping
 
 ### CheckSum
 
-SHA-1 checksum computation and verification.
+SHA-1 (default, for NPM registry compatibility) and SHA-256 checksum computation
+and verification.
 
 ```csharp
 public static class CheckSum
 {
     public static string ComputeSha1(Stream stream);
     public static string ComputeSha1(byte[] data);
-    public static bool Verify(Stream stream, string? expectedHash);
+    public static string ComputeSha256(Stream stream);
+    public static string ComputeSha256(byte[] data);
+    public static bool Verify(Stream stream, string? expectedHash, bool resetPosition = true);
+    public static bool VerifySha256(Stream stream, string? expectedHash, bool resetPosition = true);
 }
 ```
 
