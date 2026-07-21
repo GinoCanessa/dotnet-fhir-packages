@@ -126,6 +126,29 @@ traffic is generated.
 publication time, and compressed archive SHA-256 while preserving unrelated
 sections.
 
+### Mutable CI Outcome Classification
+
+`current` and `current$branch` retain a stable alias cache path, so the manager
+reports a separate disposition while keeping the compatibility status
+`Installed`.
+
+If a locked alias identity or source publication timestamp proves that the
+cached package is current, the manager returns `AlreadyCurrent` without a
+download. Otherwise, `DiskPackageCache` records the authoritative cache effect
+while holding the package identity lease:
+
+- committing into a missing target is `Created`;
+- replacing a valid or corrupt target is `Replaced`; and
+- returning an existing target or skipping a matching archive hash is
+  `Unchanged`.
+
+The manager maps `Created` to `Installed`, `Replaced` to `Updated`,
+`Unchanged` with explicit overwrite to `Refreshed`, and other `Unchanged`
+outcomes to `AlreadyCurrent`. An unknown effect from a custom cache leaves the
+public disposition null. The previous and resulting manifest dates are carried
+as raw strings for presentation only; equal or missing dates never override the
+cache's create/replace/unchanged decision.
+
 ## 3 — Version Resolution
 
 If the cache does not satisfy the request, the SDK resolves the directive to an

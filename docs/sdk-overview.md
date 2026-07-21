@@ -41,21 +41,39 @@ dotnet add package fhir-pkg-lib
 using System.Text.Json.Nodes;
 using FhirPkg;
 using FhirPkg.Indexing;
+using FhirPkg.Models;
 
 // Create a manager with default options
-using var manager = new FhirPackageManager();
+using FhirPackageManager manager = new();
 
 // Install a single package
-var record = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+PackageRecord? record =
+    await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 Console.WriteLine($"Installed to {record?.ContentPath}");
 
-// Install multiple packages with dependencies
-var results = await manager.InstallManyAsync(
-    ["hl7.fhir.us.core#6.1.0", "hl7.fhir.uv.extensions.r4#1.0.0"],
-    new InstallOptions { IncludeDependencies = true });
+// Install multiple packages and inspect mutable-CI outcomes
+IReadOnlyList<PackageInstallResult> results =
+    await manager.InstallManyAsync(
+        ["hl7.fhir.us.core#current", "hl7.fhir.uv.extensions.r4#1.0.0"],
+        new InstallOptions { IncludeDependencies = true });
 
-foreach (var r in results)
-    Console.WriteLine($"{r.Directive}: {r.Status}");
+foreach (PackageInstallResult result in results)
+{
+    Console.WriteLine(
+        $"{result.Directive}: {result.Status} / " +
+        $"{result.Disposition?.ToString() ?? "no CI disposition"}");
+    if (result.Disposition == PackageInstallDisposition.Updated)
+    {
+        Console.WriteLine(
+            $"  manifest date: {result.PreviousManifestDate ?? "unavailable"} -> " +
+            $"{result.ManifestDate ?? "unavailable"}");
+    }
+    else if (result.Disposition is not null)
+    {
+        Console.WriteLine(
+            $"  manifest date: {result.ManifestDate ?? "unavailable"}");
+    }
+}
 
 // List cached package summaries
 IReadOnlyList<PackageRecord> cached =
@@ -64,11 +82,17 @@ foreach (PackageRecord pkg in cached)
     Console.WriteLine($"{pkg.Reference.FhirDirective} ({pkg.SizeBytes} bytes)");
 
 // Search registries
-var entries = await manager.SearchAsync(
-    new PackageSearchCriteria { Name = "hl7.fhir.us", FhirVersion = "R4" });
+IReadOnlyList<CatalogEntry> entries =
+    await manager.SearchAsync(
+        new PackageSearchCriteria
+        {
+            Name = "hl7.fhir.us",
+            FhirVersion = "R4"
+        });
 
 // Resolve without downloading
-var resolved = await manager.ResolveAsync("hl7.fhir.us.core#latest");
+ResolvedDirective? resolved =
+    await manager.ResolveAsync("hl7.fhir.us.core#latest");
 Console.WriteLine($"Resolved to {resolved?.Reference.Version} at {resolved?.TarballUri}");
 
 // Search and read resources from cached packages
@@ -88,6 +112,10 @@ root operation fail. `PackageInstallResult.Package` retains the committed root
 and `DependencyFailures` lists failed child directives. Single-package
 `InstallAsync` overloads throw `DependencyInstallationException` with the same
 partial-state information.
+
+The directive-based single-package `InstallAsync` overload still returns only
+`PackageRecord?`. Use `InstallManyAsync` when callers need the nullable mutable
+CI disposition and manifest-date fields.
 
 ### Dependency Injection
 

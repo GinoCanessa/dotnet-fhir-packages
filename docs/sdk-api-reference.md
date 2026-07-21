@@ -142,18 +142,23 @@ cache. Returns the `PackageRecord` on success, or `null` if the package could no
 be found.
 
 ```csharp
-var record = await manager.InstallAsync("hl7.fhir.us.core#6.1.0");
+PackageRecord? record =
+    await manager.InstallAsync("hl7.fhir.us.core#6.1.0");
 ```
 
 #### `InstallManyAsync`
 
 Installs multiple packages with concurrency control. Returns a result per
-directive with its status (`Installed`, `AlreadyCached`, `NotFound`, `Failed`).
+directive with its compatibility status (`Installed`, `AlreadyCached`,
+`NotFound`, `Failed`). Successful `current` and `current$branch` results can
+also expose a nullable `PackageInstallDisposition` that distinguishes first
+install, replacement, already-current, and same-content refresh outcomes.
 
 ```csharp
-var results = await manager.InstallManyAsync(
-    ["hl7.fhir.r4.core#4.0.1", "hl7.fhir.us.core#6.1.0"],
-    new InstallOptions { IncludeDependencies = true });
+IReadOnlyList<PackageInstallResult> results =
+    await manager.InstallManyAsync(
+        ["hl7.fhir.r4.core#4.0.1", "hl7.fhir.us.core#6.1.0"],
+        new InstallOptions { IncludeDependencies = true });
 ```
 
 #### `RestoreAsync`
@@ -708,12 +713,29 @@ public record PackageInstallResult
     public required string Directive { get; init; }
     public PackageRecord? Package { get; init; }
     public PackageInstallStatus Status { get; init; }
+    public PackageInstallDisposition? Disposition { get; init; }
+    public string? PreviousManifestDate { get; init; }
+    public string? ManifestDate { get; init; }
     public string? ErrorMessage { get; init; }
     public PackageInstallErrorCode? ErrorCode { get; init; }
     public PackageInstallStage? ErrorStage { get; init; }
     public IReadOnlyList<PackageInstallResult> DependencyFailures { get; init; }
 }
 ```
+
+`Disposition` refines successful mutable-CI directives only. `Installed`,
+`Updated`, `AlreadyCurrent`, and `Refreshed` all retain
+`Status == PackageInstallStatus.Installed`; existing status-based callers
+therefore keep the same compatibility behavior. Non-CI installs, failures, and
+mutable-CI download/commit paths whose cache cannot report an authoritative
+effect leave `Disposition`, `PreviousManifestDate`, and `ManifestDate` null.
+Manager-owned already-current short circuits can still report their recognized
+outcome without a cache commit.
+
+The date fields are raw nullable `package.json` `date` strings. For an update,
+`PreviousManifestDate` identifies the replaced cache entry and `ManifestDate`
+identifies the resulting package. Dates are presentation data and are not used
+to decide whether the cache changed.
 
 For dependency-stage failures, `Status` is `Failed`, `Package` is the root
 package already committed to the cache, and `DependencyFailures` enumerates
@@ -1035,10 +1057,21 @@ Ordered from highest to lowest precedence.
 
 | Value | Description |
 |-------|-------------|
-| `Installed` | Successfully downloaded and cached |
+| `Installed` | Successful compatibility status, including every mutable-CI disposition |
 | `AlreadyCached` | Already present in cache (skipped) |
 | `Failed` | Installation failed (see `ErrorMessage`) |
 | `NotFound` | Package could not be found in any registry |
+
+### PackageInstallDisposition
+
+Nullable refinement for successful `current` and `current$branch` installs.
+
+| Value | Description |
+|-------|-------------|
+| `Installed` | The mutable alias was committed into a previously missing cache target |
+| `Updated` | Existing cached content was replaced, regardless of manifest-date equality |
+| `AlreadyCurrent` | The source/cache check confirmed that no replacement was needed |
+| `Refreshed` | An explicit overwrite downloaded the alias but confirmed unchanged content |
 
 ### RegistryType
 

@@ -77,7 +77,7 @@ hl7.fhir.us.core#current$main   # CI build for a branch
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--with-dependencies` | `-d` | `bool` | `false` | Also install transitive dependencies declared in each package's manifest. |
-| `--overwrite` | — | `bool` | `false` | Re-download and overwrite packages that are already in the cache. |
+| `--overwrite` | — | `bool` | `false` | Re-download packages already in the cache. An unchanged mutable CI archive is reported as refreshed. |
 | `--fhir-version <release>` | `-f` | `string` | — | Preferred FHIR release when a package publishes multiple versions. Accepted values: `R4`, `R4B`, `R5`, `R6`. |
 | `--pre-release` | — | `bool` | `true` | Include pre-release versions when resolving wildcards, ranges, or `latest`. |
 | `--no-pre-release` | — | `bool` | `false` | Exclude pre-release versions. Takes precedence over `--pre-release`. |
@@ -106,8 +106,11 @@ fhir-pkg install hl7.fhir.r4.core#4.0.1 --overwrite
 # Install latest CI build
 fhir-pkg install hl7.fhir.us.core#current
 
+# Explicitly refresh the current CI build
+fhir-pkg install hl7.fhir.us.core#current --overwrite
+
 # JSON output for scripting
-fhir-pkg install hl7.fhir.r4.core#4.0.1 --json
+fhir-pkg install hl7.fhir.us.core#current --json
 ```
 
 With `--with-dependencies`, the root package is committed before its active
@@ -117,13 +120,26 @@ cache path as committed partial state.
 
 #### Output
 
-**Console mode** — shows a status icon per package:
+**Console mode** — exact and other immutable directives retain their existing
+installed/already-cached labels. Mutable CI aliases distinguish all successful
+cache effects:
 
+```text
+  first.package#current                   ✓ installed
+    manifest date: 20260721
+  updated.package#current                 ✓ updated from CI
+    manifest date: 20260720 -> 20260721
+  current.package#current                 ✓ already current
+    manifest date: 20260721
+  refreshed.package#current               ✓ refreshed
+    manifest date: 20260721 (unchanged)
+
+Summary: 1 installed, 1 updated, 1 already current, 1 refreshed,
+         0 already cached, 0 failed
 ```
-✓ hl7.fhir.r4.core#4.0.1           Installed
-● hl7.fhir.us.core#6.1.0           Already cached
-✗ some.missing.package#1.0.0       Not found
-```
+
+Missing manifest dates render as `unavailable`. `AlreadyCurrent` is a
+successful outcome and keeps exit code `0`.
 
 **JSON mode** — structured result with summary:
 
@@ -131,14 +147,41 @@ cache path as committed partial state.
 {
   "results": [
     {
-      "directive": "hl7.fhir.r4.core#4.0.1",
-      "status": "installed",
-      "package": { "name": "hl7.fhir.r4.core", "version": "4.0.1" }
+      "directive": "updated.package#current",
+      "status": "Installed",
+      "dependencyFailures": [],
+      "package": {
+        "name": "updated.package",
+        "version": "current",
+        "directoryPath": "C:\\Users\\me\\.fhir\\packages\\updated.package#current"
+      },
+      "disposition": "Updated",
+      "previousManifestDate": "20260720",
+      "manifestDate": "20260721"
     }
   ],
-  "summary": { "total": 1, "installed": 1, "alreadyCached": 0, "failed": 0 }
+  "summary": {
+    "total": 1,
+    "installed": 1,
+    "alreadyCached": 0,
+    "failed": 0,
+    "dispositions": {
+      "installed": 0,
+      "updated": 1,
+      "alreadyCurrent": 0,
+      "refreshed": 0
+    }
+  }
 }
 ```
+
+The existing coarse `summary.installed` count is unchanged: every successful
+mutable-CI disposition contributes to it. The nested `summary.dispositions`
+object is non-overlapping and its four buckets total that coarse installed
+count. For a recognized mutable-CI disposition, both date keys are present and
+may be explicit JSON `null`. The disposition and date keys are omitted for
+non-CI results, failures, and successful installs whose cache implementation
+cannot report an authoritative effect.
 
 ---
 
@@ -625,6 +668,8 @@ fhir-pkg publish ./output/my.ig.package-1.0.0.tgz \
 | `7` | `CacheError` | An error occurred reading from or writing to the local cache. |
 | `8` | `AuthError` | Authentication or authorization failed. |
 
+An `already current` mutable-CI result is successful and returns code `0`.
+
 Use exit codes in scripts:
 
 ```bash
@@ -728,8 +773,10 @@ Machine-readable JSON output written to stdout. All JSON output uses:
 
 - **camelCase** property names
 - **Indented** formatting
-- **Null suppression** — null properties are omitted
-- **camelCase enums** — enum values are serialized as camelCase strings
+- **Null suppression** — null properties are normally omitted; recognized
+  mutable-CI install results retain explicit null manifest-date keys
+- **Enum strings** — enum-typed fields use camelCase; the install `status` and
+  `disposition` compatibility strings retain their documented PascalCase values
 
 Errors in JSON mode are written as:
 
