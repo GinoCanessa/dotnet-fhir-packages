@@ -5,6 +5,24 @@ version and its matching `v<version>` tag. The checked-out tag must resolve to
 the workflow head commit, and that commit must be an ancestor of the freshly
 fetched `origin/main`.
 
+## Preparing the changelog
+
+Before creating the release commit and tag, stamp the changelog so the released
+version has its own section:
+
+1. In [`CHANGELOG.md`](../../CHANGELOG.md), rename the `## Current` heading to
+   `## [<version>] - <YYYY-MM-DD>`, using the CalVer version being released and
+   its calendar date.
+2. Add a fresh, empty `## Current` section above it for the next cycle.
+3. Commit both edits to `main` before tagging.
+
+Each package's `<PackageReleaseNotes>` is derived from the matching changelog
+section at pack time: a release build (`-p:Version=<version>`) selects the
+`## [<version>]` section, and any other build falls back to `## Current`.
+Because of that fallback an un-renamed `## Current` still ships the correct
+about-to-release notes, but renaming keeps the published NuGet release notes
+version-accurate and preserves the historical record.
+
 ## Required release gates
 
 The workflow enforces this dependency chain:

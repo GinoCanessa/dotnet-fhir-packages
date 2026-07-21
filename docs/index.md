@@ -16,6 +16,7 @@ into your .NET applications.
 | [Package Request Process](process.md) | End-to-end walkthrough of resolution, download, extraction, caching, and indexing. |
 | [Version Resolution Policy](versioning-policy.md) | Configuration snapshots, fixups, pre-release rules, and FHIR-release filtering. |
 | [Release Process and Evidence](releases/README.md) | Exact-commit source CI, immutable candidate handoff, 3 x 3 qualification, publication gates, and evidence. |
+| [Changelog](../CHANGELOG.md) | User-visible changes for both packages, by release. |
 
 ## CLI (Command-Line Tool)
 

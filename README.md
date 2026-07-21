@@ -199,6 +199,7 @@ cs-fhir-packages/
 | Document | Description |
 |----------|-------------|
 | [Documentation Index](docs/index.md) | Landing page for all developer docs |
+| [Changelog](CHANGELOG.md) | User-visible changes for both packages, by release. |
 | [SDK Overview](docs/sdk-overview.md) | Introduction, quick start, DI setup, configuration |
 | [SDK API Reference](docs/sdk-api-reference.md) | Complete interface, model, and enum reference |
 | [CLI Overview](docs/cli-overview.md) | Installation, quick start, command summary |
