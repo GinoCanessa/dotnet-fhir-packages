@@ -2,6 +2,7 @@
 
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using FhirPkg.Installation;
 
@@ -118,8 +119,9 @@ internal sealed class PackageCacheCoordinator
         FileStream? stream = null;
         try
         {
-            stream = OpenLockFile(GetOperationLockPath(operationId));
-            if (!PackageCacheFileLock.TryLock(stream))
+            if (!TryOpenAndLock(
+                    GetOperationLockPath(operationId),
+                    out stream))
             {
                 ReleaseFailedAcquisition(stream, processLock);
                 return null;
@@ -162,13 +164,12 @@ internal sealed class PackageCacheCoordinator
             await processLock.Semaphore.WaitAsync(cancellationToken)
                 .ConfigureAwait(false);
             processLock.MarkSemaphoreHeld();
-            stream = OpenLockFile(lockPath);
             int retryDelay = InitialRetryDelayMilliseconds;
             int retryAttempt = 0;
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (PackageCacheFileLock.TryLock(stream))
+                if (TryOpenAndLock(lockPath, out stream))
                     return new PackageCacheLease(processLock, stream);
 
                 retryAttempt = checked(retryAttempt + 1);
@@ -218,12 +219,11 @@ internal sealed class PackageCacheCoordinator
         {
             processLock.Semaphore.Wait();
             processLock.MarkSemaphoreHeld();
-            stream = OpenLockFile(lockPath);
             int retryDelay = InitialRetryDelayMilliseconds;
             int retryAttempt = 0;
             while (true)
             {
-                if (PackageCacheFileLock.TryLock(stream))
+                if (TryOpenAndLock(lockPath, out stream))
                     return new PackageCacheLease(processLock, stream);
 
                 retryAttempt = checked(retryAttempt + 1);
@@ -291,6 +291,37 @@ internal sealed class PackageCacheCoordinator
             : 0;
     }
 
+    private bool TryOpenAndLock(
+        string lockPath,
+        [NotNullWhen(true)] out FileStream? stream)
+    {
+        stream = null;
+        try
+        {
+            FileStream candidate = OpenLockFile(lockPath);
+            try
+            {
+                if (!PackageCacheFileLock.TryLock(candidate))
+                    return false;
+
+                stream = candidate;
+                return true;
+            }
+            finally
+            {
+                if (stream is null)
+                    candidate.Dispose();
+            }
+        }
+        catch (IOException exception)
+            when (OperatingSystem.IsMacOS()
+                && PackageCacheFileLock.IsMacOpenContention(
+                    exception))
+        {
+            return false;
+        }
+    }
+
     private FileStream OpenLockFile(string lockPath)
     {
         SystemPackageCacheFileOperations.Instance.CreateDirectory(
@@ -299,7 +330,9 @@ internal sealed class PackageCacheCoordinator
             lockPath,
             FileMode.OpenOrCreate,
             FileAccess.ReadWrite,
-            FileShare.ReadWrite,
+            OperatingSystem.IsMacOS()
+                ? FileShare.None
+                : FileShare.ReadWrite,
             bufferSize: 1,
             FileOptions.None);
     }
@@ -614,12 +647,21 @@ internal static class PackageCacheFileLock
     [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
     private static extern int Flock(int descriptor, int operation);
 
-    private static bool IsManagedLockContention(
+    internal static bool IsMacOpenContention(
         IOException exception)
     {
+        ArgumentNullException.ThrowIfNull(exception);
+        return (exception.HResult & 0xFFFF) == MacWouldBlock;
+    }
+
+    internal static bool IsManagedLockContention(
+        IOException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
         int nativeError = exception.HResult & 0xFFFF;
         return OperatingSystem.IsWindows()
             ? nativeError is 32 or 33
-            : nativeError is 11 or 13;
+            : !OperatingSystem.IsMacOS()
+                && nativeError is 11 or 13;
     }
 }

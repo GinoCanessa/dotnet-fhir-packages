@@ -688,6 +688,45 @@ public sealed class PackageCacheCoordinatorTests
         exception.Stage.ShouldBe(PackageInstallStage.Coordination);
     }
 
+    [Fact]
+    public void MacOpenContention_WouldBlockIsRetryable()
+    {
+        PackageCacheFileLock.IsMacOpenContention(
+            CreateNativeIOException(35)).ShouldBeTrue();
+
+        int[] rejectedCodes = [5, 11, 32, 33];
+        foreach (int nativeError in rejectedCodes)
+        {
+            PackageCacheFileLock.IsMacOpenContention(
+                CreateNativeIOException(nativeError)).ShouldBeFalse();
+        }
+    }
+
+    [Fact]
+    public void MacOpenContention_AccessDeniedIsNotRetryable()
+    {
+        PackageCacheFileLock.IsMacOpenContention(
+            CreateNativeIOException(13)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void ManagedLockContention_CurrentPlatformCodesAreClassified()
+    {
+        int[] acceptedCodes = OperatingSystem.IsWindows()
+            ? [32, 33]
+            : OperatingSystem.IsMacOS()
+                ? []
+                : [11, 13];
+        int[] candidateCodes = [5, 11, 13, 32, 33, 35];
+
+        foreach (int nativeError in candidateCodes)
+        {
+            PackageCacheFileLock.IsManagedLockContention(
+                    CreateNativeIOException(nativeError))
+                .ShouldBe(acceptedCodes.Contains(nativeError));
+        }
+    }
+
     private sealed class TestDirectory : IDisposable
     {
         internal TestDirectory()
@@ -725,6 +764,12 @@ public sealed class PackageCacheCoordinatorTests
             current = observed;
         }
     }
+
+    private static IOException CreateNativeIOException(
+        int nativeError) =>
+        new(
+            "Synthetic native I/O failure.",
+            unchecked((int)0x80070000) | nativeError);
 
     private static async Task WaitForIdentityReferenceCountAsync(
         string cacheRoot,
