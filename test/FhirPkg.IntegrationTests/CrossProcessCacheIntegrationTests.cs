@@ -30,6 +30,8 @@ public sealed class CrossProcessCacheIntegrationTests
         string release = workspace.File("owner.release");
         string ownerCounter = workspace.File("owner.counter");
         string waiterCounter = workspace.File("waiter.counter");
+        string waiterContention =
+            workspace.File("waiter.contention");
         string ownerResult = workspace.File("owner.result.json");
         string waiterResult = workspace.File("waiter.result.json");
         using HostProcess owner = StartHost(
@@ -44,7 +46,8 @@ public sealed class CrossProcessCacheIntegrationTests
             "--result", ownerResult);
         await WaitForFileAsync(
             barrier,
-            TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken,
+            owner);
         using HostProcess waiter = StartHost(
             "install",
             "--cache", workspace.CachePath,
@@ -52,12 +55,14 @@ public sealed class CrossProcessCacheIntegrationTests
             "--name", "same.package",
             "--version", "1.0.0",
             "--counter", waiterCounter,
+            "--contention", waiterContention,
             "--result", waiterResult);
 
-        await Task.Delay(
-            TimeSpan.FromMilliseconds(150),
-            TestContext.Current.CancellationToken);
-        waiter.HasExited.ShouldBeFalse();
+        await WaitForContentAsync(
+            waiterContention,
+            "retry|1|identity:same.package#1.0.0",
+            TestContext.Current.CancellationToken,
+            waiter);
         File.WriteAllText(release, "release");
 
         HostExecution ownerExecution =
@@ -71,6 +76,120 @@ public sealed class CrossProcessCacheIntegrationTests
         ownerData.BytesRead.ShouldBeGreaterThan(0);
         waiterData.BytesRead.ShouldBe(0);
         ReadCounter(waiterCounter).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task SynchronousContentPath_WaitsForCrossProcessIdentityOwner()
+    {
+        using TestWorkspace workspace = new();
+        string archive = workspace.CreateArchive(
+            "sync.package",
+            "1.0.0");
+        string barrier = workspace.File("sync-owner.ready");
+        string release = workspace.File("sync-owner.release");
+        string contention = workspace.File("sync-reader.contention");
+        string contentResult =
+            workspace.File("sync-reader.result.json");
+        using HostProcess owner = StartHost(
+            "install",
+            "--cache", workspace.CachePath,
+            "--archive", archive,
+            "--name", "sync.package",
+            "--version", "1.0.0",
+            "--barrier", barrier,
+            "--release", release);
+        await WaitForFileAsync(
+            barrier,
+            TestContext.Current.CancellationToken,
+            owner);
+        using HostProcess reader = StartHost(
+            "content-path",
+            "--cache", workspace.CachePath,
+            "--name", "sync.package",
+            "--version", "1.0.0",
+            "--contention", contention,
+            "--result", contentResult);
+
+        await WaitForContentAsync(
+            contention,
+            "retry|1|identity:sync.package#1.0.0",
+            TestContext.Current.CancellationToken,
+            reader);
+        File.WriteAllText(release, "release");
+
+        HostExecution ownerExecution =
+            await owner.WaitAsync(
+                TestContext.Current.CancellationToken);
+        HostExecution readerExecution =
+            await reader.WaitAsync(
+                TestContext.Current.CancellationToken);
+        ownerExecution.ExitCode.ShouldBe(
+            0,
+            ownerExecution.StandardOutput +
+            ownerExecution.StandardError);
+        readerExecution.ExitCode.ShouldBe(
+            0,
+            readerExecution.StandardOutput +
+            readerExecution.StandardError);
+        HostResult readerData = ReadResult(contentResult);
+        readerData.Success.ShouldBeTrue();
+        readerData.ContentPath.ShouldNotBeNull();
+        Directory.Exists(readerData.ContentPath!).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task OperationOwner_TryAcquireReturnsNullForCrossProcessOwner()
+    {
+        using TestWorkspace workspace = new();
+        string operationId = Guid.NewGuid().ToString("N");
+        string barrier = workspace.File("operation-owner.ready");
+        string release = workspace.File("operation-owner.release");
+        string contention =
+            workspace.File("operation-contender.contention");
+        string ownerResult =
+            workspace.File("operation-owner.result.json");
+        string contenderResult =
+            workspace.File("operation-contender.result.json");
+        using HostProcess owner = StartHost(
+            "hold-operation-owner",
+            "--cache", workspace.CachePath,
+            "--operation", operationId,
+            "--barrier", barrier,
+            "--release", release,
+            "--result", ownerResult);
+        await WaitForFileAsync(
+            barrier,
+            TestContext.Current.CancellationToken,
+            owner);
+
+        HostExecution contender = await RunHostAsync(
+            "try-operation-owner",
+            "--cache", workspace.CachePath,
+            "--operation", operationId,
+            "--contention", contention,
+            "--result", contenderResult);
+
+        contender.ExitCode.ShouldBe(
+            0,
+            contender.StandardOutput + contender.StandardError);
+        HostResult contenderData = ReadResult(contenderResult);
+        contenderData.Success.ShouldBeTrue();
+        contenderData.OperationId.ShouldBe(operationId);
+        contenderData.LockAcquired.ShouldBe(false);
+        contenderData.ProcessLockCount.ShouldBe(0);
+        File.Exists(contention).ShouldBeFalse();
+
+        File.WriteAllText(release, "release");
+        HostExecution ownerExecution =
+            await owner.WaitAsync(
+                TestContext.Current.CancellationToken);
+        ownerExecution.ExitCode.ShouldBe(
+            0,
+            ownerExecution.StandardOutput +
+            ownerExecution.StandardError);
+        HostResult ownerData = ReadResult(ownerResult);
+        ownerData.LockAcquired.ShouldBe(true);
+        ownerData.ProcessLockCount.ShouldBe(0);
     }
 
     [Fact]
@@ -103,13 +222,12 @@ public sealed class CrossProcessCacheIntegrationTests
             "--barrier", secondBarrier,
             "--release", release);
 
-        await Task.WhenAll(
-            WaitForFileAsync(
-                firstBarrier,
-                TestContext.Current.CancellationToken),
-            WaitForFileAsync(
-                secondBarrier,
-                TestContext.Current.CancellationToken));
+        await WaitForFilesAsync(
+            firstBarrier,
+            first,
+            secondBarrier,
+            second,
+            TestContext.Current.CancellationToken);
         File.WriteAllText(release, "release");
         HostExecution[] executions = await Task.WhenAll(
             first.WaitAsync(TestContext.Current.CancellationToken),
@@ -151,13 +269,12 @@ public sealed class CrossProcessCacheIntegrationTests
             "--release", release,
             "--result", secondResult);
 
-        await Task.WhenAll(
-            WaitForFileAsync(
-                firstBarrier,
-                TestContext.Current.CancellationToken),
-            WaitForFileAsync(
-                secondBarrier,
-                TestContext.Current.CancellationToken));
+        await WaitForFilesAsync(
+            firstBarrier,
+            first,
+            secondBarrier,
+            second,
+            TestContext.Current.CancellationToken);
         File.WriteAllText(release, "release");
         HostExecution[] executions = await Task.WhenAll(
             first.WaitAsync(TestContext.Current.CancellationToken),
@@ -198,7 +315,8 @@ public sealed class CrossProcessCacheIntegrationTests
             "--release", release);
         await WaitForFileAsync(
             barrier,
-            TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken,
+            owner);
         using HostProcess waiter = StartHost(
             "install",
             "--cache", workspace.CachePath,
@@ -241,7 +359,8 @@ public sealed class CrossProcessCacheIntegrationTests
             "--release", unreleased);
         await WaitForFileAsync(
             barrier,
-            TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken,
+            owner);
         owner.Kill();
         await owner.WaitForExitAfterKillAsync(
             TestContext.Current.CancellationToken);
@@ -291,6 +410,7 @@ public sealed class CrossProcessCacheIntegrationTests
             .ExitCode.ShouldBe(0);
         string barrier = workspace.File("overwrite.ready");
         string release = workspace.File("overwrite.release");
+        string contention = workspace.File("remove.contention");
         using HostProcess overwrite = StartHost(
             "install",
             "--cache", workspace.CachePath,
@@ -302,16 +422,19 @@ public sealed class CrossProcessCacheIntegrationTests
             "--release", release);
         await WaitForFileAsync(
             barrier,
-            TestContext.Current.CancellationToken);
+            TestContext.Current.CancellationToken,
+            overwrite);
         using HostProcess remove = StartHost(
             "remove",
             "--cache", workspace.CachePath,
             "--name", "conflict.package",
-            "--version", "1.0.0");
-        await Task.Delay(
-            TimeSpan.FromMilliseconds(150),
-            TestContext.Current.CancellationToken);
-        remove.HasExited.ShouldBeFalse();
+            "--version", "1.0.0",
+            "--contention", contention);
+        await WaitForContentAsync(
+            contention,
+            "retry|1|identity:conflict.package#1.0.0",
+            TestContext.Current.CancellationToken,
+            remove);
 
         File.WriteAllText(release, "release");
         (await overwrite.WaitAsync(
@@ -527,7 +650,8 @@ public sealed class CrossProcessCacheIntegrationTests
 
     private static async Task WaitForFileAsync(
         string path,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HostProcess process)
     {
         using CancellationTokenSource timeoutSource =
             CancellationTokenSource.CreateLinkedTokenSource(
@@ -535,11 +659,52 @@ public sealed class CrossProcessCacheIntegrationTests
         timeoutSource.CancelAfter(s_timeout);
         while (!File.Exists(path))
         {
+            if (process.HasExited)
+            {
+                HostExecution execution =
+                    await process.WaitAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                throw new InvalidOperationException(
+                    "The process host exited before creating marker " +
+                    $"'{path}'. Standard output: " +
+                    $"{execution.StandardOutput} Standard error: " +
+                    execution.StandardError);
+            }
+
             await Task.Delay(
                     TimeSpan.FromMilliseconds(20),
                     timeoutSource.Token)
                 .ConfigureAwait(false);
         }
+    }
+
+    private static async Task WaitForFilesAsync(
+        string firstPath,
+        HostProcess firstProcess,
+        string secondPath,
+        HostProcess secondProcess,
+        CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource siblingCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+        Task firstWait = WaitForFileAsync(
+            firstPath,
+            siblingCancellation.Token,
+            firstProcess);
+        Task secondWait = WaitForFileAsync(
+            secondPath,
+            siblingCancellation.Token,
+            secondProcess);
+        Task completed = await Task.WhenAny(
+                firstWait,
+                secondWait)
+            .ConfigureAwait(false);
+        if (!completed.IsCompletedSuccessfully)
+            siblingCancellation.Cancel();
+
+        await Task.WhenAll(firstWait, secondWait)
+            .ConfigureAwait(false);
     }
 
     private static async Task WaitForContentAsync(
@@ -780,5 +945,10 @@ public sealed class CrossProcessCacheIntegrationTests
         public bool Success { get; init; }
         public bool Cancelled { get; init; }
         public long BytesRead { get; init; }
+        public string? ContentPath { get; init; }
+        public string? ErrorDetail { get; init; }
+        public string? OperationId { get; init; }
+        public bool? LockAcquired { get; init; }
+        public int? ProcessLockCount { get; init; }
     }
 }

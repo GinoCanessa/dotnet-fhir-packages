@@ -344,11 +344,15 @@ through validation/open/read, so it observes the old or new valid generation.
 A caller using a previously returned raw path outside the SDK may briefly see
 that target absent between replacement renames, but cannot see mixed content.
 
-Windows and Linux use `FileStream.Lock`; macOS uses non-blocking native
-`flock` because managed file locking is unsupported there. Durable replacement
-attempts `F_FULLFSYNC`/`fsync` on macOS and treats documented unsupported
-directory-sync errors (`EINVAL`/`ENOTSUP`, plus `ENOTTY` for `F_FULLFSYNC`) as a
-platform durability limitation while still surfacing real I/O errors.
+Windows and Linux use `FileStream.Lock`. On macOS, persistent lock streams open
+with exclusive sharing so the runtime's whole-file lock matches the intended
+owner; open-time `EWOULDBLOCK` is normal contention and enters the same retry
+loop. The SDK still validates ownership and releases it with non-blocking
+native `flock` because `FileStream.Lock` is unsupported there. Durable
+replacement attempts `F_FULLFSYNC`/`fsync` on macOS and treats documented
+unsupported directory-sync errors (`EINVAL`/`ENOTSUP`, plus `ENOTTY` for
+`F_FULLFSYNC`) as a platform durability limitation while still surfacing real
+I/O errors.
 
 Final mutations use durable journals in `.fhirpkg/transactions` and hidden
 backup/quarantine artifacts. Journal states cover preparation, old-generation

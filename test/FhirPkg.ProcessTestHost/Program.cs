@@ -57,6 +57,18 @@ internal static class Program
                         arguments,
                         cancellationSource.Token)
                     .ConfigureAwait(false),
+                "content-path" => GetContentPath(
+                    cache,
+                    arguments),
+                "hold-operation-owner" =>
+                    await HoldOperationOwnerAsync(
+                            arguments,
+                            contentionObserver,
+                            cancellationSource.Token)
+                        .ConfigureAwait(false),
+                "try-operation-owner" => TryOperationOwner(
+                    arguments,
+                    contentionObserver),
                 "import" => await ImportAsync(
                         cache,
                         arguments,
@@ -107,7 +119,8 @@ internal static class Program
                         Success = false,
                         ErrorCode = exception.ErrorCode,
                         ErrorStage = exception.Stage,
-                        ErrorMessage = exception.Message
+                        ErrorMessage = exception.Message,
+                        ErrorDetail = exception.ToString()
                     },
                     CancellationToken.None)
                 .ConfigureAwait(false);
@@ -296,6 +309,102 @@ internal static class Program
         };
     }
 
+    private static HostResult GetContentPath(
+        DiskPackageCache cache,
+        HostArguments arguments)
+    {
+        PackageReference reference = new(
+            arguments.PackageName
+                ?? throw new ArgumentException(
+                    "--name is required for content-path."),
+            arguments.PackageVersion
+                ?? throw new ArgumentException(
+                    "--version is required for content-path."));
+        return new HostResult
+        {
+            Success = true,
+            Name = reference.Name,
+            Version = reference.Version,
+            ContentPath = cache.GetPackageContentPath(reference)
+        };
+    }
+
+    private static async Task<HostResult> HoldOperationOwnerAsync(
+        HostArguments arguments,
+        IPackageCacheContentionObserver contentionObserver,
+        CancellationToken cancellationToken)
+    {
+        string operationId =
+            arguments.OperationId
+            ?? throw new ArgumentException(
+                "--operation is required for hold-operation-owner.");
+        string barrierPath =
+            arguments.BarrierPath
+            ?? throw new ArgumentException(
+                "--barrier is required for hold-operation-owner.");
+        string releasePath =
+            arguments.ReleasePath
+            ?? throw new ArgumentException(
+                "--release is required for hold-operation-owner.");
+        PackageCacheCoordinator coordinator = new(
+            arguments.CachePath,
+            contentionObserver);
+        await using (PackageCacheLease lease =
+            await coordinator.AcquireOperationOwnerAsync(
+                    operationId,
+                    cancellationToken)
+                .ConfigureAwait(false))
+        {
+            HostFile.WriteText(barrierPath, "ready");
+            while (!File.Exists(releasePath))
+            {
+                await Task.Delay(
+                        TimeSpan.FromMilliseconds(10),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        return new HostResult
+        {
+            Success = true,
+            OperationId = operationId,
+            LockAcquired = true,
+            ProcessLockCount =
+                PackageCacheCoordinator.GetProcessLockEntryCount(
+                    arguments.CachePath)
+        };
+    }
+
+    private static HostResult TryOperationOwner(
+        HostArguments arguments,
+        IPackageCacheContentionObserver contentionObserver)
+    {
+        string operationId =
+            arguments.OperationId
+            ?? throw new ArgumentException(
+                "--operation is required for try-operation-owner.");
+        PackageCacheCoordinator coordinator = new(
+            arguments.CachePath,
+            contentionObserver);
+        bool lockAcquired;
+        using (PackageCacheLease? lease =
+            coordinator.TryAcquireOperationOwner(operationId))
+        {
+            lockAcquired = lease is not null;
+        }
+
+        return new HostResult
+        {
+            Success = true,
+            OperationId = operationId,
+            LockAcquired = lockAcquired,
+            ProcessLockCount =
+                PackageCacheCoordinator.GetProcessLockEntryCount(
+                    arguments.CachePath)
+        };
+    }
+
     private static async Task<HostResult> ClearAsync(
         DiskPackageCache cache,
         CancellationToken cancellationToken)
@@ -339,19 +448,18 @@ internal static class Program
             {
                 WriteIndented = true
             });
-        if (string.IsNullOrWhiteSpace(resultPath))
+        if (!string.IsNullOrWhiteSpace(resultPath))
         {
-            await Console.Out.WriteLineAsync(json)
+            string fullPath = Path.GetFullPath(resultPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            await File.WriteAllTextAsync(
+                    fullPath,
+                    json,
+                    cancellationToken)
                 .ConfigureAwait(false);
-            return;
         }
 
-        string fullPath = Path.GetFullPath(resultPath);
-        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        await File.WriteAllTextAsync(
-                fullPath,
-                json,
-                cancellationToken)
+        await Console.Out.WriteLineAsync(json)
             .ConfigureAwait(false);
     }
 }
@@ -365,6 +473,7 @@ internal sealed record HostArguments
     internal string? PackageVersion { get; init; }
     internal string? PackageScope { get; init; }
     internal string? CanonicalUrl { get; init; }
+    internal string? OperationId { get; init; }
     internal string? CounterPath { get; init; }
     internal string? BarrierPath { get; init; }
     internal string? ReleasePath { get; init; }
@@ -427,6 +536,7 @@ internal sealed record HostArguments
             PackageVersion = GetOptional(values, "version"),
             PackageScope = GetOptional(values, "scope"),
             CanonicalUrl = GetOptional(values, "canonical"),
+            OperationId = GetOptional(values, "operation"),
             CounterPath = GetOptional(values, "counter"),
             BarrierPath = GetOptional(values, "barrier"),
             ReleasePath = GetOptional(values, "release"),
@@ -663,6 +773,15 @@ internal sealed class FileFaultObserver(
 
 internal static class HostFile
 {
+    internal static void WriteText(
+        string path,
+        string content)
+    {
+        string fullPath = Path.GetFullPath(path);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, content);
+    }
+
     internal static void AppendLine(
         string path,
         string content)
@@ -697,6 +816,10 @@ internal sealed record HostResult
     public PackageInstallErrorCode? ErrorCode { get; init; }
     public PackageInstallStage? ErrorStage { get; init; }
     public string? ErrorMessage { get; init; }
+    public string? ErrorDetail { get; init; }
+    public string? OperationId { get; init; }
+    public bool? LockAcquired { get; init; }
+    public int? ProcessLockCount { get; init; }
     public bool? ResourceFound { get; init; }
     public string? ResourceId { get; init; }
     public string? ResourcePackage { get; init; }
