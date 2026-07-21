@@ -317,19 +317,21 @@ internal sealed class PackageCacheMetadataStore
 
         foreach ((string key, string dateText) in packageSection)
         {
-            DateTime downloadDate = DateTime.MinValue;
-            if (DateTime.TryParseExact(
-                dateText,
-                MetadataDateFormat,
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal
-                    | DateTimeStyles.AdjustToUniversal,
-                out DateTime parsedDate))
+            if (!DateTime.TryParseExact(
+                    dateText,
+                    MetadataDateFormat,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal
+                        | DateTimeStyles.AdjustToUniversal,
+                    out DateTime parsedDate))
             {
-                downloadDate = DateTime.SpecifyKind(
+                continue;
+            }
+
+            DateTime downloadDate =
+                DateTime.SpecifyKind(
                     parsedDate,
                     DateTimeKind.Utc);
-            }
 
             long? sizeBytes = null;
             if (sizesSection is not null

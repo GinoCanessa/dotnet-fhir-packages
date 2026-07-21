@@ -2,6 +2,11 @@
 
 using System.Diagnostics;
 using System.Text.Json;
+using FhirPkg.Cache;
+using FhirPkg.Cli.Commands;
+using FhirPkg.Installation;
+using FhirPkg.Models;
+using FhirPkg.Utilities;
 using Shouldly;
 using Xunit;
 
@@ -104,4 +109,509 @@ public class CliIntegrationTests : IntegrationTestBase
 
         exitCode.ShouldNotBe(0);
     }
+
+    [Fact]
+    public void CleanSelection_CiOnlyMatchesOnlyCurrentAliases()
+    {
+        DateTimeOffset now =
+            DateTimeOffset.Parse(
+                "2026-07-18T12:00:00Z",
+                System.Globalization.CultureInfo.InvariantCulture);
+        string[] versions =
+        [
+            "1.0.0",
+            "1.0.0-ballot",
+            "1.0.0-draft",
+            "1.0.0-snapshot",
+            "1.0.0-cibuild",
+            "dev",
+            "current",
+            "CURRENT",
+            "current$main",
+            "Current$Feature",
+        ];
+        PackageRecord[] packages = versions
+            .Select(version =>
+                CreateRecord(
+                    version,
+                    now.AddDays(-100)))
+            .ToArray();
+
+        IReadOnlyList<PackageRecord> selected =
+            CleanCommand.SelectPackagesForRemoval(
+                packages,
+                ciOnly: true,
+                olderThanDays: null,
+                now);
+
+        selected
+            .Select(package =>
+                package.Reference.Version)
+            .ShouldBe(
+            [
+                "current",
+                "CURRENT",
+                "current$main",
+                "Current$Feature",
+            ]);
+    }
+
+    [Fact]
+    public void CleanSelection_AgeIsStrictSafeAndPreservesUnknown()
+    {
+        DateTimeOffset now =
+            DateTimeOffset.Parse(
+                "2026-07-18T12:00:00Z",
+                System.Globalization.CultureInfo.InvariantCulture);
+        PackageRecord old =
+            CreateRecord(
+                "1.0.0",
+                now.AddDays(-30).AddTicks(-1));
+        PackageRecord exact =
+            CreateRecord(
+                "2.0.0",
+                now.AddDays(-30));
+        PackageRecord recent =
+            CreateRecord(
+                "3.0.0",
+                now.AddDays(-30).AddTicks(1));
+        PackageRecord unknown =
+            CreateRecord(
+                "4.0.0",
+                installedAt: null);
+
+        IReadOnlyList<PackageRecord> selected =
+            CleanCommand.SelectPackagesForRemoval(
+                [old, exact, recent, unknown],
+                ciOnly: false,
+                olderThanDays: 30,
+                now);
+        IReadOnlyList<PackageRecord> zeroDay =
+            CleanCommand.SelectPackagesForRemoval(
+                [
+                    CreateRecord(
+                        "5.0.0",
+                        now.AddTicks(-1)),
+                    CreateRecord(
+                        "6.0.0",
+                        now),
+                    unknown,
+                ],
+                ciOnly: false,
+                olderThanDays: 0,
+                now);
+        IReadOnlyList<PackageRecord> hugeAge =
+            CleanCommand.SelectPackagesForRemoval(
+                [old],
+                ciOnly: false,
+                olderThanDays: int.MaxValue,
+                now);
+
+        selected.ShouldBe([old]);
+        zeroDay.Select(package =>
+                package.Reference.Version)
+            .ShouldBe(["5.0.0"]);
+        hugeAge.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void CleanSelection_CombinesCiAndAgeWithLogicalAnd()
+    {
+        DateTimeOffset now =
+            DateTimeOffset.Parse(
+                "2026-07-18T12:00:00Z",
+                System.Globalization.CultureInfo.InvariantCulture);
+        PackageRecord oldCi =
+            CreateRecord(
+                "current",
+                now.AddDays(-31));
+        PackageRecord recentCi =
+            CreateRecord(
+                "current$main",
+                now.AddDays(-29));
+        PackageRecord oldStable =
+            CreateRecord(
+                "1.0.0",
+                now.AddDays(-31));
+
+        IReadOnlyList<PackageRecord> selected =
+            CleanCommand.SelectPackagesForRemoval(
+                [oldCi, recentCi, oldStable],
+                ciOnly: true,
+                olderThanDays: 30,
+                now);
+
+        selected.ShouldBe([oldCi]);
+        Should.Throw<ArgumentOutOfRangeException>(
+            () => CleanCommand.SelectPackagesForRemoval(
+                [oldCi],
+                ciOnly: false,
+                olderThanDays: -1,
+                now));
+    }
+
+    [Fact]
+    public async Task Clean_CiOnly_RemovesOnlyCurrentAliases()
+    {
+        DateTimeOffset installedAt =
+            DateTimeOffset.UtcNow.AddDays(-60);
+        string[] versions =
+        [
+            "1.0.0",
+            "1.0.0-ballot",
+            "1.0.0-draft",
+            "1.0.0-snapshot",
+            "1.0.0-cibuild",
+            "dev",
+            "current",
+            "current$main",
+        ];
+        foreach (string version in versions)
+        {
+            await SeedCachedPackageAsync(
+                "clean.matrix",
+                version,
+                installedAt);
+        }
+
+        (int exitCode, string _, string _) =
+            await RunCli(
+                "clean",
+                "--ci-only",
+                "--force");
+
+        exitCode.ShouldBe(0);
+        (await ListCachedVersionsAsync(
+                "clean.matrix"))
+            .ShouldBe(
+            [
+                "1.0.0",
+                "1.0.0-ballot",
+                "1.0.0-cibuild",
+                "1.0.0-draft",
+                "1.0.0-snapshot",
+                "dev",
+            ]);
+    }
+
+    [Fact]
+    public async Task Clean_OlderThan_UsesInstallAgeAndPreservesUnknown()
+    {
+        DateTimeOffset now =
+            DateTimeOffset.UtcNow;
+        await SeedCachedPackageAsync(
+            "clean.age",
+            "1.0.0",
+            now.AddDays(-40));
+        await SeedCachedPackageAsync(
+            "clean.age",
+            "2.0.0",
+            now);
+        await SeedCachedPackageAsync(
+            "clean.age",
+            "3.0.0",
+            installedAt: null);
+        await SeedCachedPackageAsync(
+            "clean.age",
+            "4.0.0",
+            now.AddDays(-100));
+        await CorruptInstallTimestampAsync(
+            "clean.age",
+            "4.0.0");
+
+        (int exitCode, string _, string _) =
+            await RunCli(
+                "clean",
+                "--older-than",
+                "30",
+                "--force");
+
+        exitCode.ShouldBe(0);
+        (await ListCachedVersionsAsync(
+                "clean.age"))
+            .ShouldBe(
+            [
+                "2.0.0",
+                "3.0.0",
+                "4.0.0",
+            ]);
+    }
+
+    [Fact]
+    public async Task Clean_CombinedFiltersUseLogicalAnd()
+    {
+        DateTimeOffset now =
+            DateTimeOffset.UtcNow;
+        await SeedCachedPackageAsync(
+            "clean.combined",
+            "current",
+            now.AddDays(-40));
+        await SeedCachedPackageAsync(
+            "clean.combined",
+            "current$main",
+            now);
+        await SeedCachedPackageAsync(
+            "clean.combined",
+            "1.0.0",
+            now.AddDays(-40));
+        await SeedCachedPackageAsync(
+            "clean.combined",
+            "current$unknown",
+            installedAt: null);
+
+        (int exitCode, string _, string _) =
+            await RunCli(
+                "clean",
+                "--ci-only",
+                "--older-than",
+                "30",
+                "--force");
+
+        exitCode.ShouldBe(0);
+        (await ListCachedVersionsAsync(
+                "clean.combined"))
+            .ShouldBe(
+            [
+                "1.0.0",
+                "current$main",
+                "current$unknown",
+            ]);
+    }
+
+    [Fact]
+    public async Task Clean_NegativeOlderThanIsRejectedWithoutRemoval()
+    {
+        await SeedCachedPackageAsync(
+            "clean.negative",
+            "1.0.0",
+            DateTimeOffset.UtcNow.AddDays(-100));
+
+        (int exitCode, string _, string stderr) =
+            await RunCli(
+                "clean",
+                "--older-than",
+                "-1",
+                "--force");
+
+        exitCode.ShouldNotBe(0);
+        stderr.ShouldContain(
+            "--older-than must be zero or greater");
+        (await ListCachedVersionsAsync(
+                "clean.negative"))
+            .ShouldBe(["1.0.0"]);
+    }
+
+    [Fact]
+    public async Task Clean_MalformedOlderThanIsParseErrorWithoutCrash()
+    {
+        await SeedCachedPackageAsync(
+            "clean.malformed",
+            "1.0.0",
+            DateTimeOffset.UtcNow.AddDays(-100));
+
+        (int exitCode, string _, string stderr) =
+            await RunCli(
+                "clean",
+                "--older-than",
+                "abc",
+                "--force");
+
+        exitCode.ShouldNotBe(0);
+        stderr.ShouldNotContain(
+            "Unhandled exception");
+        (await ListCachedVersionsAsync(
+                "clean.malformed"))
+            .ShouldBe(["1.0.0"]);
+    }
+
+    [Fact]
+    public async Task Clean_ConcurrentRefreshIsNotRemoved()
+    {
+        DateTimeOffset now =
+            DateTimeOffset.UtcNow;
+        await SeedCachedPackageAsync(
+            "clean.refresh",
+            "1.0.0",
+            now.AddDays(-100));
+        FhirPackageManagerOptions options = new()
+        {
+            CachePath = TempCacheDir,
+            IncludeCiBuilds = false,
+            IncludeHl7WebsiteFallback = false,
+            Registries = [],
+        };
+        using FhirPackageManager manager =
+            new(options);
+        PackageRecord selected =
+            CleanCommand.SelectPackagesForRemoval(
+                await manager.ListCachedAsync(
+                    cancellationToken:
+                        TestContext.Current.CancellationToken),
+                ciOnly: false,
+                olderThanDays: 30,
+                now)
+            .Single();
+        using (DiskPackageCache refreshingCache =
+               new(TempCacheDir))
+        {
+            CacheMetadataEntry current =
+                (await refreshingCache.GetMetadataAsync(
+                    TestContext.Current.CancellationToken))
+                .Packages[
+                    PackageCacheKey.Create(
+                            selected.Reference)
+                        .MetadataKey];
+            await refreshingCache.UpdateMetadataAsync(
+                selected.Reference,
+                current with
+                {
+                    DownloadDateTime =
+                        now.UtcDateTime,
+                },
+                TestContext.Current.CancellationToken);
+        }
+
+        bool removed =
+            await manager.RemoveIfUnchangedAsync(
+                selected,
+                TestContext.Current.CancellationToken);
+
+        removed.ShouldBeFalse();
+        (await ListCachedVersionsAsync(
+                "clean.refresh"))
+            .ShouldBe(["1.0.0"]);
+    }
+
+    private async Task SeedCachedPackageAsync(
+        string packageName,
+        string version,
+        DateTimeOffset? installedAt)
+    {
+        PackageReference reference = new(
+            packageName,
+            version);
+        PackageCacheKey cacheKey =
+            PackageCacheKey.Create(reference);
+        string contentPath = Path.Combine(
+            cacheKey.GetPackageDirectoryPath(
+                TempCacheDir),
+            "package");
+        Directory.CreateDirectory(contentPath);
+        VersionType versionType =
+            PackageDirective.ClassifyVersion(version);
+        string manifestVersion = versionType
+            is VersionType.CiBuild
+                or VersionType.CiBuildBranch
+                or VersionType.LocalBuild
+            ? "1.0.0"
+            : version;
+        await File.WriteAllTextAsync(
+            Path.Combine(
+                contentPath,
+                "package.json"),
+            JsonSerializer.Serialize(
+                new
+                {
+                    name = packageName,
+                    version = manifestVersion,
+                }),
+            TestContext.Current.CancellationToken);
+        if (installedAt is null)
+            return;
+
+        using DiskPackageCache cache =
+            new(TempCacheDir);
+        await cache.UpdateMetadataAsync(
+            reference,
+            new CacheMetadataEntry
+            {
+                DownloadDateTime =
+                    installedAt.Value.UtcDateTime,
+            },
+            TestContext.Current.CancellationToken);
+    }
+
+    private async Task<IReadOnlyList<string>>
+        ListCachedVersionsAsync(
+            string packageName)
+    {
+        using DiskPackageCache cache =
+            new(TempCacheDir);
+        IReadOnlyList<PackageRecord> packages =
+            await cache.ListPackagesAsync(
+                packageName,
+                ct:
+                    TestContext.Current.CancellationToken);
+        return packages
+            .Where(package =>
+                package.Reference.Name.Equals(
+                    packageName,
+                    StringComparison.OrdinalIgnoreCase))
+            .Select(package =>
+                package.Reference.Version!)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private async Task CorruptInstallTimestampAsync(
+        string packageName,
+        string version)
+    {
+        string metadataPath =
+            Path.Combine(
+                TempCacheDir,
+                "packages.ini");
+        IReadOnlyDictionary<
+            string,
+            IReadOnlyDictionary<string, string>> parsed =
+            await IniParser.ParseFileAsync(
+                metadataPath,
+                TestContext.Current.CancellationToken);
+        Dictionary<
+            string,
+            IReadOnlyDictionary<string, string>> rewritten =
+            parsed.ToDictionary(
+                section => section.Key,
+                section =>
+                    (IReadOnlyDictionary<string, string>)
+                    new Dictionary<string, string>(
+                        section.Value,
+                        StringComparer.OrdinalIgnoreCase),
+                StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> packageDates =
+            new(
+                rewritten["packages"],
+                StringComparer.OrdinalIgnoreCase)
+            {
+                [PackageCacheKey.Create(
+                        new PackageReference(
+                            packageName,
+                            version))
+                    .MetadataKey] = "not-a-date",
+            };
+        rewritten["packages"] =
+            packageDates;
+        await IniParser.WriteFileAsync(
+            metadataPath,
+            rewritten,
+            TestContext.Current.CancellationToken);
+    }
+
+    private static PackageRecord CreateRecord(
+        string version,
+        DateTimeOffset? installedAt) =>
+        new()
+        {
+            Reference = new PackageReference(
+                "clean.selection",
+                version),
+            DirectoryPath = "cache",
+            ContentPath = "cache/package",
+            Manifest = new PackageManifest
+            {
+                Name = "clean.selection",
+                Version = version,
+            },
+            InstalledAt = installedAt,
+        };
 }

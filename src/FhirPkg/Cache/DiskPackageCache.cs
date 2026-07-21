@@ -17,6 +17,7 @@ public class DiskPackageCache :
     IPackageCache,
     IHardenedPackageCache,
     IHardenedPackageCacheCore,
+    IPackageCacheConditionalRemoval,
     IPackageCacheIndexStore,
     IPackageCacheResourceStore,
     IPackageCacheMutationPublisher,
@@ -848,6 +849,64 @@ public class DiskPackageCache :
         await using PackageCacheLease identityLease =
             await AcquireIdentityAndRecoverAsync(cacheKey, ct)
                 .ConfigureAwait(false);
+        return await RemoveUnderIdentityLeaseAsync(
+                cacheKey,
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    async Task<bool>
+        IPackageCacheConditionalRemoval.RemoveIfUnchangedAsync(
+            PackageRecord expected,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        PackageCacheKey cacheKey =
+            PackageCacheKey.Create(expected.Reference);
+        await using PackageCacheLease identityLease =
+            await AcquireIdentityAndRecoverAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        PackageCacheInspection inspection =
+            await _validator.InspectAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        if (inspection.State
+            != PackageCacheInspectionState.Valid)
+        {
+            return false;
+        }
+
+        CacheMetadataEntry? entry =
+            await _metadataStore.GetEntryAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        PackageRecord current = CreateRecord(
+            cacheKey.CanonicalReference,
+            inspection,
+            entry,
+            index: null);
+        if (!string.Equals(
+                current.ContentGeneration,
+                expected.ContentGeneration,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return await RemoveUnderIdentityLeaseAsync(
+                cacheKey,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<bool> RemoveUnderIdentityLeaseAsync(
+        PackageCacheKey cacheKey,
+        CancellationToken ct)
+    {
         await using PackageCacheLease globalLease =
             await _coordinator.AcquireGlobalAsync(ct)
                 .ConfigureAwait(false);

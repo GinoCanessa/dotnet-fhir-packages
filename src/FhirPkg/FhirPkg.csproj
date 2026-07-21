@@ -42,7 +42,9 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="FhirPkg.Tests" />
+    <InternalsVisibleTo Include="FhirPkg.IntegrationTests" />
     <InternalsVisibleTo Include="FhirPkg.ProcessTestHost" />
+    <InternalsVisibleTo Include="FhirPkg.Cli" />
   </ItemGroup>
 
 </Project>

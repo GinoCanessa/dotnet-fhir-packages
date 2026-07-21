@@ -337,8 +337,8 @@ fhir-pkg clean [options]
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--force` | `-f` | `bool` | `false` | Skip the confirmation prompt. |
-| `--ci-only` | — | `bool` | `false` | Only remove CI build (pre-release snapshot) packages. |
-| `--older-than <days>` | — | `int` | — | Only remove packages not accessed in the last N days. |
+| `--ci-only` | — | `bool` | `false` | Only remove the `current` and `current$branch` CI aliases. |
+| `--older-than <days>` | — | non-negative `int` | — | Only remove packages installed more than N days ago. |
 
 #### Examples
 
@@ -349,12 +349,19 @@ fhir-pkg clean
 # Clean without prompting
 fhir-pkg clean --force
 
-# Remove only CI build packages
+# Remove current and current$branch aliases
 fhir-pkg clean --ci-only --force
 
-# Remove packages not used in the last 30 days
+# Remove packages installed more than 30 days ago
 fhir-pkg clean --older-than 30 --force
 ```
+
+Age is based on the cache installation/download timestamp, not file access
+time. Packages without a recorded timestamp are never selected by
+`--older-than`. When filters are combined, all filters must match; a package
+installed exactly at the cutoff is retained. Malformed timestamps are treated
+as unknown, and each selected package is removed only if its cache generation
+is unchanged since selection.
 
 ---
 

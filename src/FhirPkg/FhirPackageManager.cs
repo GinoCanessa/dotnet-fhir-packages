@@ -891,6 +891,57 @@ public sealed class FhirPackageManager :
         return removed;
     }
 
+    internal async Task<bool> RemoveIfUnchangedAsync(
+        PackageRecord expected,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        bool removed;
+        if (_cache
+            is IPackageCacheConditionalRemoval
+                conditionalRemoval)
+        {
+            removed =
+                await conditionalRemoval.RemoveIfUnchangedAsync(
+                        expected,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+        }
+        else
+        {
+            PackageRecord? current =
+                await _cache.GetPackageAsync(
+                        expected.Reference,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (current is null
+                || current.InstalledAt
+                    != expected.InstalledAt)
+            {
+                return false;
+            }
+
+            removed =
+                await _cache.RemoveAsync(
+                        expected.Reference,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+        }
+
+        if (removed)
+        {
+            InvalidatePackageResources(
+                expected.Reference);
+            _logger.LogInformation(
+                "Successfully removed unchanged package {Directive}.",
+                expected.Reference.FhirDirective);
+        }
+
+        return removed;
+    }
+
     /// <inheritdoc />
     public async Task<int> CleanCacheAsync(CancellationToken cancellationToken = default)
     {

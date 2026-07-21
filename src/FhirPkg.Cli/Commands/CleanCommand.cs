@@ -25,13 +25,28 @@ internal static class CleanCommand
 
         Option<bool> ciOnlyOption = new Option<bool>("--ci-only")
         {
-            Description = "Only remove CI build (pre-release snapshot) packages."
+            Description = "Only remove current and current$branch CI alias packages."
         };
 
         Option<int?> olderThanOption = new Option<int?>("--older-than")
         {
-            Description = "Remove packages not accessed in the last N days."
+            Description = "Only remove packages installed more than N days ago."
         };
+        olderThanOption.Validators.Add(result =>
+        {
+            string? value =
+                result.Tokens.LastOrDefault()?.Value;
+            if (int.TryParse(
+                    value,
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out int olderThan)
+                && olderThan < 0)
+            {
+                result.AddError(
+                    "--older-than must be zero or greater.");
+            }
+        });
 
         Command command = new Command("clean", "Clear the local FHIR package cache.")
         {
@@ -39,7 +54,6 @@ internal static class CleanCommand
             ciOnlyOption,
             olderThanOption
         };
-
         command.SetAction(async (parseResult, ct) =>
         {
             bool force = parseResult.GetValue(forceOption);
@@ -51,7 +65,8 @@ internal static class CleanCommand
             try
             {
                 FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
-                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
+                using FhirPackageManager manager =
+                    ManagerFactory.Create(mgrOptions);
 
                 // Build a description of what will be cleaned
                 string description = (ciOnly, olderThan) switch
@@ -75,34 +90,26 @@ internal static class CleanCommand
 
                 if (ciOnly || olderThan is not null)
                 {
-                    // Filter-based removal: list first, then remove matching packages
-                    IReadOnlyList<PackageRecord> allPackages = await manager.ListCachedAsync(cancellationToken: ct);
-
-                    IEnumerable<PackageRecord> candidates = allPackages.AsEnumerable();
-
-                    if (ciOnly)
-                    {
-                        candidates = candidates.Where(p =>
-                            p.Reference.Version?.Contains("-") == true ||
-                            p.Reference.Version == "current" ||
-                            p.Reference.Version == "dev");
-                    }
-
-                    if (olderThan is int days)
-                    {
-                        DateTimeOffset cutoff = DateTimeOffset.UtcNow.AddDays(-days);
-                        candidates = candidates.Where(p =>
-                            p.InstalledAt is null || p.InstalledAt < cutoff);
-                    }
-
-                    List<PackageRecord> toRemove = candidates.ToList();
+                    IReadOnlyList<PackageRecord> allPackages =
+                        await manager.ListCachedAsync(
+                                cancellationToken: ct)
+                            .ConfigureAwait(false);
+                    IReadOnlyList<PackageRecord> toRemove =
+                        SelectPackagesForRemoval(
+                            allPackages,
+                            ciOnly,
+                            olderThan,
+                            DateTimeOffset.UtcNow);
                     removed = 0;
 
                     foreach (PackageRecord pkg in toRemove)
                     {
                         ct.ThrowIfCancellationRequested();
 
-                        if (await manager.RemoveAsync(pkg.Reference.FhirDirective, ct))
+                        if (await manager.RemoveIfUnchangedAsync(
+                                pkg,
+                                ct)
+                            .ConfigureAwait(false))
                         {
                             removed++;
                         }
@@ -145,4 +152,73 @@ internal static class CleanCommand
         return command;
     }
 
+    internal static IReadOnlyList<PackageRecord>
+        SelectPackagesForRemoval(
+            IEnumerable<PackageRecord> packages,
+            bool ciOnly,
+            int? olderThanDays,
+            DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(packages);
+        DateTimeOffset? cutoff =
+            CalculateInstallationCutoff(
+                olderThanDays,
+                now);
+        IEnumerable<PackageRecord> candidates =
+            packages;
+        if (ciOnly)
+        {
+            candidates = candidates.Where(
+                package =>
+                {
+                    VersionType versionType =
+                        PackageDirective.ClassifyVersion(
+                            package.Reference.Version);
+                    return versionType
+                        is VersionType.CiBuild
+                            or VersionType.CiBuildBranch;
+                });
+        }
+
+        if (cutoff is DateTimeOffset ageCutoff)
+        {
+            candidates = candidates.Where(
+                package =>
+                    package.InstalledAt
+                        is DateTimeOffset installedAt
+                    && installedAt < ageCutoff);
+        }
+
+        return candidates.ToList();
+    }
+
+    private static DateTimeOffset?
+        CalculateInstallationCutoff(
+            int? olderThanDays,
+            DateTimeOffset now)
+    {
+        if (olderThanDays is null)
+            return null;
+
+        if (olderThanDays.Value < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(olderThanDays),
+                olderThanDays,
+                "Age must be zero or greater.");
+        }
+
+        long availableWholeDays =
+            (now.UtcDateTime.Ticks
+             - DateTimeOffset.MinValue.UtcDateTime.Ticks)
+            / TimeSpan.TicksPerDay;
+        if (olderThanDays.Value
+            > availableWholeDays)
+        {
+            return DateTimeOffset.MinValue;
+        }
+
+        return now.AddDays(
+            -olderThanDays.Value);
+    }
 }
