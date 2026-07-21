@@ -64,7 +64,9 @@ public interface IPackageCache : IDisposable
     /// <remarks>
     /// The default implementation preserves compatibility by cloning records
     /// returned from <see cref="ListPackagesAsync"/> without their indexes.
-    /// Implementations should override this method to avoid hydrating indexes.
+    /// It may therefore hydrate internally unless an implementation overrides
+    /// this method. Call <see cref="ListPackagesAsync"/> when resource indexes
+    /// are required.
     /// </remarks>
     async Task<IReadOnlyList<PackageRecord>> ListPackageSummariesAsync(
         string? packageIdFilter = null,

@@ -80,6 +80,10 @@ public interface IFhirPackageManager
         string? filter = null,
         CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<PackageRecord>> ListCachedSummariesAsync(
+        string? filter = null,
+        CancellationToken cancellationToken = default);
+
     Task<bool> RemoveAsync(
         string directive,
         CancellationToken cancellationToken = default);
@@ -177,6 +181,22 @@ against package ID prefixes.
 var all = await manager.ListCachedAsync();
 var r4Only = await manager.ListCachedAsync("hl7.fhir.r4");
 ```
+
+#### `ListCachedSummariesAsync`
+
+Lists package-level cache metadata without requiring resource indexes.
+Every returned `PackageRecord` has `Index == null`; use `ListCachedAsync`
+when the caller needs to consume `PackageRecord.Index`.
+
+```csharp
+IReadOnlyList<PackageRecord> summaries =
+    await manager.ListCachedSummariesAsync("hl7.fhir");
+```
+
+The default interface implementation clones records from `ListCachedAsync`,
+which keeps third-party implementations source-compatible but may still
+hydrate indexes internally. Implementations should override the summary
+operation to provide lightweight enumeration.
 
 #### `RemoveAsync`
 
@@ -529,11 +549,15 @@ public record PackageRecord
     public required string DirectoryPath { get; init; }    // full path to package root
     public required string ContentPath { get; init; }      // path to package/ subfolder
     public required PackageManifest Manifest { get; init; }
-    public PackageIndex? Index { get; init; }
+    public PackageIndex? Index { get; init; }               // null when omitted by summary listing
     public DateTimeOffset? InstalledAt { get; init; }
     public long? SizeBytes { get; init; }
 }
 ```
+
+`Index == null` can mean that no valid persisted index exists or that a
+summary API intentionally omitted it. Use the hydrated listing APIs when the
+distinction matters.
 
 ### PackageManifest
 
@@ -1097,6 +1121,8 @@ public interface IPackageCache
     Task<PackageRecord?> GetPackageAsync(PackageReference reference, CancellationToken ct = default);
     Task<IReadOnlyList<PackageRecord>> ListPackagesAsync(
         string? packageIdFilter = null, string? versionFilter = null, CancellationToken ct = default);
+    Task<IReadOnlyList<PackageRecord>> ListPackageSummariesAsync(
+        string? packageIdFilter = null, string? versionFilter = null, CancellationToken ct = default);
     Task<PackageRecord> InstallAsync(
         PackageReference reference, Stream tarballStream,
         InstallCacheOptions? options = null, CancellationToken ct = default);
@@ -1112,6 +1138,20 @@ public interface IPackageCache
         PackageReference reference, CacheMetadataEntry entry, CancellationToken ct = default);
 }
 ```
+
+`ListPackageSummariesAsync` returns the same package-level record shape with
+`Index == null`. Use it for inventory or display work:
+
+```csharp
+IReadOnlyList<PackageRecord> summaries =
+    await cache.ListPackageSummariesAsync("hl7.fhir.r4");
+```
+
+Use `ListPackagesAsync` when resource indexes are required. The default
+interface fallback clones hydrated records for compatibility and can therefore
+remain expensive until a cache implementation overrides the summary method.
+`DiskPackageCache` provides an optimized override that reads manifests and
+cache metadata without loading or validating `.index.json`.
 
 `CacheMetadataEntry.ContentGeneration` exposes the opaque identifier of the
 currently committed content generation. The cache owns this value:
@@ -1196,6 +1236,9 @@ Key behaviors:
 - **Process coordination** — keyed in-process semaphores and persistent OS lock
   files under `.fhirpkg/locks`; unrelated identities stage concurrently and a
   short global lock serializes promotion and metadata.
+- **Summary enumeration** — `ListPackageSummariesAsync` returns
+  package-level metadata with `Index == null` without loading or validating
+  persisted resource indexes.
 - **Hidden state** — `.fhirpkg/staging`, `.fhirpkg/transactions`,
   `.fhirpkg/backup`, `.fhirpkg/quarantine`, and `.fhirpkg/locks` are SDK-owned.
 - **Raw path caveat** — SDK reads wait through replacement. A caller retaining

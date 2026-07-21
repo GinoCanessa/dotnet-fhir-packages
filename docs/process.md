@@ -330,6 +330,28 @@ then processes that snapshot in canonical identity order. An install that begins
 outside the snapshot may complete after clear; a represented package cannot be
 missed or resurrected by clear.
 
+### Disk Enumeration Modes
+
+Disk cache enumeration uses three explicit modes:
+
+- **Hydrated** — `ListPackagesAsync` loads and validates persisted resource
+  indexes. It rereads cache metadata after acquiring each identity lease so the
+  manifest and opaque cache-owned content-generation token describe the same
+  committed generation.
+- **Summary** — `ListPackageSummariesAsync` returns records with
+  `Index == null`. It snapshots canonical keys and cache metadata once under
+  the global lock, then validates manifests under identity leases. The
+  package-level metadata is weakly consistent when a package is concurrently
+  replaced.
+- **Indexing** — internal indexing enumeration also returns `Index == null`,
+  but rereads metadata after identity acquisition so indexing decisions use
+  the content-generation token for the validated package generation.
+
+Filtered cleanup may select candidates from a summary snapshot. Conditional
+removal compares each candidate's token with current metadata under the
+identity lease and refuses removal when a concurrent refresh made the summary
+stale.
+
 ## 7 — Dependency Installation
 
 When `InstallOptions.IncludeDependencies` is true, the SDK first commits the

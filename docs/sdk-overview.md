@@ -57,9 +57,10 @@ var results = await manager.InstallManyAsync(
 foreach (var r in results)
     Console.WriteLine($"{r.Directive}: {r.Status}");
 
-// List cached packages
-var cached = await manager.ListCachedAsync();
-foreach (var pkg in cached)
+// List cached package summaries
+IReadOnlyList<PackageRecord> cached =
+    await manager.ListCachedSummariesAsync();
+foreach (PackageRecord pkg in cached)
     Console.WriteLine($"{pkg.Reference.FhirDirective} ({pkg.SizeBytes} bytes)");
 
 // Search registries
@@ -78,6 +79,9 @@ JsonNode? resource = profile is null
     ? null
     : await manager.ReadResourceAsync(profile);
 ```
+
+Use `ListCachedAsync` instead when the caller needs populated
+`PackageRecord.Index` values.
 
 When dependency installation is requested, a failed child makes the aggregate
 root operation fail. `PackageInstallResult.Package` retains the committed root

@@ -76,7 +76,9 @@ public interface IFhirPackageManager
     /// <remarks>
     /// The default implementation preserves compatibility by cloning records
     /// returned from <see cref="ListCachedAsync"/> without their indexes.
-    /// Implementations should override this method to avoid hydrating indexes.
+    /// It may therefore hydrate internally unless an implementation overrides
+    /// this method. Call <see cref="ListCachedAsync"/> when resource indexes
+    /// are required.
     /// </remarks>
     async Task<IReadOnlyList<PackageRecord>> ListCachedSummariesAsync(
         string? filter = null,

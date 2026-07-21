@@ -22,7 +22,10 @@ public record PackageRecord
     /// <summary>The deserialized package.json manifest.</summary>
     public required PackageManifest Manifest { get; init; }
 
-    /// <summary>The resource index, if available.</summary>
+    /// <summary>
+    /// The resource index, if loaded. Summary listing operations deliberately
+    /// leave this value <c>null</c> even when a persisted index exists.
+    /// </summary>
     public PackageIndex? Index { get; init; }
 
     /// <summary>When the package was installed into the cache.</summary>

@@ -233,6 +233,9 @@ Resolved 12 packages:
 
 List FHIR packages in the local cache.
 
+The command reads package manifests and cache metadata, but does not hydrate
+or validate persisted resource indexes (`.index.json`).
+
 ```
 fhir-pkg list [filter] [options]
 ```

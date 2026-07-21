@@ -707,6 +707,10 @@ public sealed class FhirPackageManager :
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Delegates to the cache summary operation so resource indexes are not
+    /// hydrated by cache implementations that provide an optimized override.
+    /// </remarks>
     public async Task<IReadOnlyList<PackageRecord>>
         ListCachedSummariesAsync(
             string? filter = null,
