@@ -83,7 +83,9 @@ internal static class InfoCommand
                 IReadOnlyList<PackageRecord>? cached = null;
                 if (showVersions)
                 {
-                    cached = await manager.ListCachedAsync(packageId, ct);
+                    cached = await manager.ListCachedSummariesAsync(
+                        packageId,
+                        ct);
                 }
 
                 if (globalOpts.Json)

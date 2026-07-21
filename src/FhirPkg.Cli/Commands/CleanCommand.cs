@@ -91,7 +91,7 @@ internal static class CleanCommand
                 if (ciOnly || olderThan is not null)
                 {
                     IReadOnlyList<PackageRecord> allPackages =
-                        await manager.ListCachedAsync(
+                        await manager.ListCachedSummariesAsync(
                                 cancellationToken: ct)
                             .ConfigureAwait(false);
                     IReadOnlyList<PackageRecord> toRemove =

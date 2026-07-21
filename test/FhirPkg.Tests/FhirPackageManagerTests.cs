@@ -208,6 +208,55 @@ public class FhirPackageManagerTests
 
         result.Count.ShouldBe(1);
         result[0].Reference.Name.ShouldBe("hl7.fhir.r4.core");
+        _cacheMock.Verify(cache => cache.ListPackagesAsync(
+            "hl7",
+            null,
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ListCachedSummariesAsync_DelegatesToCacheSummaryPath()
+    {
+        ReadOnlyCollection<PackageRecord> expectedRecords =
+            new List<PackageRecord>
+            {
+                new()
+                {
+                    Reference = new PackageReference(
+                        "hl7.fhir.r4.core",
+                        "4.0.1"),
+                    DirectoryPath =
+                        "/cache/hl7.fhir.r4.core#4.0.1",
+                    ContentPath =
+                        "/cache/hl7.fhir.r4.core#4.0.1/package",
+                    Manifest = new PackageManifest
+                    {
+                        Name = "hl7.fhir.r4.core",
+                        Version = "4.0.1"
+                    }
+                }
+            }.AsReadOnly();
+        _cacheMock.Setup(cache => cache.ListPackageSummariesAsync(
+                "hl7",
+                null,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(expectedRecords);
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageRecord> result =
+            await manager.ListCachedSummariesAsync(
+                "hl7",
+                TestContext.Current.CancellationToken);
+
+        result.ShouldBeSameAs(expectedRecords);
+        _cacheMock.Verify(cache => cache.ListPackageSummariesAsync(
+            "hl7",
+            null,
+            It.IsAny<CancellationToken>()), Times.Once);
+        _cacheMock.Verify(cache => cache.ListPackagesAsync(
+            It.IsAny<string?>(),
+            It.IsAny<string?>(),
+            It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]

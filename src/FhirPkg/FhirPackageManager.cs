@@ -707,6 +707,23 @@ public sealed class FhirPackageManager :
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<PackageRecord>>
+        ListCachedSummariesAsync(
+            string? filter = null,
+            CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        _logger.LogDebug(
+            "ListCachedSummariesAsync with filter '{Filter}'.",
+            filter ?? "(none)");
+        return await _cache.ListPackageSummariesAsync(
+                filter,
+                ct: cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<PackageIndex?> IndexPackageAsync(
         PackageReference reference,
         IndexingOptions? options = null,

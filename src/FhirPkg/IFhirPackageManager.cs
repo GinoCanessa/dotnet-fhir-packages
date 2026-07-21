@@ -63,6 +63,35 @@ public interface IFhirPackageManager
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Lists package summaries currently in the local cache, optionally
+    /// filtered by package ID prefix. Summary records deliberately omit
+    /// resource indexes.
+    /// </summary>
+    /// <param name="filter">Optional filter; only packages whose ID starts with this value are returned.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>
+    /// A read-only list of cached package records whose
+    /// <see cref="PackageRecord.Index"/> values are <c>null</c>.
+    /// </returns>
+    /// <remarks>
+    /// The default implementation preserves compatibility by cloning records
+    /// returned from <see cref="ListCachedAsync"/> without their indexes.
+    /// Implementations should override this method to avoid hydrating indexes.
+    /// </remarks>
+    async Task<IReadOnlyList<PackageRecord>> ListCachedSummariesAsync(
+        string? filter = null,
+        CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<PackageRecord> records = await ListCachedAsync(
+                filter,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return records
+            .Select(record => record with { Index = null })
+            .ToArray();
+    }
+
+    /// <summary>
     /// Removes a package from the local cache.
     /// </summary>
     /// <param name="directive">Package directive identifying the cached package to remove.</param>

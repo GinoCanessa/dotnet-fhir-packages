@@ -366,6 +366,46 @@ public sealed class FhirPackageManagerSourceTests
     }
 
     [Fact]
+    public async Task DefaultManagerSummaryListing_StripsIndexAndPreservesLegacyRecord()
+    {
+        PackageIndex index = new()
+        {
+            IndexVersion = 2,
+            Files = []
+        };
+        PackageRecord source = new()
+        {
+            Reference = new PackageReference(
+                "legacy.manager",
+                "1.0.0"),
+            DirectoryPath = "cache",
+            ContentPath = "cache/package",
+            Manifest = new PackageManifest
+            {
+                Name = "legacy.manager",
+                Version = "1.0.0"
+            },
+            Index = index,
+            ContentGeneration = "generation-a"
+        };
+        IFhirPackageManager manager = new LegacyManager
+        {
+            ListedRecords = [source]
+        };
+
+        IReadOnlyList<PackageRecord> summaries =
+            await manager.ListCachedSummariesAsync(
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+        PackageRecord summary = summaries.ShouldHaveSingleItem();
+
+        ReferenceEquals(source, summary).ShouldBeFalse();
+        summary.Index.ShouldBeNull();
+        summary.ContentGeneration.ShouldBe(source.ContentGeneration);
+        source.Index.ShouldBeSameAs(index);
+    }
+
+    [Fact]
     public async Task UriTimeout_CoversBodyCopyAndIsTyped()
     {
         using TestDirectory directory = new();
@@ -1084,6 +1124,8 @@ public sealed class FhirPackageManagerSourceTests
 
     private sealed class LegacyManager : IFhirPackageManager
     {
+        internal IReadOnlyList<PackageRecord> ListedRecords { get; init; } = [];
+
         public Task<PackageRecord?> InstallAsync(
             string directive,
             InstallOptions? options = null,
@@ -1105,7 +1147,7 @@ public sealed class FhirPackageManagerSourceTests
         public Task<IReadOnlyList<PackageRecord>> ListCachedAsync(
             string? filter = null,
             CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
+            Task.FromResult(ListedRecords);
 
         public Task<bool> RemoveAsync(
             string directive,

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using FhirPkg.Cache;
 using FhirPkg.Cli.Commands;
+using FhirPkg.Indexing;
 using FhirPkg.Installation;
 using FhirPkg.Models;
 using FhirPkg.Utilities;
@@ -83,6 +84,53 @@ public class CliIntegrationTests : IntegrationTestBase
         // The JSON output should be parseable
         Func<JsonDocument> act = () => JsonDocument.Parse(stdout);
         Should.NotThrow(act, "list --json should produce valid JSON");
+    }
+
+    [Fact]
+    public async Task List_PopulatedCache_PreservesSummaryOutput()
+    {
+        DateTimeOffset installedAt =
+            DateTimeOffset.Parse(
+                "2026-07-21T15:30:00Z",
+                System.Globalization.CultureInfo.InvariantCulture);
+        await SeedCachedPackageAsync(
+            "list.populated",
+            "1.2.3",
+            installedAt,
+            fhirVersion: "4.0.1",
+            sizeBytes: 2048,
+            persistIndex: true);
+
+        (int consoleExitCode, string consoleOutput, string _) =
+            await RunCli("list", "--show-size");
+        (int jsonExitCode, string jsonOutput, string _) =
+            await RunCli("list", "--json", "--show-size");
+
+        consoleExitCode.ShouldBe(0);
+        consoleOutput.ShouldContain("list.populated");
+        consoleOutput.ShouldContain("1.2.3");
+        consoleOutput.ShouldContain("4.0.1");
+        consoleOutput.ShouldContain("2026-07-21 15:30");
+        consoleOutput.ShouldContain("2.0 KB");
+        jsonExitCode.ShouldBe(0);
+
+        using JsonDocument document =
+            JsonDocument.Parse(jsonOutput);
+        JsonElement root = document.RootElement;
+        root.GetProperty("count").GetInt32().ShouldBe(1);
+        JsonElement package = root
+            .GetProperty("packages")
+            .EnumerateArray()
+            .ShouldHaveSingleItem();
+        package.GetProperty("name").GetString()
+            .ShouldBe("list.populated");
+        package.GetProperty("version").GetString()
+            .ShouldBe("1.2.3");
+        package.GetProperty("fhirVersion").GetString()
+            .ShouldBe("4.0.1");
+        package.GetProperty("installedAt").GetDateTimeOffset()
+            .ShouldBe(installedAt);
+        package.GetProperty("size").GetInt64().ShouldBe(2048);
     }
 
     [Fact]
@@ -444,7 +492,7 @@ public class CliIntegrationTests : IntegrationTestBase
             new(options);
         PackageRecord selected =
             CleanCommand.SelectPackagesForRemoval(
-                await manager.ListCachedAsync(
+                await manager.ListCachedSummariesAsync(
                     cancellationToken:
                         TestContext.Current.CancellationToken),
                 ciOnly: false,
@@ -485,7 +533,10 @@ public class CliIntegrationTests : IntegrationTestBase
     private async Task SeedCachedPackageAsync(
         string packageName,
         string version,
-        DateTimeOffset? installedAt)
+        DateTimeOffset? installedAt,
+        string? fhirVersion = null,
+        long? sizeBytes = null,
+        bool persistIndex = false)
     {
         PackageReference reference = new(
             packageName,
@@ -514,8 +565,36 @@ public class CliIntegrationTests : IntegrationTestBase
                 {
                     name = packageName,
                     version = manifestVersion,
+                    fhirVersions = fhirVersion is null
+                        ? null
+                        : new[] { fhirVersion },
                 }),
             TestContext.Current.CancellationToken);
+        if (persistIndex)
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(contentPath, "patient.json"),
+                """{"resourceType":"Patient","id":"listed"}""",
+                TestContext.Current.CancellationToken);
+            PackageIndex index = new()
+            {
+                IndexVersion = 2,
+                Files =
+                [
+                    new ResourceIndexEntry
+                    {
+                        Filename = "patient.json",
+                        ResourceType = "Patient",
+                        Id = "listed"
+                    }
+                ]
+            };
+            await File.WriteAllTextAsync(
+                Path.Combine(contentPath, ".index.json"),
+                JsonSerializer.Serialize(index),
+                TestContext.Current.CancellationToken);
+        }
+
         if (installedAt is null)
             return;
 
@@ -527,6 +606,7 @@ public class CliIntegrationTests : IntegrationTestBase
             {
                 DownloadDateTime =
                     installedAt.Value.UtcDateTime,
+                SizeBytes = sizeBytes,
             },
             TestContext.Current.CancellationToken);
     }
