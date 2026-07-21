@@ -724,6 +724,69 @@ public sealed class PackageCacheTransactionTests : IDisposable
         replacements.ShouldBeGreaterThanOrEqualTo(6);
     }
 
+    [Fact]
+    public async Task JournalRead_WindowsSharingViolationIsRetried()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        PackageCacheKey cacheKey = PackageCacheKey.Create(s_reference);
+        string operationId = Guid.NewGuid().ToString("N");
+        PackageCacheJournalStore store = new(
+            _cacheRoot,
+            SystemPackageCacheFileOperations.Instance,
+            NullPackageCacheFaultObserver.Instance);
+        PackageCacheTransactionJournal journal = new()
+        {
+            OperationId = operationId,
+            Operation = PackageCacheTransactionOperation.Install,
+            State = PackageCacheTransactionState.Prepared,
+            CanonicalIdentity = cacheKey.CanonicalIdentity,
+            PackageName = s_reference.Name,
+            PackageVersion = s_reference.Version!,
+            PackageScope = s_reference.Scope,
+            TargetRelativePath =
+                cacheKey.RelativePath.Replace('\\', '/'),
+            StagingRelativePath =
+                $".fhirpkg/staging/{operationId}/expanded",
+            ArtifactRelativePath = null,
+            OriginalState = PackageCacheInspectionState.Missing,
+            OriginalArtifactKind = PackageCacheArtifactKind.Missing,
+            IntendedMetadata = new CacheMetadataEntry
+            {
+                DownloadDateTime = DateTime.UtcNow,
+                ContentGeneration = operationId
+            },
+            CreatedAtUtc = DateTimeOffset.UtcNow
+        };
+        await store.WriteAsync(
+            journal,
+            TestContext.Current.CancellationToken);
+        string journalPath = store.GetJournalPath(cacheKey);
+        Task<PackageCacheTransactionJournal?> readTask;
+        using (FileStream blocker = new(
+            journalPath,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None))
+        {
+            readTask = store.ReadAsync(
+                cacheKey,
+                TestContext.Current.CancellationToken);
+            await Task.Delay(
+                TimeSpan.FromMilliseconds(75),
+                TestContext.Current.CancellationToken);
+            readTask.IsCompleted.ShouldBeFalse();
+        }
+
+        PackageCacheTransactionJournal? result =
+            await readTask.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
+        result.ShouldNotBeNull();
+        result!.OperationId.ShouldBe(operationId);
+    }
+
     [Theory]
     [InlineData("AtomicReplaceFile", "old")]
     [InlineData("SynchronizeDirectory", "new")]
