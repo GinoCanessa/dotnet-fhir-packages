@@ -26,6 +26,13 @@ public class DiskPackageCache :
     private const string PackageSubdirectory = "package";
     private const string IndexFileName = ".index.json";
 
+    private enum PackageListMode
+    {
+        Hydrated,
+        Summary,
+        Indexing
+    }
+
     private static readonly JsonSerializerOptions s_jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -210,7 +217,24 @@ public class DiskPackageCache :
         await ListPackagesAsync(
                 packageIdFilter,
                 versionFilter,
-                includeIndexes: true,
+                PackageListMode.Hydrated,
+                ct)
+            .ConfigureAwait(false);
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Summary metadata is weakly consistent: keys and metadata are captured
+    /// together before manifests are validated under their identity leases.
+    /// </remarks>
+    public async Task<IReadOnlyList<PackageRecord>>
+        ListPackageSummariesAsync(
+            string? packageIdFilter = null,
+            string? versionFilter = null,
+            CancellationToken ct = default) =>
+        await ListPackagesAsync(
+                packageIdFilter,
+                versionFilter,
+                PackageListMode.Summary,
                 ct)
             .ConfigureAwait(false);
 
@@ -222,7 +246,7 @@ public class DiskPackageCache :
         await ListPackagesAsync(
                 packageIdFilter,
                 versionFilter,
-                includeIndexes: false,
+                PackageListMode.Indexing,
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -230,16 +254,22 @@ public class DiskPackageCache :
         ListPackagesAsync(
             string? packageIdFilter,
             string? versionFilter,
-            bool includeIndexes,
+            PackageListMode mode,
             CancellationToken ct)
     {
         await RecoverPendingTransactionsAsync(ct).ConfigureAwait(false);
         PackageCacheKeySnapshot snapshot;
+        CacheMetadata? summaryMetadata = null;
         await using (PackageCacheLease globalLease =
             await _coordinator.AcquireGlobalAsync(ct).ConfigureAwait(false))
         {
             snapshot = await SnapshotCacheKeysNoLockAsync(ct)
                 .ConfigureAwait(false);
+            if (mode == PackageListMode.Summary)
+            {
+                summaryMetadata = await _metadataStore.ReadAsync(ct)
+                    .ConfigureAwait(false);
+            }
         }
 
         List<PackageCacheKey> cacheKeys = snapshot.CanonicalKeys
@@ -278,16 +308,23 @@ public class DiskPackageCache :
             if (inspection.State != PackageCacheInspectionState.Valid)
                 continue;
 
-            CacheMetadataEntry? entry;
-            await using (PackageCacheLease globalLease =
-                await _coordinator.AcquireGlobalAsync(ct)
-                    .ConfigureAwait(false))
+            CacheMetadataEntry? entry = null;
+            if (mode == PackageListMode.Summary)
             {
+                summaryMetadata!.Packages.TryGetValue(
+                    cacheKey.MetadataKey,
+                    out entry);
+            }
+            else
+            {
+                await using PackageCacheLease globalLease =
+                    await _coordinator.AcquireGlobalAsync(ct)
+                        .ConfigureAwait(false);
                 entry = await _metadataStore.GetEntryAsync(cacheKey, ct)
                     .ConfigureAwait(false);
             }
 
-            PackageRecord record = includeIndexes
+            PackageRecord record = mode == PackageListMode.Hydrated
                 ? await CreateRecordAsync(
                         reference,
                         inspection,
@@ -1754,7 +1791,7 @@ public class DiskPackageCache :
         try
         {
             await using FileStream stream =
-                PackageCacheRegularFile.OpenRead(indexPath);
+                _fileOperations.OpenRead(indexPath);
             if (stream.Length > _installLimits.MaxEntryBytes)
             {
                 _logger.LogDebug(

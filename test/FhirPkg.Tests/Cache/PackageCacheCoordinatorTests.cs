@@ -426,6 +426,171 @@ public sealed class PackageCacheCoordinatorTests
     }
 
     [Fact]
+    public async Task IndexingList_ReReadsMetadataAfterIdentityLease()
+    {
+        using TestDirectory directory = new();
+        using DiskPackageCache cache = new(directory.Path);
+        PackageReference reference =
+            new("indexing.package", "1.0.0");
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        await using MemoryStream archive = CreateArchive(
+            """{"name":"indexing.package","version":"1.0.0","description":"old"}""");
+        await cache.InstallAsync(
+            reference,
+            archive,
+            ct: TestContext.Current.CancellationToken);
+        await cache.UpdateMetadataAsync(
+            reference,
+            new CacheMetadataEntry
+            {
+                DownloadDateTime = DateTime.UtcNow,
+                SizeBytes = 111
+            },
+            TestContext.Current.CancellationToken);
+        PackageCacheCoordinator coordinator =
+            new(directory.Path);
+        await using PackageCacheLease identityLease =
+            await coordinator.AcquireIdentityAsync(
+                cacheKey,
+                TestContext.Current.CancellationToken);
+        IPackageCacheIndexStore indexStore = cache;
+
+        Task<IReadOnlyList<PackageRecord>> listTask =
+            indexStore.ListPackagesForIndexingAsync(
+                cancellationToken: TestContext.Current.CancellationToken);
+        await WaitForIdentityReferenceCountAsync(
+            directory.Path,
+            cacheKey,
+            expectedCount: 2);
+
+        await using (PackageCacheLease globalLease =
+            await coordinator.AcquireGlobalAsync(
+                TestContext.Current.CancellationToken))
+        {
+            string manifestPath = Path.Combine(
+                cacheKey.GetPackageDirectoryPath(directory.Path),
+                "package",
+                "package.json");
+            await File.WriteAllTextAsync(
+                manifestPath,
+                """{"name":"indexing.package","version":"1.0.0","description":"new"}""",
+                TestContext.Current.CancellationToken);
+            PackageCacheMetadataStore metadataStore = new(
+                directory.Path,
+                SystemPackageCacheFileOperations.Instance,
+                NullPackageCacheFaultObserver.Instance);
+            await metadataStore.SetEntryAsync(
+                cacheKey,
+                new CacheMetadataEntry
+                {
+                    DownloadDateTime = DateTime.UtcNow,
+                    SizeBytes = 222
+                },
+                mutation: null,
+                TestContext.Current.CancellationToken);
+        }
+
+        await identityLease.DisposeAsync();
+        PackageRecord listed = (await listTask).ShouldHaveSingleItem();
+
+        listed.Manifest.Description.ShouldBe("new");
+        listed.SizeBytes.ShouldBe(222);
+        listed.Index.ShouldBeNull();
+        PackageCacheCoordinator.GetProcessLockEntryCount(
+            directory.Path).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task SummaryList_StaleGenerationCannotRemoveRefreshedPackage()
+    {
+        using TestDirectory directory = new();
+        using DiskPackageCache cache = new(directory.Path);
+        PackageReference reference =
+            new("summary.package", "1.0.0");
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        DateTime downloadDate =
+            new(2026, 7, 21, 12, 0, 0, DateTimeKind.Utc);
+        await using MemoryStream archive = CreateArchive(
+            """{"name":"summary.package","version":"1.0.0","description":"old"}""");
+        await cache.InstallAsync(
+            reference,
+            archive,
+            ct: TestContext.Current.CancellationToken);
+        await cache.UpdateMetadataAsync(
+            reference,
+            new CacheMetadataEntry
+            {
+                DownloadDateTime = downloadDate,
+                SizeBytes = 111
+            },
+            TestContext.Current.CancellationToken);
+        PackageCacheCoordinator coordinator =
+            new(directory.Path);
+        await using PackageCacheLease identityLease =
+            await coordinator.AcquireIdentityAsync(
+                cacheKey,
+                TestContext.Current.CancellationToken);
+
+        Task<IReadOnlyList<PackageRecord>> listTask =
+            cache.ListPackageSummariesAsync(
+                ct: TestContext.Current.CancellationToken);
+        await WaitForIdentityReferenceCountAsync(
+            directory.Path,
+            cacheKey,
+            expectedCount: 2);
+
+        await using (PackageCacheLease globalLease =
+            await coordinator.AcquireGlobalAsync(
+                TestContext.Current.CancellationToken))
+        {
+            string manifestPath = Path.Combine(
+                cacheKey.GetPackageDirectoryPath(directory.Path),
+                "package",
+                "package.json");
+            await File.WriteAllTextAsync(
+                manifestPath,
+                """{"name":"summary.package","version":"1.0.0","description":"new"}""",
+                TestContext.Current.CancellationToken);
+            PackageCacheMetadataStore metadataStore = new(
+                directory.Path,
+                SystemPackageCacheFileOperations.Instance,
+                NullPackageCacheFaultObserver.Instance);
+            await metadataStore.SetEntryAsync(
+                cacheKey,
+                new CacheMetadataEntry
+                {
+                    DownloadDateTime = downloadDate,
+                    SizeBytes = 111,
+                    ContentGeneration = "generation-b"
+                },
+                mutation: null,
+                TestContext.Current.CancellationToken);
+        }
+
+        await identityLease.DisposeAsync();
+        PackageRecord summary = (await listTask).ShouldHaveSingleItem();
+        IPackageCacheConditionalRemoval conditionalRemoval = cache;
+
+        bool removed = await conditionalRemoval.RemoveIfUnchangedAsync(
+            summary,
+            TestContext.Current.CancellationToken);
+        PackageRecord? current = await cache.GetPackageAsync(
+            reference,
+            TestContext.Current.CancellationToken);
+
+        summary.Manifest.Description.ShouldBe("new");
+        summary.SizeBytes.ShouldBe(111);
+        summary.Index.ShouldBeNull();
+        removed.ShouldBeFalse();
+        current.ShouldNotBeNull();
+        current!.Manifest.Description.ShouldBe("new");
+        current.SizeBytes.ShouldBe(111);
+        current.ContentGeneration.ShouldNotBe(summary.ContentGeneration);
+        PackageCacheCoordinator.GetProcessLockEntryCount(
+            directory.Path).ShouldBe(0);
+    }
+
+    [Fact]
     public async Task Clear_PreservesMetadataWrittenAfterInitialSnapshot()
     {
         using TestDirectory directory = new();

@@ -326,6 +326,46 @@ public sealed class FhirPackageManagerSourceTests
     }
 
     [Fact]
+    public async Task DefaultCacheSummaryListing_StripsIndexAndPreservesLegacyRecord()
+    {
+        PackageIndex index = new()
+        {
+            IndexVersion = 2,
+            Files = []
+        };
+        PackageRecord source = new()
+        {
+            Reference = new PackageReference(
+                "legacy.cache",
+                "1.0.0"),
+            DirectoryPath = "cache",
+            ContentPath = "cache/package",
+            Manifest = new PackageManifest
+            {
+                Name = "legacy.cache",
+                Version = "1.0.0"
+            },
+            Index = index,
+            ContentGeneration = "generation-a"
+        };
+        CapturingHardenedCache concreteCache = new()
+        {
+            ListedRecords = [source]
+        };
+        IPackageCache cache = concreteCache;
+
+        IReadOnlyList<PackageRecord> summaries =
+            await cache.ListPackageSummariesAsync(
+                ct: TestContext.Current.CancellationToken);
+        PackageRecord summary = summaries.ShouldHaveSingleItem();
+
+        ReferenceEquals(source, summary).ShouldBeFalse();
+        summary.Index.ShouldBeNull();
+        summary.ContentGeneration.ShouldBe(source.ContentGeneration);
+        source.Index.ShouldBeSameAs(index);
+    }
+
+    [Fact]
     public async Task UriTimeout_CoversBodyCopyAndIsTyped()
     {
         using TestDirectory directory = new();
@@ -933,6 +973,7 @@ public sealed class FhirPackageManagerSourceTests
         internal int ImportCallCount { get; private set; }
         internal InstallCacheOptions? LastInstallOptions { get; private set; }
         internal InstallCacheOptions? LastImportOptions { get; private set; }
+        internal IReadOnlyList<PackageRecord> ListedRecords { get; init; } = [];
 
         public string CacheDirectory => string.Empty;
 
@@ -982,7 +1023,7 @@ public sealed class FhirPackageManagerSourceTests
             string? packageIdFilter = null,
             string? versionFilter = null,
             CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<PackageRecord>>([]);
+            Task.FromResult(ListedRecords);
 
         public Task<bool> RemoveAsync(
             PackageReference reference,

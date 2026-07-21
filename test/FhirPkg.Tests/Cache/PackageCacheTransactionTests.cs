@@ -1472,6 +1472,12 @@ public sealed class PackageCacheTransactionTests : IDisposable
             return _inner.FileExists(path);
         }
 
+        public FileStream OpenRead(string path)
+        {
+            Before("OpenRead", isMutating: false);
+            return _inner.OpenRead(path);
+        }
+
         public void CreateDirectory(string path)
         {
             Before("CreateDirectory");

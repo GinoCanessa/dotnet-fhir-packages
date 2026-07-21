@@ -94,6 +94,133 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         publicRecords.Single().Index.ShouldNotBeNull();
     }
 
+    [Fact]
+    public async Task SummaryList_DoesNotHydratePersistedIndexes()
+    {
+        RecordingFileOperations fileOperations = new();
+        using DiskPackageCache cache = CreateCache(fileOperations);
+        using MemoryStream archive = CreateArchive(
+            patientId: "existing",
+            indexJson: CreateIndexJson("existing"));
+        _ = await cache.InstallAsync(
+            s_reference,
+            archive,
+            new InstallCacheOptions
+            {
+                VerifyChecksum = false,
+            },
+            TestContext.Current.CancellationToken);
+        fileOperations.ReadPaths.Clear();
+
+        IReadOnlyList<PackageRecord> summaryRecords =
+            await cache.ListPackageSummariesAsync(
+                s_reference.Name,
+                s_reference.Version,
+                TestContext.Current.CancellationToken);
+        bool summaryReadIndex = fileOperations.ReadPaths.Any(
+            path => string.Equals(
+                path,
+                GetIndexPath(),
+                StringComparison.Ordinal));
+        fileOperations.ReadPaths.Clear();
+        IReadOnlyList<PackageRecord> publicRecords =
+            await cache.ListPackagesAsync(
+                s_reference.Name,
+                s_reference.Version,
+                TestContext.Current.CancellationToken);
+        bool hydratedReadIndex = fileOperations.ReadPaths.Any(
+            path => string.Equals(
+                path,
+                GetIndexPath(),
+                StringComparison.Ordinal));
+
+        summaryRecords.Single().Index.ShouldBeNull();
+        summaryReadIndex.ShouldBeFalse();
+        publicRecords.Single().Index.ShouldNotBeNull();
+        hydratedReadIndex.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task SummaryList_MatchesHydratedListExceptIndex()
+    {
+        using DiskPackageCache cache = CreateCache();
+        PackageReference laterReference =
+            new("zeta.package", "2.0.0");
+        PackageReference earlierReference =
+            new("alpha.package", "1.0.0");
+        await InstallPackageAsync(
+            cache,
+            laterReference,
+            "zeta",
+            "5.0.0",
+            new DateTime(2026, 7, 21, 12, 0, 0, DateTimeKind.Utc),
+            222);
+        await InstallPackageAsync(
+            cache,
+            earlierReference,
+            "alpha",
+            "4.0.1",
+            new DateTime(2026, 7, 20, 12, 0, 0, DateTimeKind.Utc),
+            111);
+        PackageReference invalidReference =
+            new("invalid.package", "1.0.0");
+        string invalidContentPath = Path.Combine(
+            PackageCacheKey.Create(invalidReference)
+                .GetPackageDirectoryPath(_cacheRoot),
+            "package");
+        Directory.CreateDirectory(invalidContentPath);
+        await File.WriteAllTextAsync(
+            Path.Combine(invalidContentPath, "package.json"),
+            """{"name":"different.package","version":"1.0.0"}""",
+            TestContext.Current.CancellationToken);
+
+        IReadOnlyList<PackageRecord> hydrated =
+            await cache.ListPackagesAsync(
+                ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<PackageRecord> summaries =
+            await cache.ListPackageSummariesAsync(
+                ct: TestContext.Current.CancellationToken);
+        IReadOnlyList<PackageRecord> filtered =
+            await cache.ListPackageSummariesAsync(
+                "zeta",
+                "2.0.0",
+                TestContext.Current.CancellationToken);
+
+        hydrated.Select(record => record.Reference).ShouldBe(
+        [
+            earlierReference,
+            laterReference
+        ]);
+        summaries.Select(record => record.Reference).ShouldBe(
+            hydrated.Select(record => record.Reference));
+        filtered.Single().Reference.ShouldBe(laterReference);
+
+        foreach ((PackageRecord hydratedRecord, PackageRecord summaryRecord)
+            in hydrated.Zip(summaries))
+        {
+            ReferenceEquals(hydratedRecord, summaryRecord).ShouldBeFalse();
+            summaryRecord.Reference.ShouldBe(hydratedRecord.Reference);
+            summaryRecord.DirectoryPath.ShouldBe(
+                hydratedRecord.DirectoryPath);
+            summaryRecord.ContentPath.ShouldBe(hydratedRecord.ContentPath);
+            summaryRecord.Manifest.Name.ShouldBe(
+                hydratedRecord.Manifest.Name);
+            summaryRecord.Manifest.Version.ShouldBe(
+                hydratedRecord.Manifest.Version);
+            summaryRecord.Manifest.Description.ShouldBe(
+                hydratedRecord.Manifest.Description);
+            summaryRecord.Manifest.FhirVersions.ShouldBe(
+                hydratedRecord.Manifest.FhirVersions);
+            summaryRecord.InstalledAt.ShouldBe(
+                hydratedRecord.InstalledAt);
+            summaryRecord.SizeBytes.ShouldBe(hydratedRecord.SizeBytes);
+            summaryRecord.ContentGeneration.ShouldBe(
+                hydratedRecord.ContentGeneration);
+            summaryRecord.Index.ShouldBeNull();
+            hydratedRecord.Index.ShouldNotBeNull();
+        }
+    }
+
     [Theory]
     [MemberData(nameof(InvalidIndexJson))]
     public async Task InvalidExistingIndex_IsDerivativeAbsence(
@@ -400,6 +527,34 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             TestContext.Current.CancellationToken);
     }
 
+    private static async Task InstallPackageAsync(
+        DiskPackageCache cache,
+        PackageReference reference,
+        string patientId,
+        string fhirVersion,
+        DateTime installedAt,
+        long sizeBytes)
+    {
+        using MemoryStream archive = CreateArchive(
+            reference,
+            patientId,
+            CreateIndexJson(patientId),
+            fhirVersion);
+        _ = await cache.InstallAsync(
+            reference,
+            archive,
+            new InstallCacheOptions { VerifyChecksum = false },
+            TestContext.Current.CancellationToken);
+        await cache.UpdateMetadataAsync(
+            reference,
+            new CacheMetadataEntry
+            {
+                DownloadDateTime = installedAt,
+                SizeBytes = sizeBytes
+            },
+            TestContext.Current.CancellationToken);
+    }
+
     private static async Task OverwriteAsync(
         DiskPackageCache cache,
         MemoryStream replacement)
@@ -427,13 +582,31 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
 
     private static MemoryStream CreateArchive(
         string patientId,
-        string? indexJson)
+        string? indexJson) =>
+        CreateArchive(
+            s_reference,
+            patientId,
+            indexJson,
+            "4.0.1");
+
+    private static MemoryStream CreateArchive(
+        PackageReference reference,
+        string patientId,
+        string? indexJson,
+        string fhirVersion)
     {
+        PackageManifest manifest = new()
+        {
+            Name = reference.Name,
+            Version = reference.Version!,
+            Description = $"{reference.Name} description",
+            FhirVersions = [fhirVersion]
+        };
         List<ArbitraryTarEntry> entries =
         [
             ArbitraryTarBuilder.File(
                 "package/package.json",
-                """{"name":"example.package","version":"1.0.0"}"""),
+                manifest.Serialize()),
             ArbitraryTarBuilder.File(
                 "package/patient.json",
                 $$"""{"resourceType":"Patient","id":"{{patientId}}"}""")
@@ -476,6 +649,8 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
 
         internal List<string> AtomicDestinations { get; } = [];
 
+        internal List<string> ReadPaths { get; } = [];
+
         internal List<string> WrittenPaths { get; } = [];
 
         public bool DirectoryExists(string path) =>
@@ -483,6 +658,12 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
 
         public bool FileExists(string path) =>
             _inner.FileExists(path);
+
+        public FileStream OpenRead(string path)
+        {
+            ReadPaths.Add(path);
+            return _inner.OpenRead(path);
+        }
 
         public void CreateDirectory(string path) =>
             _inner.CreateDirectory(path);

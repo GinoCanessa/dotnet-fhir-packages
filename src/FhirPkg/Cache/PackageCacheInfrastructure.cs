@@ -11,6 +11,8 @@ internal interface IPackageCacheFileOperations :
 {
     bool DirectoryExists(string path);
 
+    FileStream OpenRead(string path);
+
     void MoveDirectory(string sourcePath, string destinationPath);
 
     void MoveFile(string sourcePath, string destinationPath);
@@ -47,6 +49,9 @@ internal sealed class SystemPackageCacheFileOperations :
     public bool DirectoryExists(string path) => Directory.Exists(path);
 
     public bool FileExists(string path) => File.Exists(path);
+
+    public FileStream OpenRead(string path) =>
+        PackageCacheRegularFile.OpenRead(path);
 
     public void CreateDirectory(string path)
     {

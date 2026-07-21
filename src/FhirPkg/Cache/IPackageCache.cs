@@ -51,6 +51,37 @@ public interface IPackageCache : IDisposable
         CancellationToken ct = default);
 
     /// <summary>
+    /// Lists package summaries in the cache, optionally filtered by package ID
+    /// prefix and/or version. Summary records deliberately omit resource indexes.
+    /// </summary>
+    /// <param name="packageIdFilter">Optional filter; only packages whose ID starts with this value are returned.</param>
+    /// <param name="versionFilter">Optional exact version filter.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>
+    /// A read-only list of matching package records whose
+    /// <see cref="PackageRecord.Index"/> values are <c>null</c>.
+    /// </returns>
+    /// <remarks>
+    /// The default implementation preserves compatibility by cloning records
+    /// returned from <see cref="ListPackagesAsync"/> without their indexes.
+    /// Implementations should override this method to avoid hydrating indexes.
+    /// </remarks>
+    async Task<IReadOnlyList<PackageRecord>> ListPackageSummariesAsync(
+        string? packageIdFilter = null,
+        string? versionFilter = null,
+        CancellationToken ct = default)
+    {
+        IReadOnlyList<PackageRecord> records = await ListPackagesAsync(
+                packageIdFilter,
+                versionFilter,
+                ct)
+            .ConfigureAwait(false);
+        return records
+            .Select(record => record with { Index = null })
+            .ToArray();
+    }
+
+    /// <summary>
     /// Installs a package from a tarball stream into the cache.
     /// Performs atomic extraction via a temporary directory, normalizes the package structure,
     /// and moves the result to the final cache location.
