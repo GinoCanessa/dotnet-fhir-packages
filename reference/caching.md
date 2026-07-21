@@ -9,11 +9,13 @@ All implementations use a shared cache directory:
 | Platform | Default Path |
 |----------|-------------|
 | Linux / macOS | `~/.fhir/packages/` |
-| Windows | `%USERPROFILE%\.fhir\packages\` or `%APPDATA%\.fhir\packages\` |
+| Windows | `%USERPROFILE%\.fhir\packages\` |
 
 > **Note:** The Java Publisher IG Loader uses `~/fhircache` (without `.fhir`) in some modes, and `%TEMP%/fhircache` for autobuild and webserver modes.
 
-Clients may allow the cache path to be overridden via configuration or environment variables.
+FhirPkg resolves the cache path from the `PACKAGE_CACHE_FOLDER` environment
+variable, then the `CachePath` option (CLI `--package-cache-folder`), and
+otherwise `~/.fhir/packages`.
 
 ## Directory Structure
 
@@ -84,6 +86,7 @@ hl7.fhir.us.core#6.1.0 = 1048576
 | `[package-sizes]` | Directive → expanded size in bytes |
 | `[package-source-publication-dates]` | Mutable-source publication timestamp |
 | `[package-archive-sha256]` | SHA-256 of the installed compressed archive |
+| `[package-content-generations]` | Content-generation counter for atomic replacement |
 
 FhirPkg writes `packages.ini` atomically under the cache-wide mutation lock and
 preserves unrelated/unknown sections.
@@ -299,10 +302,10 @@ An optional LRU cache for frequently accessed resources:
 | Implementation | Default Size | Configuration |
 |---------------|-------------|---------------|
 | SUSHI/fhir-package-loader | 200 entries | `resourceCacheSize` option |
-| Firely | Not built-in | — |
+| FhirPkg | 200 entries | `ResourceCacheSize` option (`ResourceCacheSafeMode`) |
 | CodeGen | Not built-in | — |
 
-The SUSHI implementation supports three safety modes for the in-memory cache:
+Both the SUSHI and FhirPkg implementations support three safety modes for the in-memory cache:
 
 | Mode | Behavior | Performance |
 |------|----------|-------------|
