@@ -4,6 +4,7 @@ using System.Text.Json;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
 using FhirPkg.Models;
+using FhirPkg.Utilities;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -16,6 +17,9 @@ public class DiskPackageCache :
     IPackageCache,
     IHardenedPackageCache,
     IHardenedPackageCacheCore,
+    IPackageCacheIndexStore,
+    IPackageCacheResourceStore,
+    IPackageCacheMutationPublisher,
     IDisposable
 {
     private const string PackageSubdirectory = "package";
@@ -35,6 +39,11 @@ public class DiskPackageCache :
     private readonly PackageCacheMetadataStore _metadataStore;
     private readonly PackageCacheCommitter _committer;
     private readonly PackageCacheCoordinator _coordinator;
+    private readonly IPackageCacheFileOperations _fileOperations;
+    private readonly object _mutationSubscriptionsLock = new();
+    private readonly Dictionary<long, MutationSubscriptionCallbacks>
+        _mutationSubscriptions = [];
+    private long _nextMutationSubscriptionId;
 
     /// <inheritdoc />
     public string CacheDirectory { get; }
@@ -124,6 +133,7 @@ public class DiskPackageCache :
         _installLimits = PackageInstallLimits.ResolvePerCall(
             installLimits,
             requestedLimits: null);
+        _fileOperations = fileOperations;
         CacheDirectory = Path.GetFullPath(
             cacheDirectory
             ?? Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER")
@@ -183,17 +193,44 @@ public class DiskPackageCache :
         CacheMetadataEntry? entry =
             await _metadataStore.GetEntryAsync(cacheKey, ct)
                 .ConfigureAwait(false);
-        return CreateRecord(
-            cacheKey.DisplayReference,
-            inspection,
-            entry);
+        return await CreateRecordAsync(
+                cacheKey.DisplayReference,
+                inspection,
+                entry,
+                ct)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<PackageRecord>> ListPackagesAsync(
         string? packageIdFilter = null,
         string? versionFilter = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default) =>
+        await ListPackagesAsync(
+                packageIdFilter,
+                versionFilter,
+                includeIndexes: true,
+                ct)
+            .ConfigureAwait(false);
+
+    async Task<IReadOnlyList<PackageRecord>>
+        IPackageCacheIndexStore.ListPackagesForIndexingAsync(
+            string? packageIdFilter,
+            string? versionFilter,
+            CancellationToken cancellationToken) =>
+        await ListPackagesAsync(
+                packageIdFilter,
+                versionFilter,
+                includeIndexes: false,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    private async Task<IReadOnlyList<PackageRecord>>
+        ListPackagesAsync(
+            string? packageIdFilter,
+            string? versionFilter,
+            bool includeIndexes,
+            CancellationToken ct)
     {
         await RecoverPendingTransactionsAsync(ct).ConfigureAwait(false);
         PackageCacheKeySnapshot snapshot;
@@ -249,7 +286,19 @@ public class DiskPackageCache :
                     .ConfigureAwait(false);
             }
 
-            results.Add(CreateRecord(reference, inspection, entry));
+            PackageRecord record = includeIndexes
+                ? await CreateRecordAsync(
+                        reference,
+                        inspection,
+                        entry,
+                        ct)
+                    .ConfigureAwait(false)
+                : CreateRecord(
+                    reference,
+                    inspection,
+                    entry,
+                    index: null);
+            results.Add(record);
         }
 
         return results;
@@ -319,10 +368,12 @@ public class DiskPackageCache :
             CacheMetadataEntry? existingEntry =
                 await _metadataStore.GetEntryAsync(cacheKey, ct)
                     .ConfigureAwait(false);
-            return CreateRecord(
-                cacheKey.DisplayReference,
-                initialInspection,
-                existingEntry);
+            return await CreateRecordAsync(
+                    cacheKey.DisplayReference,
+                    initialInspection,
+                    existingEntry,
+                    ct)
+                .ConfigureAwait(false);
         }
 
         ThrowIfInstallCannotReplace(
@@ -395,10 +446,12 @@ public class DiskPackageCache :
                             mutation: null,
                             ct)
                         .ConfigureAwait(false);
-                    return CreateRecord(
-                        cacheKey.DisplayReference,
-                        initialInspection,
-                        refreshedEntry);
+                    return await CreateRecordAsync(
+                            cacheKey.DisplayReference,
+                            initialInspection,
+                            refreshedEntry,
+                            ct)
+                        .ConfigureAwait(false);
                 }
             }
 
@@ -409,7 +462,6 @@ public class DiskPackageCache :
             string stagingDirectory = Path.Combine(
                 acquiredContent.OperationDirectory,
                 "expanded");
-            PackageManifest manifest;
             string stagedContentPath;
             try
             {
@@ -458,7 +510,6 @@ public class DiskPackageCache :
                         reference.FhirDirective);
                 }
 
-                manifest = identity.Manifest;
                 stagedContentPath = layout.ContentPath;
             }
             catch (PackageInstallException)
@@ -482,7 +533,8 @@ public class DiskPackageCache :
                 SizeBytes = sizeBytes,
                 SourcePublicationDate = options.SourcePublicationDate,
                 ArchiveSha256 = options.ArchiveSha256
-                    ?? acquiredContent.Sha256
+                    ?? acquiredContent.Sha256,
+                ContentGeneration = acquiredContent.OperationId
             };
 
             PackageCacheInspection committedInspection;
@@ -503,6 +555,9 @@ public class DiskPackageCache :
                     cacheKey,
                     currentInspection,
                     options);
+                PublishPackageInvalidatedIfPresent(
+                    cacheKey,
+                    currentInspection);
                 await _committer.CommitInstallAsync(
                         cacheKey,
                         currentInspection,
@@ -526,15 +581,12 @@ public class DiskPackageCache :
                 }
             }
 
-            return new PackageRecord
-            {
-                Reference = reference,
-                DirectoryPath = committedInspection.TargetPath,
-                ContentPath = committedInspection.ContentPath!,
-                Manifest = manifest,
-                InstalledAt = entry.DownloadDateTime,
-                SizeBytes = sizeBytes
-            };
+            return await CreateRecordAsync(
+                    reference,
+                    committedInspection,
+                    entry,
+                    ct)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -676,10 +728,12 @@ public class DiskPackageCache :
                             cacheKey,
                             cancellationToken)
                         .ConfigureAwait(false);
-                return CreateRecord(
-                    cacheKey.DisplayReference,
-                    inspection,
-                    existingEntry);
+                return await CreateRecordAsync(
+                        cacheKey.DisplayReference,
+                        inspection,
+                        existingEntry,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
 
             ThrowIfInstallCannotReplace(cacheKey, inspection, options);
@@ -698,7 +752,8 @@ public class DiskPackageCache :
                 SizeBytes = sizeBytes,
                 SourcePublicationDate = options.SourcePublicationDate,
                 ArchiveSha256 = options.ArchiveSha256
-                    ?? acquiredContent.Sha256
+                    ?? acquiredContent.Sha256,
+                ContentGeneration = acquiredContent.OperationId
             };
 
             PackageCacheInspection committedInspection;
@@ -729,16 +784,21 @@ public class DiskPackageCache :
                                 cacheKey,
                                 cancellationToken)
                             .ConfigureAwait(false);
-                    return CreateRecord(
-                        cacheKey.DisplayReference,
-                        currentInspection,
-                        existingEntry);
+                    return await CreateRecordAsync(
+                            cacheKey.DisplayReference,
+                            currentInspection,
+                            existingEntry,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                 }
 
                 ThrowIfInstallCannotReplace(
                     cacheKey,
                     currentInspection,
                     options);
+                PublishPackageInvalidatedIfPresent(
+                    cacheKey,
+                    currentInspection);
                 await _committer.CommitInstallAsync(
                         cacheKey,
                         currentInspection,
@@ -762,15 +822,12 @@ public class DiskPackageCache :
                 }
             }
 
-            return new PackageRecord
-            {
-                Reference = cacheKey.DisplayReference,
-                DirectoryPath = committedInspection.TargetPath,
-                ContentPath = committedInspection.ContentPath!,
-                Manifest = identity.Manifest,
-                InstalledAt = entry.DownloadDateTime,
-                SizeBytes = sizeBytes
-            };
+            return await CreateRecordAsync(
+                    cacheKey.DisplayReference,
+                    committedInspection,
+                    entry,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -816,6 +873,7 @@ public class DiskPackageCache :
             return false;
         }
 
+        PublishPackageInvalidated(cacheKey.CanonicalReference);
         return await _committer.RemoveAsync(
                 cacheKey,
                 inspection,
@@ -866,6 +924,7 @@ public class DiskPackageCache :
                 continue;
             }
 
+            PublishPackageInvalidated(cacheKey.CanonicalReference);
             bool removed = await _committer.RemoveAsync(
                     cacheKey,
                     inspection,
@@ -877,6 +936,7 @@ public class DiskPackageCache :
             RemoveEmptyScopeDirectories();
         }
 
+        PublishCacheCleared();
         return count;
     }
 
@@ -907,43 +967,195 @@ public class DiskPackageCache :
         if (inspection.State != PackageCacheInspectionState.Valid)
             return null;
 
-        string indexPath = Path.Combine(
-            inspection.ContentPath!,
-            IndexFileName);
-        if (!File.Exists(indexPath))
-            return null;
-
-        await using FileStream stream = new FileStream(
-            indexPath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            16_384,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
-        return await JsonSerializer.DeserializeAsync<PackageIndex>(
-                stream,
-                s_jsonOptions,
+        return await TryLoadValidIndexAsync(
+                inspection.ContentPath!,
                 ct)
             .ConfigureAwait(false);
     }
+
+    async Task<PackageIndex?> IPackageCacheIndexStore.GetOrCreateIndexAsync(
+        PackageReference reference,
+        bool forceReindex,
+        Func<PackageRecord, CancellationToken, Task<PackageIndex>> generator,
+        CancellationToken cancellationToken,
+        Action<PackageRecord, PackageIndex>? indexReady)
+    {
+        ArgumentNullException.ThrowIfNull(generator);
+
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        await using PackageCacheLease identityLease =
+            await AcquireIdentityAndRecoverAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        PackageCacheInspection inspection =
+            await _validator.InspectAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        if (inspection.State != PackageCacheInspectionState.Valid)
+            return null;
+
+        PackageIndex? existingIndex =
+            await TryLoadValidIndexAsync(
+                    inspection.ContentPath!,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        CacheMetadataEntry? metadataEntry =
+            await _metadataStore.GetEntryAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        PackageRecord package = CreateRecord(
+            cacheKey.DisplayReference,
+            inspection,
+            metadataEntry,
+            existingIndex);
+        if (!forceReindex && existingIndex is not null)
+        {
+            indexReady?.Invoke(
+                package,
+                existingIndex);
+            return existingIndex;
+        }
+
+        PackageIndex generatedIndex =
+            await generator(package, cancellationToken)
+                .ConfigureAwait(false)
+            ?? throw new InvalidDataException(
+                "The package index generator returned null.");
+
+        EnsureGeneratedIndexIsValid(
+            generatedIndex,
+            inspection.ContentPath!);
+        byte[] serializedIndex = JsonSerializer.SerializeToUtf8Bytes(
+            generatedIndex,
+            s_jsonOptions);
+        if (serializedIndex.LongLength > _installLimits.MaxEntryBytes)
+        {
+            throw new InvalidDataException(
+                $"The generated package index exceeds the configured {_installLimits.MaxEntryBytes} byte entry limit.");
+        }
+
+        string expectedTargetPath = inspection.TargetPath;
+        string expectedContentPath = inspection.ContentPath!;
+        string indexPath = Path.Combine(
+            expectedContentPath,
+            IndexFileName);
+        await DurableFileWriter.WriteAsync(
+                indexPath,
+                serializedIndex,
+                _fileOperations,
+                cancellationToken,
+                async beforeCommitToken =>
+                {
+                    PackageCacheInspection currentInspection =
+                        await _validator.InspectAsync(
+                                cacheKey,
+                                beforeCommitToken)
+                            .ConfigureAwait(false);
+                    EnsureIndexCommitTargetIsUnchanged(
+                        cacheKey,
+                        currentInspection,
+                        expectedTargetPath,
+                        expectedContentPath);
+                    EnsureGeneratedIndexIsValid(
+                        generatedIndex,
+                        currentInspection.ContentPath!);
+                })
+            .ConfigureAwait(false);
+
+        PackageIndex? persistedIndex =
+            await TryLoadValidIndexAsync(
+                    expectedContentPath,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        if (persistedIndex is null)
+        {
+            throw new IOException(
+                $"The persisted package index for '{cacheKey.CanonicalReference.FhirDirective}' could not be validated.");
+        }
+
+        indexReady?.Invoke(
+            package with
+            {
+                Index = persistedIndex,
+            },
+            persistedIndex);
+        return persistedIndex;
+    }
+
+    IDisposable IPackageCacheMutationPublisher.Subscribe(
+        Action<PackageReference> packageInvalidated,
+        Action cacheCleared) =>
+        SubscribeToMutations(packageInvalidated, cacheCleared);
 
     /// <inheritdoc />
     public async Task<string?> GetFileContentAsync(
         PackageReference reference,
         string relativePath,
-        CancellationToken ct = default)
+        CancellationToken ct = default) =>
+        await ReadFileAsync(
+                reference,
+                relativePath,
+                _ => null,
+                (_, content) => content,
+                ct)
+            .ConfigureAwait(false);
+
+    async Task<TResult?>
+        IPackageCacheResourceStore.ReadFileAsync<TResult>(
+            PackageReference reference,
+            string relativePath,
+            Func<string, TResult?> tryGetCached,
+            Func<string, string, TResult?> materialize,
+            CancellationToken cancellationToken)
+        where TResult : class =>
+        await ReadFileAsync(
+                reference,
+                relativePath,
+                tryGetCached,
+                materialize,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    private async Task<TResult?> ReadFileAsync<TResult>(
+        PackageReference reference,
+        string relativePath,
+        Func<string, TResult?> tryGetCached,
+        Func<string, string, TResult?> materialize,
+        CancellationToken cancellationToken)
+        where TResult : class
     {
         ArgumentNullException.ThrowIfNull(relativePath);
+        ArgumentNullException.ThrowIfNull(tryGetCached);
+        ArgumentNullException.ThrowIfNull(materialize);
 
         PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
         await using PackageCacheLease identityLease =
-            await AcquireIdentityAndRecoverAsync(cacheKey, ct)
+            await AcquireIdentityAndRecoverAsync(
+                    cacheKey,
+                    cancellationToken)
                 .ConfigureAwait(false);
         PackageCacheInspection inspection =
-            await _validator.InspectAsync(cacheKey, ct)
+            await _validator.InspectAsync(
+                    cacheKey,
+                    cancellationToken)
                 .ConfigureAwait(false);
         if (inspection.State != PackageCacheInspectionState.Valid)
             return null;
+
+        CacheMetadataEntry? metadataEntry =
+            await _metadataStore.GetEntryAsync(
+                    cacheKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        string contentGeneration =
+            CreateContentGeneration(metadataEntry);
+        TResult? cached =
+            tryGetCached(contentGeneration);
+        if (cached is not null)
+            return cached;
 
         string contentPath = inspection.ContentPath!;
         string filePath = Path.GetFullPath(
@@ -966,8 +1178,14 @@ public class DiskPackageCache :
         if (!File.Exists(filePath))
             return null;
 
-        return await File.ReadAllTextAsync(filePath, ct)
-            .ConfigureAwait(false);
+        string content =
+            await File.ReadAllTextAsync(
+                    filePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        return materialize(
+            contentGeneration,
+            content);
     }
 
     /// <inheritdoc />
@@ -1006,9 +1224,19 @@ public class DiskPackageCache :
         await using PackageCacheLease globalLease =
             await _coordinator.AcquireGlobalAsync(ct)
                 .ConfigureAwait(false);
+        CacheMetadataEntry? existingEntry =
+            await _metadataStore.GetEntryAsync(
+                    cacheKey,
+                    ct)
+                .ConfigureAwait(false);
+        CacheMetadataEntry effectiveEntry = entry with
+        {
+            ContentGeneration =
+                existingEntry?.ContentGeneration,
+        };
         await _metadataStore.SetEntryAsync(
                 cacheKey,
-                entry,
+                effectiveEntry,
                 mutation: null,
                 ct)
             .ConfigureAwait(false);
@@ -1118,6 +1346,8 @@ public class DiskPackageCache :
                     cancellationToken)
                 .ConfigureAwait(false))
             {
+                PublishPackageInvalidated(
+                    cacheKey.CanonicalReference);
                 await using PackageCacheLease globalLease =
                     await _coordinator.AcquireGlobalAsync(
                             cancellationToken)
@@ -1156,6 +1386,8 @@ public class DiskPackageCache :
                     .GetResult();
             if (hasPendingTransaction)
             {
+                PublishPackageInvalidated(
+                    cacheKey.CanonicalReference);
                 using PackageCacheLease globalLease =
                     _coordinator.AcquireGlobal();
                 RecoverNoLockAsync(cacheKey, CancellationToken.None)
@@ -1402,19 +1634,248 @@ public class DiskPackageCache :
         }
     }
 
+    private async Task<PackageRecord> CreateRecordAsync(
+        PackageReference reference,
+        PackageCacheInspection inspection,
+        CacheMetadataEntry? entry,
+        CancellationToken cancellationToken)
+    {
+        PackageIndex? index = await TryLoadValidIndexAsync(
+                inspection.ContentPath!,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return CreateRecord(
+            reference,
+            inspection,
+            entry,
+            index);
+    }
+
     private static PackageRecord CreateRecord(
         PackageReference reference,
         PackageCacheInspection inspection,
-        CacheMetadataEntry? entry) =>
+        CacheMetadataEntry? entry,
+        PackageIndex? index) =>
         new()
         {
             Reference = reference,
             DirectoryPath = inspection.TargetPath,
             ContentPath = inspection.ContentPath!,
             Manifest = inspection.Manifest!,
+            Index = index,
             InstalledAt = entry?.DownloadDateTime,
-            SizeBytes = entry?.SizeBytes
+            SizeBytes = entry?.SizeBytes,
+            ContentGeneration =
+                CreateContentGeneration(entry)
         };
+
+    private static string CreateContentGeneration(
+        CacheMetadataEntry? entry) =>
+        string.Join(
+            "\0",
+            entry?.ContentGeneration
+                ?? "legacy",
+            entry?.DownloadDateTime.ToString("O")
+                ?? string.Empty,
+            entry?.SizeBytes?.ToString(
+                System.Globalization.CultureInfo.InvariantCulture)
+                ?? string.Empty,
+            entry?.SourcePublicationDate?.ToString("O")
+                ?? string.Empty,
+            entry?.ArchiveSha256
+                ?? string.Empty);
+
+    private async Task<PackageIndex?> TryLoadValidIndexAsync(
+        string packageContentPath,
+        CancellationToken cancellationToken)
+    {
+        string indexPath = Path.Combine(
+            packageContentPath,
+            IndexFileName);
+        try
+        {
+            await using FileStream stream =
+                PackageCacheRegularFile.OpenRead(indexPath);
+            if (stream.Length > _installLimits.MaxEntryBytes)
+            {
+                _logger.LogDebug(
+                    "Ignoring package index at '{Path}' because it exceeds the configured entry limit.",
+                    indexPath);
+                return null;
+            }
+
+            PackageIndex? index =
+                await JsonSerializer.DeserializeAsync<PackageIndex>(
+                        stream,
+                        s_jsonOptions,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (!PackageIndexValidation.TryValidateReferencedFiles(
+                    index,
+                    packageContentPath,
+                    out string? failureReason))
+            {
+                _logger.LogDebug(
+                    "Ignoring invalid package index at '{Path}': {Reason}",
+                    indexPath,
+                    failureReason);
+                return null;
+            }
+
+            return index;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return null;
+        }
+        catch (JsonException exception)
+        {
+            _logger.LogDebug(
+                exception,
+                "Ignoring malformed package index at '{Path}'.",
+                indexPath);
+            return null;
+        }
+        catch (NotSupportedException exception)
+        {
+            _logger.LogDebug(
+                exception,
+                "Ignoring unsupported package index at '{Path}'.",
+                indexPath);
+            return null;
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            _logger.LogDebug(
+                exception,
+                "Ignoring unreadable package index at '{Path}'.",
+                indexPath);
+            return null;
+        }
+        catch (IOException exception)
+        {
+            _logger.LogDebug(
+                exception,
+                "Ignoring unreadable package index at '{Path}'.",
+                indexPath);
+            return null;
+        }
+    }
+
+    private static void EnsureGeneratedIndexIsValid(
+        PackageIndex index,
+        string packageContentPath)
+    {
+        if (!PackageIndexValidation.TryValidateReferencedFiles(
+                index,
+                packageContentPath,
+                out string? failureReason))
+        {
+            throw new InvalidDataException(
+                $"The generated package index is invalid: {failureReason}");
+        }
+    }
+
+    private static void EnsureIndexCommitTargetIsUnchanged(
+        PackageCacheKey expectedCacheKey,
+        PackageCacheInspection inspection,
+        string expectedTargetPath,
+        string expectedContentPath)
+    {
+        if (inspection.State != PackageCacheInspectionState.Valid
+            || !inspection.CacheKey.Equals(expectedCacheKey)
+            || !string.Equals(
+                inspection.TargetPath,
+                expectedTargetPath,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                inspection.ContentPath,
+                expectedContentPath,
+                StringComparison.Ordinal))
+        {
+            throw new IOException(
+                $"Package '{expectedCacheKey.CanonicalReference.FhirDirective}' changed while its index was being generated.");
+        }
+    }
+
+    private IDisposable SubscribeToMutations(
+        Action<PackageReference> packageInvalidated,
+        Action cacheCleared)
+    {
+        ArgumentNullException.ThrowIfNull(packageInvalidated);
+        ArgumentNullException.ThrowIfNull(cacheCleared);
+
+        long subscriptionId;
+        lock (_mutationSubscriptionsLock)
+        {
+            subscriptionId = checked(++_nextMutationSubscriptionId);
+            _mutationSubscriptions.Add(
+                subscriptionId,
+                new MutationSubscriptionCallbacks(
+                    packageInvalidated,
+                    cacheCleared));
+        }
+
+        return new MutationSubscription(
+            this,
+            subscriptionId);
+    }
+
+    private void PublishPackageInvalidatedIfPresent(
+        PackageCacheKey cacheKey,
+        PackageCacheInspection inspection)
+    {
+        if (inspection.State != PackageCacheInspectionState.Missing)
+        {
+            PublishPackageInvalidated(
+                cacheKey.CanonicalReference);
+        }
+    }
+
+    private void PublishPackageInvalidated(
+        PackageReference reference)
+    {
+        IReadOnlyList<MutationSubscriptionCallbacks> subscriptions =
+            SnapshotMutationSubscriptions();
+        foreach (MutationSubscriptionCallbacks subscription in subscriptions)
+            subscription.PackageInvalidated(reference);
+    }
+
+    private void PublishCacheCleared()
+    {
+        IReadOnlyList<MutationSubscriptionCallbacks> subscriptions =
+            SnapshotMutationSubscriptions();
+        foreach (MutationSubscriptionCallbacks subscription in subscriptions)
+            subscription.CacheCleared();
+    }
+
+    private IReadOnlyList<MutationSubscriptionCallbacks>
+        SnapshotMutationSubscriptions()
+    {
+        lock (_mutationSubscriptionsLock)
+        {
+            return _mutationSubscriptions
+                .OrderBy(
+                    pair => pair.Key)
+                .Select(
+                    pair => pair.Value)
+                .ToList();
+        }
+    }
+
+    private void UnsubscribeFromMutations(long subscriptionId)
+    {
+        lock (_mutationSubscriptionsLock)
+            _mutationSubscriptions.Remove(subscriptionId);
+    }
 
     private static long CalculateDirectorySize(string path)
     {
@@ -1468,6 +1929,31 @@ public class DiskPackageCache :
             PackageId = packageId,
             Phase = phase
         });
+    }
+
+    private sealed record MutationSubscriptionCallbacks(
+        Action<PackageReference> PackageInvalidated,
+        Action CacheCleared);
+
+    private sealed class MutationSubscription : IDisposable
+    {
+        private DiskPackageCache? _owner;
+        private readonly long _subscriptionId;
+
+        internal MutationSubscription(
+            DiskPackageCache owner,
+            long subscriptionId)
+        {
+            _owner = owner;
+            _subscriptionId = subscriptionId;
+        }
+
+        public void Dispose()
+        {
+            DiskPackageCache? owner =
+                Interlocked.Exchange(ref _owner, null);
+            owner?.UnsubscribeFromMutations(_subscriptionId);
+        }
     }
 
     /// <inheritdoc />

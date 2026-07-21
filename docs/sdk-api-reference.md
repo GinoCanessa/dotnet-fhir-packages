@@ -8,6 +8,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
 ## Table of Contents
 
 - [Core Interface — IFhirPackageManager](#core-interface--ifhirpackagemanager)
+  - [Resource Capability — IFhirPackageResourceManager](#resource-capability--ifhirpackageresourcemanager)
 - [Hardened Manager Sources](#hardened-manager-sources)
 - [Options](#options)
   - [FhirPackageManagerOptions](#fhirpackagemanageroptions)
@@ -309,6 +310,54 @@ PackageRecord discovered = await manager.ImportAsync(
     options: null,
     cancellationToken);
 ```
+
+## Resource Capability — IFhirPackageResourceManager
+
+`FhirPackageManager` implements an additive resource capability. The same
+operations are extension methods on `IFhirPackageManager`, preserving
+compatibility for existing implementations; an implementation without the
+capability throws `NotSupportedException`.
+
+```csharp
+public interface IFhirPackageResourceManager
+{
+    Task<PackageIndex?> IndexPackageAsync(
+        PackageReference reference,
+        IndexingOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<ResourceInfo>> FindResourcesAsync(
+        ResourceSearchCriteria criteria,
+        CancellationToken cancellationToken = default);
+
+    Task<ResourceInfo?> FindByCanonicalUrlAsync(
+        string canonicalUrl,
+        string? packageScope = null,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<ResourceInfo>> FindByResourceTypeAsync(
+        string resourceType,
+        string? packageScope = null,
+        CancellationToken cancellationToken = default);
+
+    Task<JsonNode?> ReadResourceAsync(
+        ResourceInfo resource,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Search methods lazily load or generate indexes for relevant cached packages.
+`IndexPackageAsync` returns `null` when the package is not cached and honors
+`ForceReindex`. Generated indexes are persisted atomically before registration.
+Explicit and lazy failures propagate; eager post-install failures only produce
+a warning.
+
+`ReadResourceAsync` requires the package identity and contained path from
+`ResourceInfo`, rejects unsafe portable paths, returns `null` for a missing
+file, and propagates malformed JSON. Parsed `JsonNode` values are cached by
+canonical package identity and normalized path when `ResourceCacheSize` is
+positive and the package cache provides generation-aware reads. Other custom
+cache implementations are read on every call.
 
 ---
 
@@ -819,7 +868,8 @@ public record ResourceIndexEntry
 
 ### ResourceInfo & ResourceSearchCriteria
 
-Used by `IPackageIndexer` for resource lookup.
+Used by `IPackageIndexer` and `IFhirPackageResourceManager` for resource
+lookup.
 
 ```csharp
 public record ResourceInfo
@@ -1062,6 +1112,11 @@ public interface IPackageCache
         PackageReference reference, CacheMetadataEntry entry, CancellationToken ct = default);
 }
 ```
+
+`CacheMetadataEntry.ContentGeneration` exposes the opaque identifier of the
+currently committed content generation. The cache owns this value:
+`UpdateMetadataAsync` preserves the current generation even when passed an
+older metadata snapshot.
 
 #### InstallCacheOptions
 
@@ -1401,9 +1456,14 @@ public class IndexingOptions
 }
 ```
 
-The indexer reads existing `.index.json` files when available. If absent (or
-`ForceReindex` is true), it scans all `.json` files in the package and builds a
-new index.
+The low-level indexer reads existing `.index.json` files when available. If
+absent (or `ForceReindex` is true), it scans all `.json` files in the package
+and builds a new index. It does not own cache persistence.
+
+For managed package workflows, prefer `IFhirPackageResourceManager`. It
+validates and persists indexes through `DiskPackageCache`, registers them only
+after durable replacement, performs lazy indexing before queries, and
+invalidates package-specific state on cache mutation.
 
 StructureDefinition resources are additionally classified by **flavor**:
 `Profile`, `Extension`, `Logical`, `Type`, `Resource`.
@@ -1428,8 +1488,9 @@ services.AddFhirPackageManagement(options =>
 });
 ```
 
-After registration, inject `IFhirPackageManager` (or any sub-component) into your
-services:
+After registration, inject `IFhirPackageManager`,
+`IFhirPackageResourceManager`, or any sub-component into your services. The two
+manager interfaces resolve to the same singleton:
 
 ```csharp
 public class MyService(IFhirPackageManager packages)

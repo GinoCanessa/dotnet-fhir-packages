@@ -21,13 +21,16 @@ internal sealed class PackageCacheMetadataStore
     private const string SourcePublicationDatesSection =
         "package-source-publication-dates";
     private const string ArchiveSha256Section = "package-archive-sha256";
+    private const string ContentGenerationsSection =
+        "package-content-generations";
 
     private static readonly string[] s_managedSections =
     [
         PackagesSection,
         PackageSizesSection,
         SourcePublicationDatesSection,
-        ArchiveSha256Section
+        ArchiveSha256Section,
+        ContentGenerationsSection
     ];
 
     private readonly string _metadataPath;
@@ -152,7 +155,11 @@ internal sealed class PackageCacheMetadataStore
             && string.Equals(
                 actual.ArchiveSha256,
                 expected.ArchiveSha256,
-                StringComparison.OrdinalIgnoreCase);
+                StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                actual.ContentGeneration,
+                expected.ContentGeneration,
+                StringComparison.Ordinal);
     }
 
     internal async Task SetEntryAsync(
@@ -198,6 +205,11 @@ internal sealed class PackageCacheMetadataStore
 
             if (entry.ArchiveSha256 is not null)
                 sections[ArchiveSha256Section][key] = entry.ArchiveSha256;
+            if (entry.ContentGeneration is not null)
+            {
+                sections[ContentGenerationsSection][key] =
+                    entry.ContentGeneration;
+            }
         }
 
         await WriteSectionsAsync(
@@ -299,6 +311,9 @@ internal sealed class PackageCacheMetadataStore
         ini.TryGetValue(
             ArchiveSha256Section,
             out IReadOnlyDictionary<string, string>? hashesSection);
+        ini.TryGetValue(
+            ContentGenerationsSection,
+            out IReadOnlyDictionary<string, string>? generationsSection);
 
         foreach ((string key, string dateText) in packageSection)
         {
@@ -345,13 +360,21 @@ internal sealed class PackageCacheMetadataStore
             string? archiveSha256 = null;
             if (hashesSection is not null)
                 hashesSection.TryGetValue(key, out archiveSha256);
+            string? contentGeneration = null;
+            if (generationsSection is not null)
+            {
+                generationsSection.TryGetValue(
+                    key,
+                    out contentGeneration);
+            }
 
             packages[key] = new CacheMetadataEntry
             {
                 DownloadDateTime = downloadDate,
                 SizeBytes = sizeBytes,
                 SourcePublicationDate = publicationDate,
-                ArchiveSha256 = archiveSha256
+                ArchiveSha256 = archiveSha256,
+                ContentGeneration = contentGeneration
             };
         }
 

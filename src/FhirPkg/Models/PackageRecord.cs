@@ -30,4 +30,6 @@ public record PackageRecord
 
     /// <summary>Expanded size in bytes on disk.</summary>
     public long? SizeBytes { get; init; }
+
+    internal string? ContentGeneration { get; init; }
 }

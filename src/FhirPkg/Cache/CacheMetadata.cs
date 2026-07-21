@@ -1,5 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Text.Json.Serialization;
+
 namespace FhirPkg.Cache;
 
 /// <summary>
@@ -49,4 +51,11 @@ public record CacheMetadataEntry
     /// Used to compare mutable aliases when publication metadata is unavailable.
     /// </summary>
     public string? ArchiveSha256 { get; init; }
+
+    /// <summary>
+    /// Opaque identifier for the committed package content generation.
+    /// Changes whenever package content is replaced.
+    /// </summary>
+    [JsonInclude]
+    public string? ContentGeneration { get; internal init; }
 }

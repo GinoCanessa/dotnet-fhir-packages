@@ -474,19 +474,38 @@ preserves the prior lock byte-for-byte.
 
 ## 9 — Resource Indexing
 
-After a package is extracted, the **`PackageIndexer`** can scan its contents to
-build a `.index.json` file for fast resource lookup.
+After a package is committed, **`FhirPackageManager`** eagerly asks the
+**`PackageIndexer`** to index its resources. Resource queries also lazily index
+relevant cached packages, so indexes that are absent after an upgrade or were
+removed as invalid derivative data are regenerated on demand.
 
 ### Indexing Process
 
-1. Check for an existing `.index.json` — if present and `ForceReindex` is not
-   set, return it immediately.
-2. Enumerate all `.json` files in the package content directory.
-3. Parse each file and look for a `resourceType` property to identify FHIR
+1. Acquire the package identity lease and validate the cached package.
+2. Check for a structurally valid schema-v2 `.index.json` whose referenced
+   regular files still exist. Unless `ForceReindex` is set, load and register
+   that index immediately.
+3. Enumerate all top-level `.json` files in the package content directory.
+4. Parse each file and look for a `resourceType` property to identify FHIR
    resources.
-4. Extract metadata: resource type, `id`, `url` (canonical URL), `version`,
+5. Extract metadata: resource type, `id`, `url` (canonical URL), `version`,
    `name`, and (for StructureDefinitions) the definition flavor.
-5. Write the index to `package/.index.json` for future use.
+6. Revalidate the unchanged package generation, serialize the index to a
+   unique temporary file, flush it, and atomically replace
+   `package/.index.json`.
+7. Register the index for search only after durable replacement succeeds.
+
+Explicit and lazy indexing failures propagate to the caller and a later call
+can retry. Eager post-install indexing failures are logged as warnings; the
+package remains successfully installed because the index is derivative data.
+Overwrite, repair, removal, recovery, and clear operations invalidate
+registered indexes and parsed-resource cache entries before mutation.
+Each committed generation receives an opaque cache-owned token in
+`packages.ini`. Resource reads compare that token together with standard
+archive metadata while holding the package identity lease, so another SDK
+instance or an older writer cannot make a stale parsed resource appear current.
+Custom caches that do not provide this lease-and-generation capability bypass
+the parsed-resource cache.
 
 ### StructureDefinition Classification
 
@@ -503,12 +522,20 @@ StructureDefinitions are classified into flavors based on their `kind`,
 
 ### Lookup Methods
 
-Once indexed, resources can be queried through the indexer:
+Applications normally query through `IFhirPackageManager` extension methods or
+the `IFhirPackageResourceManager` capability:
 
-- **`FindByCanonicalUrl`** — exact match on the resource's canonical URL.
-- **`FindByResourceType`** — all resources of a given type, optionally scoped to
+- **`IndexPackageAsync`** — explicitly load or generate one package index.
+- **`FindByCanonicalUrlAsync`** — exact canonical URL match.
+- **`FindByResourceTypeAsync`** — all resources of a given type, optionally scoped to
   a package.
-- **`FindResources`** — complex search with multiple filter criteria.
+- **`FindResourcesAsync`** — search with type, flavor, package, key, and limit
+  criteria.
+- **`ReadResourceAsync`** — path-safe package read parsed as `JsonNode`, with
+  optional identity-aware LRU caching.
+
+The lower-level `IPackageIndexer` remains available for callers that manage
+content paths and persistence themselves.
 
 ## 10 — Progress Reporting
 

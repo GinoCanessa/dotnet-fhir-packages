@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
@@ -31,6 +32,7 @@ namespace FhirPkg;
 /// </remarks>
 public sealed class FhirPackageManager :
     IHardenedFhirPackageManager,
+    IFhirPackageResourceManager,
     IDisposable
 {
     private readonly IPackageCache _cache;
@@ -38,7 +40,15 @@ public sealed class FhirPackageManager :
     private readonly IVersionResolver _versionResolver;
     private readonly IDependencyResolver _dependencyResolver;
     private readonly IPackageIndexer _packageIndexer;
+    private readonly IManagedPackageIndexer? _managedPackageBuilder;
+    private readonly IManagedPackageIndexer _managedPackageIndexer;
     private readonly MemoryResourceCache? _memoryCache;
+    private readonly IDisposable? _cacheMutationSubscription;
+    private readonly object _resourceStateLock = new();
+    private readonly Dictionary<
+        string,
+        RegisteredPackageState> _registeredPackages =
+        new(StringComparer.Ordinal);
     private readonly FhirPackageManagerOptions _options;
     private readonly PackageInstallLimits _managerInstallLimits;
     private readonly PackageFixupPolicy _fixupPolicy;
@@ -134,12 +144,25 @@ public sealed class FhirPackageManager :
 
         // Build indexer
         _packageIndexer = new PackageIndexer(factory.CreateLogger<PackageIndexer>());
+        _managedPackageBuilder =
+            _packageIndexer as IManagedPackageIndexer;
+        _managedPackageIndexer =
+            _managedPackageBuilder
+            ?? new PackageIndexer(
+                factory.CreateLogger<PackageIndexer>());
 
         // Build optional memory cache
         if (options.ResourceCacheSize > 0)
         {
             _memoryCache = new MemoryResourceCache(options.ResourceCacheSize, options.ResourceCacheSafeMode);
         }
+
+        _cacheMutationSubscription =
+            _cache is IPackageCacheMutationPublisher mutationPublisher
+                ? mutationPublisher.Subscribe(
+                    InvalidatePackageResources,
+                    ClearResourceState)
+                : null;
     }
 
     internal static FhirPackageManager CreateWithContentionObserver(
@@ -298,6 +321,11 @@ public sealed class FhirPackageManager :
         _versionResolver = versionResolver;
         _dependencyResolver = dependencyResolver;
         _packageIndexer = packageIndexer;
+        _managedPackageBuilder =
+            packageIndexer as IManagedPackageIndexer;
+        _managedPackageIndexer =
+            _managedPackageBuilder
+            ?? new PackageIndexer(logger);
         _options = options;
         _managerInstallLimits = managerInstallLimits;
         _fixupPolicy = configuration.FixupPolicy;
@@ -312,6 +340,12 @@ public sealed class FhirPackageManager :
                 options.HttpTimeout,
                 options.MaxRedirects)
             : RegistryHttpTransport.CreateUnverified(httpClient);
+        _cacheMutationSubscription =
+            cache is IPackageCacheMutationPublisher mutationPublisher
+                ? mutationPublisher.Subscribe(
+                    InvalidatePackageResources,
+                    ClearResourceState)
+                : null;
     }
 
     /// <inheritdoc />
@@ -673,6 +707,165 @@ public sealed class FhirPackageManager :
     }
 
     /// <inheritdoc />
+    public async Task<PackageIndex?> IndexPackageAsync(
+        PackageReference reference,
+        IndexingOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _ = PackageCacheKey.Create(reference);
+        return await IndexPackageCoreAsync(
+                reference,
+                options?.ForceReindex == true,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<ResourceInfo>> FindResourcesAsync(
+        ResourceSearchCriteria criteria,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(criteria);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        await EnsureResourceIndexesAsync(
+                criteria.PackageScope,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return _managedPackageIndexer.FindManagedResources(
+            criteria);
+    }
+
+    /// <inheritdoc />
+    public async Task<ResourceInfo?> FindByCanonicalUrlAsync(
+        string canonicalUrl,
+        string? packageScope = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(canonicalUrl);
+        IReadOnlyList<ResourceInfo> matches =
+            await FindResourcesAsync(
+                    new ResourceSearchCriteria
+                    {
+                        Key = canonicalUrl,
+                        PackageScope = packageScope,
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        return matches.FirstOrDefault(
+            resource => string.Equals(
+                resource.Url,
+                canonicalUrl,
+                StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<ResourceInfo>> FindByResourceTypeAsync(
+        string resourceType,
+        string? packageScope = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceType);
+        await EnsureResourceIndexesAsync(
+                packageScope,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return _managedPackageIndexer.FindManagedByResourceType(
+            resourceType,
+            packageScope);
+    }
+
+    /// <inheritdoc />
+    public async Task<JsonNode?> ReadResourceAsync(
+        ResourceInfo resource,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(resource);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (string.IsNullOrWhiteSpace(resource.PackageName)
+            || string.IsNullOrWhiteSpace(resource.PackageVersion)
+            || string.IsNullOrWhiteSpace(resource.FilePath))
+        {
+            throw new ArgumentException(
+                "Resource information must include package name, package version, and file path.",
+                nameof(resource));
+        }
+
+        PackageReference reference = new(
+            resource.PackageName,
+            resource.PackageVersion);
+        PackageCacheKey cacheKey =
+            PackageCacheKey.Create(reference);
+        PortableArchivePath resourcePath =
+            PortableArchivePath.Create(
+                resource.FilePath,
+                isDirectory: false,
+                reference.FhirDirective);
+        string cacheKeyText = CreateResourceCacheKey(
+            cacheKey,
+            resourcePath.CanonicalPath);
+        if (_cache is IPackageCacheResourceStore resourceStore)
+        {
+            JsonNode? storedResource =
+                await resourceStore.ReadFileAsync(
+                        reference,
+                        resourcePath.ExactSpelling,
+                        generation =>
+                        {
+                            CachedResource? cached =
+                                _memoryCache?.Get<CachedResource>(
+                                    cacheKeyText);
+                            if (cached is null)
+                                return null;
+
+                            if (string.Equals(
+                                    cached.ContentGeneration,
+                                    generation,
+                                    StringComparison.Ordinal))
+                            {
+                                return cached.Resource;
+                            }
+
+                            _memoryCache?.Remove(cacheKeyText);
+                            return null;
+                        },
+                        (generation, content) =>
+                        {
+                            JsonNode? parsed =
+                                JsonNode.Parse(content);
+                            if (parsed is not null)
+                            {
+                                _memoryCache?.Set(
+                                    cacheKeyText,
+                                    new CachedResource(
+                                        generation,
+                                        parsed));
+                            }
+
+                            return parsed;
+                        },
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (storedResource is null)
+                _memoryCache?.Remove(cacheKeyText);
+            return storedResource;
+        }
+
+        string? content =
+            await _cache.GetFileContentAsync(
+                    reference,
+                    resourcePath.ExactSpelling,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        if (content is null)
+            return null;
+
+        JsonNode? parsed = JsonNode.Parse(content);
+        return parsed;
+    }
+
+    /// <inheritdoc />
     public async Task<bool> RemoveAsync(
         string directive,
         CancellationToken cancellationToken = default)
@@ -688,7 +881,7 @@ public sealed class FhirPackageManager :
         if (removed)
         {
             _logger.LogInformation("Successfully removed {Name}#{Version}.", reference.Name, reference.Version);
-            _memoryCache?.Clear();
+            InvalidatePackageResources(reference);
         }
         else
         {
@@ -705,7 +898,7 @@ public sealed class FhirPackageManager :
 
         _logger.LogInformation("Cleaning all packages from cache.");
         int count = await _cache.ClearAsync(cancellationToken).ConfigureAwait(false);
-        _memoryCache?.Clear();
+        ClearResourceState();
 
         _logger.LogInformation("Removed {Count} packages from cache.", count);
         return count;
@@ -838,6 +1031,7 @@ public sealed class FhirPackageManager :
         if (_disposed) return;
         _disposed = true;
 
+        _cacheMutationSubscription?.Dispose();
         _ownedHttpClient?.Dispose();
 
         try { _logger.LogDebug("FhirPackageManager disposed."); }
@@ -845,6 +1039,435 @@ public sealed class FhirPackageManager :
     }
 
     #region Private helpers
+
+    private async Task<PackageIndex?> IndexPackageCoreAsync(
+        PackageReference reference,
+        bool forceReindex,
+        CancellationToken cancellationToken)
+    {
+        PackageRecord? package =
+            await _cache.GetPackageAsync(
+                    reference,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        if (package is null)
+            return null;
+
+        IndexedPackageResult indexed =
+            await IndexPackageRecordAsync(
+                    package,
+                    forceReindex,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        return indexed.Index;
+    }
+
+    private async Task<IndexedPackageResult>
+        IndexPackageRecordAsync(
+        PackageRecord package,
+        bool forceReindex,
+        CancellationToken cancellationToken)
+    {
+        if (_cache is IPackageCacheIndexStore indexStore)
+        {
+            IndexedPackageResult? readyResult = null;
+            PackageIndex? persistedIndex =
+                await indexStore.GetOrCreateIndexAsync(
+                        package.Reference,
+                        forceReindex,
+                        BuildPackageIndexAsync,
+                        cancellationToken,
+                        (currentPackage, currentIndex) =>
+                        {
+                            RegisterPersistedIndex(
+                                currentPackage,
+                                currentIndex);
+                            readyResult =
+                                new IndexedPackageResult(
+                                    currentPackage,
+                                    currentIndex);
+                        })
+                    .ConfigureAwait(false);
+            if (persistedIndex is null)
+            {
+                throw new DirectoryNotFoundException(
+                    $"Cached package '{package.Reference.FhirDirective}' is not available for indexing.");
+            }
+
+            if (forceReindex)
+            {
+                RemovePackageResourceCache(
+                    package.Reference);
+            }
+
+            return readyResult
+                ?? throw new InvalidOperationException(
+                    "The package cache did not publish the persisted index generation.");
+        }
+
+        if (!forceReindex
+            && package.Index is not null)
+        {
+            RegisterPersistedIndex(
+                package,
+                package.Index);
+            return new IndexedPackageResult(
+                package,
+                package.Index);
+        }
+
+        PackageIndex generatedIndex =
+            await BuildPackageIndexAsync(
+                    package,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        if (forceReindex)
+        {
+            RemovePackageResourceCache(
+                package.Reference);
+        }
+
+        RegisterPersistedIndex(
+            package,
+            generatedIndex);
+        return new IndexedPackageResult(
+            package,
+            generatedIndex);
+    }
+
+    private async Task<PackageIndex> BuildPackageIndexAsync(
+        PackageRecord package,
+        CancellationToken cancellationToken)
+    {
+        if (_managedPackageBuilder is not null)
+        {
+            return await _managedPackageBuilder.BuildIndexAsync(
+                    package,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        PackageIndex index =
+            await _packageIndexer.IndexPackageAsync(
+                    package.ContentPath,
+                    new IndexingOptions
+                    {
+                        ForceReindex = true,
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        return index
+            ?? throw new InvalidDataException(
+                "The package indexer returned null.");
+    }
+
+    private async Task EnsureResourceIndexesAsync(
+        string? packageScope,
+        CancellationToken cancellationToken)
+    {
+        GetPackageScopeFilters(
+            packageScope,
+            out string? packageIdFilter,
+            out string? versionFilter);
+        IReadOnlyList<PackageRecord> packages;
+        if (_cache is IPackageCacheIndexStore indexStore)
+        {
+            packages =
+                await indexStore.ListPackagesForIndexingAsync(
+                        packageIdFilter,
+                        versionFilter,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+        }
+        else
+        {
+            packages =
+                await _cache.ListPackagesAsync(
+                        packageIdFilter,
+                        versionFilter,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+        }
+
+        List<PackageRecord> scopedPackages = packages
+            .Where(package =>
+                PackageScopeMatches(
+                    package.Reference,
+                    packageScope))
+            .ToList();
+        HashSet<string> currentIdentities =
+            scopedPackages
+                .Select(package =>
+                    PackageCacheKey.Create(
+                            package.Reference)
+                        .CanonicalIdentity)
+                .ToHashSet(StringComparer.Ordinal);
+        ReconcileMissingPackages(
+            packageScope,
+            currentIdentities);
+
+        foreach (PackageRecord package in scopedPackages)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (IsPackageRegistrationCurrent(
+                    package))
+            {
+                continue;
+            }
+
+            _ = await IndexPackageRecordAsync(
+                    package,
+                    forceReindex: false,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private async Task<PackageRecord> TryIndexInstalledPackageAsync(
+        PackageRecord package,
+        IProgress<PackageProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            ReportProgress(
+                progress,
+                package.Reference.Name,
+                PackageProgressPhase.Indexing);
+            InvalidatePackageResources(
+                package.Reference);
+            IndexedPackageResult indexed =
+                await IndexPackageRecordAsync(
+                        package,
+                        forceReindex: false,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            return indexed.Package with
+            {
+                Index = indexed.Index,
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Package {Directive} was installed, but its derivative resource index could not be generated.",
+                package.Reference.FhirDirective);
+            return package;
+        }
+    }
+
+    private void InvalidatePackageResources(
+        PackageReference reference)
+    {
+        PackageCacheKey cacheKey =
+            PackageCacheKey.Create(reference);
+        lock (_resourceStateLock)
+        {
+            _registeredPackages.Remove(
+                cacheKey.CanonicalIdentity);
+            _managedPackageIndexer.Unregister(
+                cacheKey.CanonicalReference);
+            RemovePackageResourceCache(
+                cacheKey);
+        }
+    }
+
+    private void ClearResourceState()
+    {
+        lock (_resourceStateLock)
+        {
+            _registeredPackages.Clear();
+            _managedPackageIndexer.Clear();
+            _memoryCache?.Clear();
+        }
+    }
+
+    private void RegisterPersistedIndex(
+        PackageRecord package,
+        PackageIndex index)
+    {
+        PackageCacheKey cacheKey =
+            PackageCacheKey.Create(package.Reference);
+        string contentGeneration =
+            package.ContentGeneration
+            ?? string.Empty;
+        lock (_resourceStateLock)
+        {
+            if (_registeredPackages.TryGetValue(
+                    cacheKey.CanonicalIdentity,
+                    out RegisteredPackageState? existing)
+                && !string.Equals(
+                    existing.ContentGeneration,
+                    contentGeneration,
+                    StringComparison.Ordinal))
+            {
+                _memoryCache?.RemoveByPrefix(
+                    CreateResourceCachePrefix(cacheKey));
+            }
+
+            _managedPackageIndexer.RegisterPersistedIndex(
+                cacheKey.CanonicalReference,
+                index);
+            _registeredPackages[cacheKey.CanonicalIdentity] =
+                new RegisteredPackageState(
+                    cacheKey.CanonicalReference,
+                    contentGeneration);
+        }
+    }
+
+    private bool IsPackageRegistrationCurrent(
+        PackageRecord package)
+    {
+        PackageCacheKey cacheKey =
+            PackageCacheKey.Create(package.Reference);
+        string contentGeneration =
+            package.ContentGeneration
+            ?? string.Empty;
+        lock (_resourceStateLock)
+        {
+            return _registeredPackages.TryGetValue(
+                    cacheKey.CanonicalIdentity,
+                    out RegisteredPackageState? existing)
+                && string.Equals(
+                    existing.ContentGeneration,
+                    contentGeneration,
+                    StringComparison.Ordinal);
+        }
+    }
+
+    private void ReconcileMissingPackages(
+        string? packageScope,
+        IReadOnlySet<string> currentIdentities)
+    {
+        lock (_resourceStateLock)
+        {
+            List<KeyValuePair<
+                string,
+                RegisteredPackageState>> removedRegistrations =
+                _registeredPackages
+                    .Where(registration =>
+                        PackageScopeMatches(
+                            registration.Value.Reference,
+                            packageScope)
+                        && !currentIdentities.Contains(
+                            registration.Key))
+                    .ToList();
+            foreach (KeyValuePair<
+                         string,
+                         RegisteredPackageState> registration
+                     in removedRegistrations)
+            {
+                _registeredPackages.Remove(
+                    registration.Key);
+                _managedPackageIndexer.Unregister(
+                    registration.Value.Reference);
+                _memoryCache?.RemoveByPrefix(
+                    CreateResourceCachePrefix(
+                        PackageCacheKey.Create(
+                            registration.Value.Reference)));
+            }
+        }
+    }
+
+    private static bool PackageScopeMatches(
+        PackageReference reference,
+        string? packageScope)
+    {
+        if (string.IsNullOrWhiteSpace(packageScope))
+            return true;
+
+        int separatorIndex = packageScope.LastIndexOf('#');
+        if (separatorIndex <= 0)
+        {
+            return reference.Name.Equals(
+                packageScope,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        return reference.Name.Equals(
+                packageScope[..separatorIndex],
+                StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                reference.Version,
+                packageScope[(separatorIndex + 1)..],
+                StringComparison.Ordinal);
+    }
+
+    private static void GetPackageScopeFilters(
+        string? packageScope,
+        out string? packageIdFilter,
+        out string? versionFilter)
+    {
+        if (string.IsNullOrWhiteSpace(packageScope))
+        {
+            packageIdFilter = null;
+            versionFilter = null;
+            return;
+        }
+
+        int separatorIndex =
+            packageScope.LastIndexOf('#');
+        if (separatorIndex <= 0)
+        {
+            packageIdFilter = packageScope;
+            versionFilter = null;
+            return;
+        }
+
+        packageIdFilter =
+            packageScope[..separatorIndex];
+        versionFilter =
+            packageScope[(separatorIndex + 1)..];
+    }
+
+    private static string CreateResourceCachePrefix(
+        PackageCacheKey cacheKey) =>
+        $"{cacheKey.CanonicalIdentity}\0";
+
+    private void RemovePackageResourceCache(
+        PackageReference reference) =>
+        RemovePackageResourceCache(
+            PackageCacheKey.Create(reference));
+
+    private void RemovePackageResourceCache(
+        PackageCacheKey cacheKey) =>
+        _memoryCache?.RemoveByPrefix(
+            CreateResourceCachePrefix(cacheKey));
+
+    private static string CreateResourceCacheKey(
+        PackageCacheKey cacheKey,
+        string resourcePath) =>
+        $"{CreateResourceCachePrefix(cacheKey)}{resourcePath}";
+
+    private sealed record RegisteredPackageState(
+        PackageReference Reference,
+        string ContentGeneration);
+
+    private sealed record IndexedPackageResult(
+        PackageRecord Package,
+        PackageIndex Index);
+
+    private sealed class CachedResource(
+        string contentGeneration,
+        JsonNode resource) :
+        ICloneable
+    {
+        internal string ContentGeneration { get; } =
+            contentGeneration;
+
+        internal JsonNode Resource { get; } =
+            resource;
+
+        public object Clone() =>
+            new CachedResource(
+                ContentGeneration,
+                Resource.DeepClone());
+    }
 
     private static HttpClient CreateDirectHttpClient(
         FhirPackageManagerOptions options)
@@ -908,6 +1531,11 @@ public sealed class FhirPackageManager :
                     .ConfigureAwait(false);
             }
 
+            record = await TryIndexInstalledPackageAsync(
+                    record,
+                    policy.Progress,
+                    cancellationToken)
+                .ConfigureAwait(false);
             ReportProgress(
                 policy.Progress,
                 expectation.Reference.Name,
@@ -961,6 +1589,11 @@ public sealed class FhirPackageManager :
                     .ConfigureAwait(false);
             }
 
+            record = await TryIndexInstalledPackageAsync(
+                    record,
+                    policy.Progress,
+                    cancellationToken)
+                .ConfigureAwait(false);
             ReportProgress(
                 policy.Progress,
                 record.Reference.Name,
@@ -1711,6 +2344,11 @@ public sealed class FhirPackageManager :
                 .ConfigureAwait(false);
         }
 
+        record = await TryIndexInstalledPackageAsync(
+                record,
+                request.Policy.Progress,
+                cancellationToken)
+            .ConfigureAwait(false);
         ReportProgress(
             request.Policy.Progress,
             cacheReference.Name,

@@ -148,6 +148,51 @@ public class MemoryResourceCache
     }
 
     /// <summary>
+    /// Removes one cached entry.
+    /// </summary>
+    /// <param name="key">The cache key to remove.</param>
+    /// <returns><c>true</c> when an entry was removed; otherwise, <c>false</c>.</returns>
+    public bool Remove(string key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+
+        lock (_lock)
+        {
+            if (!_map.Remove(
+                    key,
+                    out LinkedListNode<CacheEntry>? node))
+            {
+                return false;
+            }
+
+            _lruList.Remove(node);
+            return true;
+        }
+    }
+
+    internal int RemoveByPrefix(string prefix)
+    {
+        ArgumentNullException.ThrowIfNull(prefix);
+
+        lock (_lock)
+        {
+            List<string> matchingKeys = _map.Keys
+                .Where(key => key.StartsWith(
+                    prefix,
+                    StringComparison.Ordinal))
+                .ToList();
+            foreach (string key in matchingKeys)
+            {
+                LinkedListNode<CacheEntry> node = _map[key];
+                _map.Remove(key);
+                _lruList.Remove(node);
+            }
+
+            return matchingKeys.Count;
+        }
+    }
+
+    /// <summary>
     /// Removes all entries from the cache.
     /// </summary>
     public void Clear()

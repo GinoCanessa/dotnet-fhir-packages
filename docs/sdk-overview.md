@@ -37,7 +37,9 @@ dotnet add package FhirPkg
 ### Standalone Usage
 
 ```csharp
+using System.Text.Json.Nodes;
 using FhirPkg;
+using FhirPkg.Indexing;
 
 // Create a manager with default options
 using var manager = new FhirPackageManager();
@@ -66,6 +68,14 @@ var entries = await manager.SearchAsync(
 // Resolve without downloading
 var resolved = await manager.ResolveAsync("hl7.fhir.us.core#latest");
 Console.WriteLine($"Resolved to {resolved?.Reference.Version} at {resolved?.TarballUri}");
+
+// Search and read resources from cached packages
+ResourceInfo? profile = await manager.FindByCanonicalUrlAsync(
+    "http://hl7.org/fhir/StructureDefinition/Patient",
+    "hl7.fhir.r4.core#4.0.1");
+JsonNode? resource = profile is null
+    ? null
+    : await manager.ReadResourceAsync(profile);
 ```
 
 When dependency installation is requested, a failed child makes the aggregate
@@ -112,8 +122,8 @@ var manager = provider.GetRequiredService<IFhirPackageManager>();
 | `IVersionResolver` | `VersionResolver` |
 | `IDependencyResolver` | `DependencyResolver` |
 | `IPackageIndexer` | `PackageIndexer` |
-| `MemoryResourceCache` | Singleton (if `ResourceCacheSize > 0`) |
 | `IFhirPackageManager` | `FhirPackageManager` |
+| `IFhirPackageResourceManager` | Same `FhirPackageManager` singleton |
 
 ### Restore from a Project Manifest
 
@@ -177,7 +187,23 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 The **`IFhirPackageManager`** interface is the primary entry point. It
 orchestrates the registry client chain, version resolver, dependency resolver,
 cache, and indexer to provide high-level workflows (install, restore, search,
-publish).
+publish). Additive extension methods expose resource indexing, lookup, and read
+operations without changing the original interface contract.
+
+The concrete manager also implements **`IFhirPackageResourceManager`**. New
+installs are indexed eagerly, while searches lazily generate any missing
+relevant indexes. Valid schema-v2 indexes are loaded from disk after restart;
+generated indexes are atomically persisted under the package identity lease
+before registration. Explicit and lazy indexing failures propagate and can be
+retried. Eager indexing failures are logged without changing installation
+success.
+
+`ReadResourceAsync` returns `JsonNode` and caches parsed resources by canonical
+package identity plus normalized contained path. Set `ResourceCacheSize` to
+zero to bypass memory caching. Custom package caches without generation-aware
+reads also bypass parsed-resource caching. Package overwrite, repair, removal,
+force reindex, and cache clean operations invalidate the affected resource
+state.
 
 ## Next Steps
 

@@ -217,6 +217,12 @@ public static class ServiceCollectionExtensions
                 PackageInstallStage.PolicyValidation,
                 "The configured package manager does not support hardened installation sources."));
 
+        services.TryAddSingleton<IFhirPackageResourceManager>(sp =>
+            sp.GetRequiredService<IFhirPackageManager>()
+                as IFhirPackageResourceManager
+            ?? throw new InvalidOperationException(
+                "The configured package manager does not support resource indexing."));
+
         return services;
     }
 }

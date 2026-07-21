@@ -1,7 +1,9 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using FhirPkg.Cache;
+using FhirPkg.Indexing;
 using FhirPkg.Installation;
 using FhirPkg.Models;
 
@@ -49,6 +51,10 @@ internal static class Program
                 "manager-install" => await ManagerInstallAsync(
                         arguments,
                         contentionObserver,
+                        cancellationSource.Token)
+                    .ConfigureAwait(false),
+                "manager-find" => await ManagerFindAsync(
+                        arguments,
                         cancellationSource.Token)
                     .ConfigureAwait(false),
                 "import" => await ImportAsync(
@@ -223,6 +229,50 @@ internal static class Program
         return HostResult.FromRecord(record, source.BytesRead);
     }
 
+    private static async Task<HostResult> ManagerFindAsync(
+        HostArguments arguments,
+        CancellationToken cancellationToken)
+    {
+        string canonicalUrl =
+            arguments.CanonicalUrl
+            ?? throw new ArgumentException(
+                "--canonical is required for manager-find.");
+        using FhirPackageManager manager = new(
+            new FhirPackageManagerOptions
+            {
+                CachePath = arguments.CachePath,
+                IncludeCiBuilds = false,
+                IncludeHl7WebsiteFallback = false,
+                Registries = [],
+            });
+        ResourceInfo? resource =
+            await manager.FindByCanonicalUrlAsync(
+                    canonicalUrl,
+                    arguments.PackageScope,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        JsonNode? parsed = resource is null
+            ? null
+            : await manager.ReadResourceAsync(
+                    resource,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        return new HostResult
+        {
+            Success = true,
+            ResourceFound = resource is not null,
+            ResourceId = resource?.Id,
+            ResourcePackage =
+                resource?.PackageName,
+            ResourceVersion =
+                resource?.PackageVersion,
+            ResourcePath =
+                resource?.FilePath,
+            ParsedResourceId =
+                parsed?["id"]?.GetValue<string>(),
+        };
+    }
+
     private static async Task<HostResult> RemoveAsync(
         DiskPackageCache cache,
         HostArguments arguments,
@@ -313,6 +363,8 @@ internal sealed record HostArguments
     internal string? ArchivePath { get; init; }
     internal string? PackageName { get; init; }
     internal string? PackageVersion { get; init; }
+    internal string? PackageScope { get; init; }
+    internal string? CanonicalUrl { get; init; }
     internal string? CounterPath { get; init; }
     internal string? BarrierPath { get; init; }
     internal string? ReleasePath { get; init; }
@@ -373,6 +425,8 @@ internal sealed record HostArguments
             ArchivePath = GetOptional(values, "archive"),
             PackageName = GetOptional(values, "name"),
             PackageVersion = GetOptional(values, "version"),
+            PackageScope = GetOptional(values, "scope"),
+            CanonicalUrl = GetOptional(values, "canonical"),
             CounterPath = GetOptional(values, "counter"),
             BarrierPath = GetOptional(values, "barrier"),
             ReleasePath = GetOptional(values, "release"),
@@ -643,6 +697,12 @@ internal sealed record HostResult
     public PackageInstallErrorCode? ErrorCode { get; init; }
     public PackageInstallStage? ErrorStage { get; init; }
     public string? ErrorMessage { get; init; }
+    public bool? ResourceFound { get; init; }
+    public string? ResourceId { get; init; }
+    public string? ResourcePackage { get; init; }
+    public string? ResourceVersion { get; init; }
+    public string? ResourcePath { get; init; }
+    public string? ParsedResourceId { get; init; }
 
     internal static HostResult FromRecord(
         PackageRecord record,
