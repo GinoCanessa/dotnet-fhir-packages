@@ -909,6 +909,478 @@ public class FhirPackageManagerTests
         capturedOptions!.OverwriteExisting.ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData("current")]
+    [InlineData("current$main")]
+    public async Task InstallManyAsync_CurrentFirstInstallReportsInstalled(
+        string alias)
+    {
+        PackageReference aliasReference =
+            new PackageReference("example.package", alias);
+        PackageRecord installedRecord = CreateAliasPackageRecord(
+            "example.package",
+            alias,
+            "2.0.0",
+            "20260721");
+        ResolvedDirective resolvedDirective = new()
+        {
+            Reference =
+                new PackageReference("example.package", "2.0.0"),
+            TarballUri =
+                new Uri("https://example.test/example.package.tgz")
+        };
+        SetupMutableCiScenario(
+            alias,
+            cachedRecord: null,
+            resolvedDirective,
+            installedRecord,
+            new PackageCacheInstallOutcome(
+                PackageCacheInstallEffect.Created,
+                null));
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results =
+            await manager.InstallManyAsync(
+                [$"example.package#{alias}"],
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+        PackageInstallResult result = results.ShouldHaveSingleItem();
+        AssertMutableCiResult(
+            result,
+            PackageInstallDisposition.Installed,
+            previousManifestDate: null,
+            manifestDate: "20260721");
+        _registryMock.Verify(
+            registry => registry.DownloadAsync(
+                resolvedDirective,
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        _cacheMock.Verify(
+            cache => cache.InstallAsync(
+                aliasReference,
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Theory]
+    [InlineData("current")]
+    [InlineData("current$main")]
+    public async Task InstallManyAsync_CurrentNewerBuildReportsUpdated(
+        string alias)
+    {
+        PackageRecord cachedRecord = CreateAliasPackageRecord(
+            "example.package",
+            alias,
+            "1.0.0",
+            "20260720");
+        PackageRecord installedRecord = CreateAliasPackageRecord(
+            "example.package",
+            alias,
+            "2.0.0",
+            "20260721");
+        ResolvedDirective resolvedDirective = new()
+        {
+            Reference =
+                new PackageReference("example.package", "2.0.0"),
+            TarballUri =
+                new Uri("https://example.test/example.package.tgz")
+        };
+        SetupMutableCiScenario(
+            alias,
+            cachedRecord,
+            resolvedDirective,
+            installedRecord,
+            new PackageCacheInstallOutcome(
+                PackageCacheInstallEffect.Replaced,
+                "20260720"));
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results =
+            await manager.InstallManyAsync(
+                [$"example.package#{alias}"],
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+        AssertMutableCiResult(
+            results.ShouldHaveSingleItem(),
+            PackageInstallDisposition.Updated,
+            "20260720",
+            "20260721");
+    }
+
+    [Theory]
+    [InlineData("current")]
+    [InlineData("current$main")]
+    public async Task InstallManyAsync_CurrentSourceMetadataMatchReportsAlreadyCurrent(
+        string alias)
+    {
+        DateTime publicationDate = new(
+            2026,
+            7,
+            21,
+            10,
+            0,
+            0,
+            DateTimeKind.Utc);
+        PackageReference aliasReference =
+            new PackageReference("example.package", alias);
+        PackageRecord cachedRecord = CreateAliasPackageRecord(
+            "example.package",
+            alias,
+            "2.0.0",
+            "20260721");
+        ResolvedDirective resolvedDirective = new()
+        {
+            Reference =
+                new PackageReference("example.package", "2.0.0"),
+            TarballUri =
+                new Uri("https://example.test/example.package.tgz"),
+            PublicationDate = publicationDate
+        };
+        CacheMetadata metadata = new()
+        {
+            Packages =
+                new Dictionary<string, CacheMetadataEntry>
+                {
+                    [PackageCacheKey.Create(aliasReference).MetadataKey] =
+                        new CacheMetadataEntry
+                        {
+                            DownloadDateTime = publicationDate,
+                            SourcePublicationDate =
+                                new DateTimeOffset(publicationDate)
+                        }
+                }
+        };
+        SetupMutableCiScenario(
+            alias,
+            cachedRecord,
+            resolvedDirective,
+            installedRecord: null,
+            installOutcome: null,
+            metadata);
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results =
+            await manager.InstallManyAsync(
+                [$"example.package#{alias}"],
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+        AssertMutableCiResult(
+            results.ShouldHaveSingleItem(),
+            PackageInstallDisposition.AlreadyCurrent,
+            "20260721",
+            "20260721");
+        _registryMock.Verify(
+            registry => registry.DownloadAsync(
+                It.IsAny<ResolvedDirective>(),
+                It.IsAny<CancellationToken>()),
+            Times.Never);
+        _cacheMock.Verify(
+            cache => cache.InstallAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Theory]
+    [InlineData("current")]
+    [InlineData("current$main")]
+    public async Task InstallManyAsync_CurrentMatchingArchiveReportsAlreadyCurrent(
+        string alias)
+    {
+        PackageReference aliasReference =
+            new PackageReference("example.package", alias);
+        PackageRecord cachedRecord = CreateAliasPackageRecord(
+            "example.package",
+            alias,
+            "2.0.0",
+            "20260721");
+        ResolvedDirective resolvedDirective = new()
+        {
+            Reference =
+                new PackageReference("example.package", "2.0.0"),
+            TarballUri =
+                new Uri("https://example.test/example.package.tgz")
+        };
+        SetupMutableCiScenario(
+            alias,
+            cachedRecord,
+            resolvedDirective,
+            cachedRecord,
+            new PackageCacheInstallOutcome(
+                PackageCacheInstallEffect.Unchanged,
+                "20260721"));
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results =
+            await manager.InstallManyAsync(
+                [$"example.package#{alias}"],
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+        AssertMutableCiResult(
+            results.ShouldHaveSingleItem(),
+            PackageInstallDisposition.AlreadyCurrent,
+            "20260721",
+            "20260721");
+        _cacheMock.Verify(
+            cache => cache.InstallAsync(
+                aliasReference,
+                It.IsAny<Stream>(),
+                It.Is<InstallCacheOptions?>(
+                    options =>
+                        options != null
+                        && options.SkipIfArchiveUnchanged),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Theory]
+    [InlineData("current")]
+    [InlineData("current$main")]
+    public async Task InstallManyAsync_CurrentOverwriteSameArchiveReportsRefreshed(
+        string alias)
+    {
+        PackageRecord cachedRecord = CreateAliasPackageRecord(
+            "example.package",
+            alias,
+            "2.0.0",
+            "20260721");
+        ResolvedDirective resolvedDirective = new()
+        {
+            Reference =
+                new PackageReference("example.package", "2.0.0"),
+            TarballUri =
+                new Uri("https://example.test/example.package.tgz")
+        };
+        SetupMutableCiScenario(
+            alias,
+            cachedRecord,
+            resolvedDirective,
+            cachedRecord,
+            new PackageCacheInstallOutcome(
+                PackageCacheInstallEffect.Unchanged,
+                "20260721"));
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results =
+            await manager.InstallManyAsync(
+                [$"example.package#{alias}"],
+                new InstallOptions { OverwriteExisting = true },
+                TestContext.Current.CancellationToken);
+
+        AssertMutableCiResult(
+            results.ShouldHaveSingleItem(),
+            PackageInstallDisposition.Refreshed,
+            "20260721",
+            "20260721");
+    }
+
+    [Fact]
+    public async Task InstallManyAsync_CurrentReplacedArchiveWithEqualDatesReportsUpdated()
+    {
+        PackageRecord cachedRecord = CreateAliasPackageRecord(
+            "example.package",
+            "current",
+            "1.0.0",
+            "20260721");
+        PackageRecord installedRecord = CreateAliasPackageRecord(
+            "example.package",
+            "current",
+            "2.0.0",
+            "20260721");
+        ResolvedDirective resolvedDirective = new()
+        {
+            Reference =
+                new PackageReference("example.package", "2.0.0"),
+            TarballUri =
+                new Uri("https://example.test/example.package.tgz")
+        };
+        SetupMutableCiScenario(
+            "current",
+            cachedRecord,
+            resolvedDirective,
+            installedRecord,
+            new PackageCacheInstallOutcome(
+                PackageCacheInstallEffect.Replaced,
+                "20260721"));
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results =
+            await manager.InstallManyAsync(
+                ["example.package#current"],
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+        AssertMutableCiResult(
+            results.ShouldHaveSingleItem(),
+            PackageInstallDisposition.Updated,
+            "20260721",
+            "20260721");
+    }
+
+    [Fact]
+    public async Task InstallManyAsync_CurrentReplacedArchiveWithoutDatesReportsUpdated()
+    {
+        PackageRecord cachedRecord = CreateAliasPackageRecord(
+            "example.package",
+            "current",
+            "1.0.0");
+        PackageRecord installedRecord = CreateAliasPackageRecord(
+            "example.package",
+            "current",
+            "2.0.0");
+        ResolvedDirective resolvedDirective = new()
+        {
+            Reference =
+                new PackageReference("example.package", "2.0.0"),
+            TarballUri =
+                new Uri("https://example.test/example.package.tgz")
+        };
+        SetupMutableCiScenario(
+            "current",
+            cachedRecord,
+            resolvedDirective,
+            installedRecord,
+            new PackageCacheInstallOutcome(
+                PackageCacheInstallEffect.Replaced,
+                null));
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results =
+            await manager.InstallManyAsync(
+                ["example.package#current"],
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+        AssertMutableCiResult(
+            results.ShouldHaveSingleItem(),
+            PackageInstallDisposition.Updated,
+            previousManifestDate: null,
+            manifestDate: null);
+    }
+
+    [Fact]
+    public async Task InstallManyAsync_CurrentUnknownCacheOutcomeLeavesDispositionNull()
+    {
+        PackageRecord installedRecord = CreateAliasPackageRecord(
+            "example.package",
+            "current",
+            "2.0.0",
+            "20260721");
+        ResolvedDirective resolvedDirective = new()
+        {
+            Reference =
+                new PackageReference("example.package", "2.0.0"),
+            TarballUri =
+                new Uri("https://example.test/example.package.tgz")
+        };
+        SetupMutableCiScenario(
+            "current",
+            cachedRecord: null,
+            resolvedDirective,
+            installedRecord,
+            PackageCacheInstallOutcome.Unknown);
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results =
+            await manager.InstallManyAsync(
+                ["example.package#current"],
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+        PackageInstallResult result = results.ShouldHaveSingleItem();
+        result.Status.ShouldBe(PackageInstallStatus.Installed);
+        result.Disposition.ShouldBeNull();
+        result.PreviousManifestDate.ShouldBeNull();
+        result.ManifestDate.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData("current")]
+    [InlineData("current$main")]
+    public async Task InstallManyAsync_LockedCurrentAliasReportsAlreadyCurrent(
+        string alias)
+    {
+        PackageReference aliasReference =
+            new PackageReference("example.package", alias);
+        PackageReference lockedReference =
+            new PackageReference("example.package", "2.0.0");
+        PackageRecord cachedRecord = CreateAliasPackageRecord(
+            "example.package",
+            alias,
+            "2.0.0",
+            "20260721");
+        _cacheMock.Setup(
+                cache => cache.IsInstalledAsync(
+                    aliasReference,
+                    It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _cacheMock.Setup(
+                cache => cache.GetPackageAsync(
+                    aliasReference,
+                    It.IsAny<CancellationToken>()))
+            .ReturnsAsync(cachedRecord);
+        using FhirPackageManager manager = CreateManager();
+
+        PackageInstallResult result = await InvokeInstallResultAsync(
+            manager,
+            $"example.package#{alias}",
+            lockedReference);
+
+        AssertMutableCiResult(
+            result,
+            PackageInstallDisposition.AlreadyCurrent,
+            "20260721",
+            "20260721");
+        _registryMock.Verify(
+            registry => registry.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task InstallManyAsync_ExactCachePathsKeepNullDisposition()
+    {
+        PackageReference reference =
+            new PackageReference("example.package", "1.0.0");
+        PackageRecord cachedRecord = CreatePackageRecord(
+            "example.package",
+            "1.0.0",
+            manifestDate: "20260721");
+        _cacheMock.Setup(
+                cache => cache.IsInstalledAsync(
+                    reference,
+                    It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _cacheMock.Setup(
+                cache => cache.GetPackageAsync(
+                    reference,
+                    It.IsAny<CancellationToken>()))
+            .ReturnsAsync(cachedRecord);
+        using FhirPackageManager manager = CreateManager();
+
+        IReadOnlyList<PackageInstallResult> results =
+            await manager.InstallManyAsync(
+                ["example.package#1.0.0"],
+                cancellationToken:
+                    TestContext.Current.CancellationToken);
+
+        PackageInstallResult result = results.ShouldHaveSingleItem();
+        result.Status.ShouldBe(PackageInstallStatus.Installed);
+        result.Disposition.ShouldBeNull();
+        result.PreviousManifestDate.ShouldBeNull();
+        result.ManifestDate.ShouldBeNull();
+    }
+
     [Fact]
     public async Task InstallAsync_DownloadFailure_ThrowsTypedFailure()
     {
@@ -4718,10 +5190,124 @@ public class FhirPackageManagerTests
         Directory.Exists(nonexistentPath).ShouldBeFalse();
     }
 
+    private void SetupMutableCiScenario(
+        string alias,
+        PackageRecord? cachedRecord,
+        ResolvedDirective resolvedDirective,
+        PackageRecord? installedRecord,
+        PackageCacheInstallOutcome? installOutcome,
+        CacheMetadata? metadata = null)
+    {
+        PackageReference aliasReference =
+            new PackageReference("example.package", alias);
+        _cacheMock.Setup(
+                cache => cache.IsInstalledAsync(
+                    aliasReference,
+                    It.IsAny<CancellationToken>()))
+            .ReturnsAsync(cachedRecord is not null);
+        if (cachedRecord is not null)
+        {
+            _cacheMock.Setup(
+                    cache => cache.GetPackageAsync(
+                        aliasReference,
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(cachedRecord);
+            _cacheMock.Setup(
+                    cache => cache.GetMetadataAsync(
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(metadata ?? new CacheMetadata());
+        }
+
+        _registryMock.Setup(
+                registry => registry.ResolveAsync(
+                    It.Is<PackageDirective>(
+                        directive =>
+                            directive.PackageId == "example.package"
+                            && directive.RequestedVersion == alias),
+                    It.IsAny<VersionResolveOptions?>(),
+                    It.IsAny<CancellationToken>()))
+            .ReturnsAsync(resolvedDirective);
+        if (installedRecord is null)
+            return;
+
+        _registryMock.Setup(
+                registry => registry.DownloadAsync(
+                    resolvedDirective,
+                    It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PackageDownloadResult
+            {
+                Content = new MemoryStream([1, 2, 3]),
+                ContentType = "application/gzip"
+            });
+        _cacheMock.Setup(
+                cache => cache.InstallAsync(
+                    aliasReference,
+                    It.IsAny<Stream>(),
+                    It.IsAny<InstallCacheOptions?>(),
+                    It.IsAny<CancellationToken>()))
+            .Callback<
+                PackageReference,
+                Stream,
+                InstallCacheOptions?,
+                CancellationToken>(
+                (_, _, options, _) =>
+                {
+                    if (installOutcome is not null)
+                        options!.InstallOutcome = installOutcome;
+                })
+            .ReturnsAsync(installedRecord);
+    }
+
+    private static void AssertMutableCiResult(
+        PackageInstallResult result,
+        PackageInstallDisposition disposition,
+        string? previousManifestDate,
+        string? manifestDate)
+    {
+        result.Status.ShouldBe(PackageInstallStatus.Installed);
+        result.Disposition.ShouldBe(disposition);
+        result.PreviousManifestDate.ShouldBe(previousManifestDate);
+        result.ManifestDate.ShouldBe(manifestDate);
+    }
+
+    private static async Task<PackageInstallResult> InvokeInstallResultAsync(
+        FhirPackageManager manager,
+        string directive,
+        PackageReference expectedResolvedReference)
+    {
+        FhirPackageManagerOptions managerOptions = new();
+        ResolvedPackageInstallPolicy policy =
+            ResolvedPackageInstallPolicy.Resolve(
+                managerOptions,
+                PackageInstallLimits.ResolveManager(
+                    managerOptions.InstallLimits),
+                installOptions: null);
+        MethodInfo method = typeof(FhirPackageManager).GetMethod(
+                "InstallResultAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException(
+                "InstallResultAsync was not found.");
+        object? invocation = method.Invoke(
+            manager,
+            [
+                directive,
+                policy,
+                TestContext.Current.CancellationToken,
+                true,
+                expectedResolvedReference
+            ]);
+        Task<PackageInstallResult> task =
+            invocation as Task<PackageInstallResult>
+            ?? throw new InvalidOperationException(
+                "InstallResultAsync returned an unexpected value.");
+        return await task;
+    }
+
     private static PackageRecord CreatePackageRecord(
         string name,
         string version,
-        Dictionary<string, string>? dependencies = null) =>
+        Dictionary<string, string>? dependencies = null,
+        string? manifestDate = null) =>
         new PackageRecord
         {
             Reference = new PackageReference(name, version),
@@ -4731,14 +5317,16 @@ public class FhirPackageManagerTests
             {
                 Name = name,
                 Version = version,
-                Dependencies = dependencies
+                Dependencies = dependencies,
+                Date = manifestDate
             }
         };
 
     private static PackageRecord CreateAliasPackageRecord(
         string name,
         string alias,
-        string manifestVersion) =>
+        string manifestVersion,
+        string? manifestDate = null) =>
         new()
         {
             Reference = new PackageReference(name, alias),
@@ -4748,6 +5336,7 @@ public class FhirPackageManagerTests
             {
                 Name = name,
                 Version = manifestVersion,
+                Date = manifestDate
             },
         };
 

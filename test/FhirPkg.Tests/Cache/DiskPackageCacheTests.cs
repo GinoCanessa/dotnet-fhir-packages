@@ -121,6 +121,188 @@ public class DiskPackageCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task InstallAsync_FirstCommitReportsCreatedOutcome()
+    {
+        using DiskPackageCache cache = new DiskPackageCache(_tempDir);
+        PackageReference reference =
+            new PackageReference("test.package", "current");
+        InstallCacheOptions options = new()
+        {
+            VerifyChecksum = false
+        };
+        using MemoryStream tarball = CreateTestTarball(
+            """{"name":"test.package","version":"1.0.0","date":"20260720"}""");
+
+        PackageRecord record = await cache.InstallAsync(
+            reference,
+            tarball,
+            options,
+            TestContext.Current.CancellationToken);
+
+        record.Manifest.Date.ShouldBe("20260720");
+        options.InstallOutcome.Effect.ShouldBe(
+            PackageCacheInstallEffect.Created);
+        options.InstallOutcome.PreviousManifestDate.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task InstallAsync_OverwriteReportsReplacedOutcomeWithPreviousDate()
+    {
+        using DiskPackageCache cache = new DiskPackageCache(_tempDir);
+        PackageReference reference =
+            new PackageReference("test.package", "current");
+        using MemoryStream original = CreateTestTarball(
+            """{"name":"test.package","version":"1.0.0","date":"20260720"}""");
+        await cache.InstallAsync(
+            reference,
+            original,
+            new InstallCacheOptions { VerifyChecksum = false },
+            TestContext.Current.CancellationToken);
+        InstallCacheOptions replacementOptions = new()
+        {
+            VerifyChecksum = false,
+            OverwriteExisting = true
+        };
+        using MemoryStream replacement = CreateTestTarball(
+            """{"name":"test.package","version":"2.0.0","date":"20260721"}""");
+
+        PackageRecord record = await cache.InstallAsync(
+            reference,
+            replacement,
+            replacementOptions,
+            TestContext.Current.CancellationToken);
+
+        record.Manifest.Date.ShouldBe("20260721");
+        replacementOptions.InstallOutcome.Effect.ShouldBe(
+            PackageCacheInstallEffect.Replaced);
+        replacementOptions.InstallOutcome.PreviousManifestDate.ShouldBe(
+            "20260720");
+    }
+
+    [Fact]
+    public async Task InstallAsync_MatchingArchiveReportsUnchangedOutcome()
+    {
+        using DiskPackageCache cache = new DiskPackageCache(_tempDir);
+        PackageReference reference =
+            new PackageReference("test.package", "current");
+        byte[] archive = CreateTestTarball(
+            """{"name":"test.package","version":"1.0.0","date":"20260720"}""")
+            .ToArray();
+        using MemoryStream original = new MemoryStream(archive);
+        await cache.InstallAsync(
+            reference,
+            original,
+            new InstallCacheOptions { VerifyChecksum = false },
+            TestContext.Current.CancellationToken);
+        InstallCacheOptions refreshOptions = new()
+        {
+            VerifyChecksum = false,
+            OverwriteExisting = true,
+            SkipIfArchiveUnchanged = true
+        };
+        using MemoryStream refresh = new MemoryStream(archive);
+
+        PackageRecord record = await cache.InstallAsync(
+            reference,
+            refresh,
+            refreshOptions,
+            TestContext.Current.CancellationToken);
+
+        record.Manifest.Date.ShouldBe("20260720");
+        refreshOptions.InstallOutcome.Effect.ShouldBe(
+            PackageCacheInstallEffect.Unchanged);
+        refreshOptions.InstallOutcome.PreviousManifestDate.ShouldBe(
+            "20260720");
+    }
+
+    [Fact]
+    public async Task InstallAsync_FailureLeavesUnknownOutcome()
+    {
+        using DiskPackageCache cache = new DiskPackageCache(_tempDir);
+        PackageReference reference =
+            new PackageReference("test.package", "current");
+        InstallCacheOptions options = new()
+        {
+            VerifyChecksum = false
+        };
+        using MemoryStream original = CreateTestTarball(
+            """{"name":"test.package","version":"1.0.0","date":"20260720"}""");
+        await cache.InstallAsync(
+            reference,
+            original,
+            options,
+            TestContext.Current.CancellationToken);
+        options.InstallOutcome.Effect.ShouldBe(
+            PackageCacheInstallEffect.Created);
+        options.OverwriteExisting = true;
+        using MemoryStream invalidReplacement = CreateTarball(
+            ("package/readme.txt", "missing manifest"));
+
+        await Should.ThrowAsync<PackageInstallException>(
+            () => cache.InstallAsync(
+                reference,
+                invalidReplacement,
+                options,
+                TestContext.Current.CancellationToken));
+
+        options.InstallOutcome.Effect.ShouldBe(
+            PackageCacheInstallEffect.Unknown);
+        options.InstallOutcome.PreviousManifestDate.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task InstallAsync_ConcurrentSameAliasReportsOneCreateAndOneUnchanged()
+    {
+        using DiskPackageCache cache = new DiskPackageCache(_tempDir);
+        PackageReference reference =
+            new PackageReference("test.package", "current");
+        byte[] archive = CreateTestTarball(
+            """{"name":"test.package","version":"1.0.0","date":"20260721"}""")
+            .ToArray();
+        InstallCacheOptions firstOptions = new()
+        {
+            VerifyChecksum = false
+        };
+        InstallCacheOptions secondOptions = new()
+        {
+            VerifyChecksum = false
+        };
+        using MemoryStream firstArchive = new MemoryStream(archive);
+        using MemoryStream secondArchive = new MemoryStream(archive);
+
+        Task<PackageRecord> firstInstall = cache.InstallAsync(
+            reference,
+            firstArchive,
+            firstOptions,
+            TestContext.Current.CancellationToken);
+        Task<PackageRecord> secondInstall = cache.InstallAsync(
+            reference,
+            secondArchive,
+            secondOptions,
+            TestContext.Current.CancellationToken);
+        await Task.WhenAll(firstInstall, secondInstall);
+
+        PackageCacheInstallOutcome[] outcomes =
+            [firstOptions.InstallOutcome, secondOptions.InstallOutcome];
+        outcomes.Count(
+            outcome =>
+                outcome.Effect == PackageCacheInstallEffect.Created)
+            .ShouldBe(1);
+        outcomes.Count(
+            outcome =>
+                outcome.Effect == PackageCacheInstallEffect.Unchanged)
+            .ShouldBe(1);
+        outcomes.Single(
+                outcome =>
+                    outcome.Effect == PackageCacheInstallEffect.Created)
+            .PreviousManifestDate.ShouldBeNull();
+        outcomes.Single(
+                outcome =>
+                    outcome.Effect == PackageCacheInstallEffect.Unchanged)
+            .PreviousManifestDate.ShouldBe("20260721");
+    }
+
+    [Fact]
     public async Task InstallAsync_ScopedReference_UsesCanonicalTwoSegmentPath()
     {
         using DiskPackageCache cache = new DiskPackageCache(_tempDir);

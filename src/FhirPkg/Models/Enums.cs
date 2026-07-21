@@ -142,6 +142,28 @@ public enum PackageInstallStatus
 }
 
 /// <summary>
+/// Refines the outcome of a successful mutable CI package installation.
+/// </summary>
+/// <remarks>
+/// All values retain <see cref="PackageInstallStatus.Installed"/> as the
+/// compatibility status.
+/// </remarks>
+public enum PackageInstallDisposition
+{
+    /// <summary>The mutable CI package was installed for the first time.</summary>
+    Installed,
+
+    /// <summary>The cached mutable CI package was replaced.</summary>
+    Updated,
+
+    /// <summary>The cached mutable CI package was already current.</summary>
+    AlreadyCurrent,
+
+    /// <summary>An explicit refresh confirmed that the cached content was unchanged.</summary>
+    Refreshed
+}
+
+/// <summary>
 /// Identifies the type of package registry.
 /// </summary>
 public enum RegistryType

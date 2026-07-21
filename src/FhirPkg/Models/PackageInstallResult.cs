@@ -21,6 +21,24 @@ public record PackageInstallResult
     /// <summary>The result status of the installation.</summary>
     public PackageInstallStatus Status { get; init; }
 
+    /// <summary>
+    /// Refines a successful mutable CI install. Failures, non-CI installs, and
+    /// caches that cannot report an outcome leave this value <c>null</c>.
+    /// </summary>
+    public PackageInstallDisposition? Disposition { get; init; }
+
+    /// <summary>
+    /// Raw <c>package.json</c> date from the mutable CI package that was in the
+    /// cache before the operation, when available.
+    /// </summary>
+    public string? PreviousManifestDate { get; init; }
+
+    /// <summary>
+    /// Raw <c>package.json</c> date from the resulting mutable CI package, when
+    /// available.
+    /// </summary>
+    public string? ManifestDate { get; init; }
+
     /// <summary>Error message if the installation failed.</summary>
     public string? ErrorMessage { get; init; }
 

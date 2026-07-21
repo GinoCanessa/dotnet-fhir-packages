@@ -6,6 +6,22 @@ using FhirPkg.Models;
 
 namespace FhirPkg.Cache;
 
+internal enum PackageCacheInstallEffect
+{
+    Unknown,
+    Created,
+    Replaced,
+    Unchanged
+}
+
+internal sealed record PackageCacheInstallOutcome(
+    PackageCacheInstallEffect Effect,
+    string? PreviousManifestDate)
+{
+    internal static PackageCacheInstallOutcome Unknown { get; } =
+        new(PackageCacheInstallEffect.Unknown, null);
+}
+
 /// <summary>
 /// Interface for the local FHIR package cache (~/.fhir/packages).
 /// Provides operations for installing, querying, and removing cached FHIR packages.
@@ -226,6 +242,9 @@ public class InstallCacheOptions
     internal PackageContentAcquisition? AcquiredContent { get; set; }
 
     internal PackageIdentityExpectation? IdentityExpectation { get; set; }
+
+    internal PackageCacheInstallOutcome InstallOutcome { get; set; } =
+        PackageCacheInstallOutcome.Unknown;
 
     /// <summary>
     /// Controls whether an invalid existing cache target is repaired or

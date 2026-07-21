@@ -363,8 +363,13 @@ public sealed class FhirPackageManager :
             options);
         _ = RequireHardenedCache();
 
-        return await InstallDirectiveAsync(directive, policy, cancellationToken)
-            .ConfigureAwait(false);
+        PackageInstallExecutionResult? executionResult =
+            await InstallDirectiveAsync(
+                    directive,
+                    policy,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        return executionResult?.Package;
     }
 
     /// <inheritdoc />
@@ -1880,7 +1885,7 @@ public sealed class FhirPackageManager :
         }
     }
 
-    private async Task<PackageRecord?> InstallDirectiveAsync(
+    private async Task<PackageInstallExecutionResult?> InstallDirectiveAsync(
         string directive,
         ResolvedPackageInstallPolicy policy,
         CancellationToken cancellationToken,
@@ -1904,7 +1909,7 @@ public sealed class FhirPackageManager :
         }
     }
 
-    private async Task<PackageRecord?> InstallDirectiveCoreAsync(
+    private async Task<PackageInstallExecutionResult?> InstallDirectiveCoreAsync(
         string directive,
         ResolvedPackageInstallPolicy policy,
         CancellationToken cancellationToken,
@@ -1982,7 +1987,12 @@ public sealed class FhirPackageManager :
                         policy,
                         cancellationToken)
                     .ConfigureAwait(false);
-                return cachedRecord;
+                return cachedRecord is null
+                    ? null
+                    : new PackageInstallExecutionResult(
+                        cachedRecord,
+                        null,
+                        null);
             }
 
             _logger.LogWarning(
@@ -2028,7 +2038,10 @@ public sealed class FhirPackageManager :
                             policy,
                             cancellationToken)
                         .ConfigureAwait(false);
-                    return cachedRecord;
+                    return new PackageInstallExecutionResult(
+                        cachedRecord,
+                        PackageInstallDisposition.AlreadyCurrent,
+                        cachedRecord.Manifest.Date);
                 }
             }
         }
@@ -2051,7 +2064,12 @@ public sealed class FhirPackageManager :
                         policy,
                         cancellationToken)
                     .ConfigureAwait(false);
-                return cachedRecord;
+                return cachedRecord is null
+                    ? null
+                    : new PackageInstallExecutionResult(
+                        cachedRecord,
+                        null,
+                        null);
             }
         }
 
@@ -2242,7 +2260,7 @@ public sealed class FhirPackageManager :
         }
     }
 
-    private async Task<PackageRecord> InstallResolvedAsync(
+    private async Task<PackageInstallExecutionResult> InstallResolvedAsync(
         PackageInstallRequest request,
         CancellationToken cancellationToken)
     {
@@ -2286,7 +2304,10 @@ public sealed class FhirPackageManager :
                 request.Policy.Progress,
                 cacheReference.Name,
                 PackageProgressPhase.Complete);
-            return cachedRecord;
+            return new PackageInstallExecutionResult(
+                cachedRecord,
+                null,
+                null);
         }
 
         DateTimeOffset? sourcePublicationDate = NormalizePublicationDate(resolved.PublicationDate);
@@ -2316,7 +2337,10 @@ public sealed class FhirPackageManager :
                     request.Policy.Progress,
                     cacheReference.Name,
                     PackageProgressPhase.Complete);
-                return cachedRecord;
+                return new PackageInstallExecutionResult(
+                    cachedRecord,
+                    PackageInstallDisposition.AlreadyCurrent,
+                    cachedRecord.Manifest.Date);
             }
         }
 
@@ -2425,7 +2449,30 @@ public sealed class FhirPackageManager :
             request.Policy.Progress,
             cacheReference.Name,
             PackageProgressPhase.Complete);
-        return record;
+        PackageInstallDisposition? disposition =
+            request.Freshness == PackageInstallFreshness.RefreshableAlias
+                ? installCacheOptions.InstallOutcome.Effect switch
+                {
+                    PackageCacheInstallEffect.Created =>
+                        PackageInstallDisposition.Installed,
+                    PackageCacheInstallEffect.Replaced =>
+                        PackageInstallDisposition.Updated,
+                    PackageCacheInstallEffect.Unchanged
+                        when request.Policy.OverwriteExisting =>
+                        PackageInstallDisposition.Refreshed,
+                    PackageCacheInstallEffect.Unchanged =>
+                        PackageInstallDisposition.AlreadyCurrent,
+                    _ => null
+                }
+                : null;
+        string? previousManifestDate =
+            disposition is null
+                ? null
+                : installCacheOptions.InstallOutcome.PreviousManifestDate;
+        return new PackageInstallExecutionResult(
+            record,
+            disposition,
+            previousManifestDate);
     }
 
     private async Task InstallCachedDependenciesIfRequestedAsync(
@@ -2470,10 +2517,27 @@ public sealed class FhirPackageManager :
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
 
-        int installed = results.Count(result => result.Status == PackageInstallStatus.Installed);
+        int installed = results.Count(
+            result =>
+                result.Status == PackageInstallStatus.Installed
+                && result.Disposition
+                    is null or PackageInstallDisposition.Installed);
+        int updated = results.Count(
+            result => result.Disposition == PackageInstallDisposition.Updated);
+        int alreadyCurrent = results.Count(
+            result =>
+                result.Disposition
+                    == PackageInstallDisposition.AlreadyCurrent);
+        int refreshed = results.Count(
+            result =>
+                result.Disposition == PackageInstallDisposition.Refreshed);
         _logger.LogInformation(
-            "InstallManyAsync completed: {Installed}/{Total} packages installed.",
+            "InstallManyAsync completed: {Installed} installed, {Updated} updated, " +
+            "{AlreadyCurrent} already current, {Refreshed} refreshed, {Total} total.",
             installed,
+            updated,
+            alreadyCurrent,
+            refreshed,
             directives.Count);
         return results;
     }
@@ -2487,19 +2551,27 @@ public sealed class FhirPackageManager :
     {
         try
         {
-            PackageRecord? record = await InstallDirectiveAsync(
+            PackageInstallExecutionResult? executionResult =
+                await InstallDirectiveAsync(
                     directive,
                     policy,
                     cancellationToken,
                     applyFixups,
                     expectedResolvedReference)
                 .ConfigureAwait(false);
-            return record is not null
+            return executionResult is not null
                 ? new PackageInstallResult
                 {
                     Directive = directive,
-                    Package = record,
-                    Status = PackageInstallStatus.Installed
+                    Package = executionResult.Package,
+                    Status = PackageInstallStatus.Installed,
+                    Disposition = executionResult.Disposition,
+                    PreviousManifestDate =
+                        executionResult.PreviousManifestDate,
+                    ManifestDate =
+                        executionResult.Disposition is null
+                            ? null
+                            : executionResult.Package.Manifest.Date
                 }
                 : new PackageInstallResult
                 {

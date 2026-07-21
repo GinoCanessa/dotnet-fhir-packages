@@ -47,6 +47,9 @@ public class PublicModelDefaultsTests
         closure.InstallOrderIsComplete.ShouldBeFalse();
         closure.IsComplete.ShouldBeTrue();
         installResult.DependencyFailures.ShouldBeEmpty();
+        installResult.Disposition.ShouldBeNull();
+        installResult.PreviousManifestDate.ShouldBeNull();
+        installResult.ManifestDate.ShouldBeNull();
         failure.RequestedVersions.ShouldBeEmpty();
         failure.RegistryFailures.ShouldBeEmpty();
         lockFile.SchemaVersion.ShouldBe(1);

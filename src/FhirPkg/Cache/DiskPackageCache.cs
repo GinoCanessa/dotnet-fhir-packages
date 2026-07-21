@@ -358,6 +358,7 @@ public class DiskPackageCache :
         }
 
         options ??= new InstallCacheOptions();
+        options.InstallOutcome = PackageCacheInstallOutcome.Unknown;
         if (!Enum.IsDefined(options.CorruptCacheBehavior))
         {
             throw new PackageInstallException(
@@ -406,12 +407,16 @@ public class DiskPackageCache :
             CacheMetadataEntry? existingEntry =
                 await _metadataStore.GetEntryAsync(cacheKey, ct)
                     .ConfigureAwait(false);
-            return await CreateRecordAsync(
+            PackageRecord existingRecord = await CreateRecordAsync(
                     cacheKey.DisplayReference,
                     initialInspection,
                     existingEntry,
                     ct)
                 .ConfigureAwait(false);
+            options.InstallOutcome = new PackageCacheInstallOutcome(
+                PackageCacheInstallEffect.Unchanged,
+                initialInspection.Manifest?.Date);
+            return existingRecord;
         }
 
         ThrowIfInstallCannotReplace(
@@ -484,12 +489,16 @@ public class DiskPackageCache :
                             mutation: null,
                             ct)
                         .ConfigureAwait(false);
-                    return await CreateRecordAsync(
+                    PackageRecord unchangedRecord = await CreateRecordAsync(
                             cacheKey.DisplayReference,
                             initialInspection,
                             refreshedEntry,
                             ct)
                         .ConfigureAwait(false);
+                    options.InstallOutcome = new PackageCacheInstallOutcome(
+                        PackageCacheInstallEffect.Unchanged,
+                        initialInspection.Manifest?.Date);
+                    return unchangedRecord;
                 }
             }
 
@@ -576,6 +585,8 @@ public class DiskPackageCache :
             };
 
             PackageCacheInspection committedInspection;
+            PackageCacheInstallEffect committedEffect;
+            string? previousManifestDate;
             await using (PackageCacheLease globalLease =
                 await _coordinator.AcquireGlobalAsync(ct)
                     .ConfigureAwait(false))
@@ -593,6 +604,11 @@ public class DiskPackageCache :
                     cacheKey,
                     currentInspection,
                     options);
+                committedEffect =
+                    currentInspection.State == PackageCacheInspectionState.Missing
+                        ? PackageCacheInstallEffect.Created
+                        : PackageCacheInstallEffect.Replaced;
+                previousManifestDate = currentInspection.Manifest?.Date;
                 PublishPackageInvalidatedIfPresent(
                     cacheKey,
                     currentInspection);
@@ -619,12 +635,16 @@ public class DiskPackageCache :
                 }
             }
 
-            return await CreateRecordAsync(
+            PackageRecord committedRecord = await CreateRecordAsync(
                     reference,
                     committedInspection,
                     entry,
                     ct)
                 .ConfigureAwait(false);
+            options.InstallOutcome = new PackageCacheInstallOutcome(
+                committedEffect,
+                previousManifestDate);
+            return committedRecord;
         }
         finally
         {
