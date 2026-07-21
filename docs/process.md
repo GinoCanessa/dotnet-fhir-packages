@@ -123,7 +123,8 @@ traffic is generated.
 ```
 
 `packages.ini` tracks installation time, package size, mutable-source
-publication time, and compressed archive SHA-256 while preserving unrelated
+publication time, compressed archive SHA-256, and an opaque per-generation
+content token (`package-content-generations`) while preserving unrelated
 sections.
 
 ### Mutable CI Outcome Classification
@@ -157,18 +158,25 @@ exact version by querying the **registry chain**.
 ### Registry Chain
 
 Resolution uses a **`RedundantRegistryClient`** that wraps multiple registry
-clients and queries them in priority order. The default chain is:
+clients. Listing and version resolution query the eligible sources **in
+parallel** (bounded by `MaxParallelRegistryQueries`) and merge their results by
+priority; tarball downloads fail over across sources in priority order. The
+default chain is:
 
 | Priority | Client | Endpoint | Purpose |
 |----------|--------|----------|---------|
 | 1 | `FhirNpmRegistryClient` | `packages.fhir.org` | Primary FHIR registry |
-| 2 | `FhirNpmRegistryClient` | `packages2.fhir.org` | Secondary / mirror |
+| 2 | `FhirNpmRegistryClient` | `packages2.fhir.org/packages` | Secondary / mirror |
 | 3 | `FhirCiBuildClient` | `build.fhir.org` | CI builds (if `IncludeCiBuilds` is true) |
 | 4 | `Hl7WebsiteClient` | `hl7.org/fhir` | Fallback for core packages (if `IncludeHl7WebsiteFallback` is true) |
 
-Custom or private registries can be prepended via
-`FhirPackageManagerOptions.Registries`. A standard `NpmRegistryClient` is also
-available for plain NPM registries.
+Configuring `FhirPackageManagerOptions.Registries` (or the CLI `--registry`
+flag / the `registries` array in `.fhir-pkg.json`) **replaces** the built-in
+`packages.fhir.org`/`packages2.fhir.org` primary and secondary registries with
+the supplied endpoints; the built-in pair is used only when `Registries` is
+empty. The CI build and HL7 website sources are still appended when
+`IncludeCiBuilds`/`IncludeHl7WebsiteFallback` are enabled. A standard
+`NpmRegistryClient` is also available for plain NPM registries.
 
 ### Fallback Behavior
 
@@ -247,12 +255,16 @@ incompatible release information are rejected.
 
 A successful resolution produces a **`ResolvedDirective`** containing:
 
-- `PackageReference` — the exact name and version.
+- `Reference` (a `PackageReference`) — the exact name and version.
 - `TarballUri` — the download URL.
 - `ShaSum` — the expected SHA-1 hash of the tarball (may be null).
+- `Sha256Sum` — the expected SHA-256 hash; preferred over `ShaSum` when the
+  registry supplies it (may be null).
 - `Integrity` — the source's Subresource Integrity value (may be null).
 - `SourceRegistry` — which registry provided the result.
 - `PublicationDate` — when the version was published.
+- `Dependencies` and `FhirVersions` — dependency and FHIR-version metadata from
+  the selected source candidate (may be null).
 
 After resolution, the cache is checked **again** with the now-exact version (the
 original directive may have been a wildcard or `latest`). If the exact version is

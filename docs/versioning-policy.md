@@ -13,7 +13,7 @@ includes:
 - positive HTTP timeout and redirect limits;
 - `MaxParallelRegistryQueries` of at least 1;
 - a non-negative resource-cache size;
-- defined cache, safe-mode, FHIR-release, and registry enum values;
+- defined cache, safe-mode, and registry enum values;
 - absolute HTTP/HTTPS registry URLs and trusted origins; and
 - well-formed, non-duplicate version fixups.
 

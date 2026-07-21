@@ -63,7 +63,7 @@ Building and testing locally requires the [.NET 8 SDK](https://dotnet.microsoft.
 
 | Package | Purpose |
 |---------|---------|
-| [xunit](https://www.nuget.org/packages/xunit) | Test framework |
+| [xunit.v3](https://www.nuget.org/packages/xunit.v3) | Test framework |
 | [xunit.runner.visualstudio](https://www.nuget.org/packages/xunit.runner.visualstudio) | VS / `dotnet test` integration |
 | [Microsoft.NET.Test.Sdk](https://www.nuget.org/packages/Microsoft.NET.Test.Sdk) | Test-host plumbing |
 | [Moq](https://www.nuget.org/packages/Moq) | Mocking (unit tests) |

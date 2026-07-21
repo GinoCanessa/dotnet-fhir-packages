@@ -81,7 +81,7 @@ hl7.fhir.us.core#current$main   # CI build for a branch
 | `--fhir-version <release>` | `-f` | `string` | — | Preferred FHIR release when a package publishes multiple versions. Accepted values: `R4`, `R4B`, `R5`, `R6`. |
 | `--pre-release` | — | `bool` | `true` | Include pre-release versions when resolving wildcards, ranges, or `latest`. |
 | `--no-pre-release` | — | `bool` | `false` | Exclude pre-release versions. Takes precedence over `--pre-release`. |
-| `--registry <url>` | `-r` | `string` | — | Query a custom registry URL in addition to the default registries. |
+| `--registry <url>` | `-r` | `string` | — | Query a custom registry URL first; replaces the built-in primary/secondary registries (CI build and HL7 fallback still apply). |
 | `--auth <value>` | — | `string` | — | Authorization header value for the custom registry (e.g., `"Bearer <token>"`). |
 | `--no-ci` | — | `bool` | `false` | Exclude the FHIR CI build registry from resolution. |
 | `--progress` | — | `bool` | `true` | Show a download progress indicator. |
@@ -746,7 +746,7 @@ the two files are never merged:
 | `httpTimeout` | `int` | HTTP timeout in seconds. |
 | `includeCiBuilds` | `bool` | Whether to include the CI build registry. |
 | `verifyChecksums` | `bool` | Whether to verify SHA-1 checksums on download. |
-| `registries` | `array` | Additional registry endpoints. |
+| `registries` | `array` | Registry endpoints that replace the built-in primary/secondary (CI/HL7 fallback still apply). |
 | `registries[].url` | `string` | Registry base URL. |
 | `registries[].type` | `string` | Registry type: `FhirNpm`, `FhirCiBuild`, `FhirHttp`, `Npm`. |
 | `registries[].auth` | `string` | Authorization header value. |

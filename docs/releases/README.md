@@ -41,7 +41,10 @@ The workflow enforces this dependency chain:
 5. `publish-nuget` runs only for a published GitHub Release event, after all
    nine qualification jobs pass. Merely pushing a tag cannot publish a NuGet
    package. The protected `nuget.org` environment and `GINOC_NUGET` secret
-   exist only on this final job.
+   exist only on this final job. After the primary push it polls NuGet.org
+   for the published `.nupkg` — retrying on transient `404`/`408`/`425`/`429`/
+   `5xx` responses — then verifies its repository signature and byte-compares
+   every non-signature entry against the candidate before pushing symbols.
 
 Each package-mode job restores `fhir-pkg-lib` from the downloaded candidate,
 checks its SHA-256 and SHA-512 values, rejects a source-project reference,
