@@ -33,4 +33,6 @@
     <InternalsVisibleTo Include="FhirPkg.IntegrationTests" />
   </ItemGroup>
 
+  <Import Project="..\common.targets" />
+
 </Project>

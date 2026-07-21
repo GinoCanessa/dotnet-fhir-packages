@@ -1,0 +1,86 @@
+<Project>
+
+  <!-- Forward slash so GetFullPath/Exists resolve on Unix CI runners too. -->
+  <PropertyGroup>
+    <_ChangelogPath>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../CHANGELOG.md'))</_ChangelogPath>
+  </PropertyGroup>
+
+  <!-- Make a CHANGELOG-only edit invalidate the incremental nuspec/pack. -->
+  <ItemGroup Condition="Exists('$(_ChangelogPath)')">
+    <NuGetPackInput Include="$(_ChangelogPath)" />
+  </ItemGroup>
+
+  <UsingTask TaskName="ExtractChangelogSection"
+             TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <ChangelogPath ParameterType="System.String" Required="true" />
+      <Version ParameterType="System.String" Required="true" />
+      <ReleaseNotes ParameterType="System.String" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        #pragma warning disable CS0162 // RoslynCodeTaskFactory appends a trailing return after this fragment.
+        ReleaseNotes = string.Empty;
+        if (!File.Exists(ChangelogPath)) { return true; }
+        string[] lines = File.ReadAllLines(ChangelogPath);
+        int start = -1;
+        // Pass 0: exact bracketed version token (avoids CalVer substring
+        // collisions like 2026.721.140 within [2026.721.1400]).
+        // Pass 1: fall back to the literal "## Current" heading.
+        for (int pass = 0; pass < 2 && start < 0; pass++)
+        {
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i];
+                if (!line.StartsWith("## ")) { continue; }
+                bool hit;
+                if (pass == 0)
+                {
+                    hit = false;
+                    if (!string.IsNullOrEmpty(Version))
+                    {
+                        int lb = line.IndexOf('[');
+                        int rb = lb >= 0 ? line.IndexOf(']', lb + 1) : -1;
+                        if (rb > lb)
+                        {
+                            string token = line.Substring(lb + 1, rb - lb - 1).Trim();
+                            hit = string.Equals(token, Version, StringComparison.Ordinal);
+                        }
+                    }
+                }
+                else
+                {
+                    hit = line.Trim().Equals("## Current", StringComparison.OrdinalIgnoreCase);
+                }
+                if (hit) { start = i; break; }
+            }
+        }
+        if (start < 0) { return true; }
+        StringBuilder sb = new StringBuilder();
+        for (int i = start + 1; i < lines.Length; i++)
+        {
+            if (lines[i].StartsWith("## ")) { break; }
+            sb.AppendLine(lines[i]);
+        }
+        ReleaseNotes = sb.ToString().Trim();
+        return true;
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="SetPackageReleaseNotesFromChangelog"
+          BeforeTargets="GenerateNuspec"
+          Condition="Exists('$(_ChangelogPath)')">
+    <ExtractChangelogSection ChangelogPath="$(_ChangelogPath)" Version="$(PackageVersion)">
+      <Output TaskParameter="ReleaseNotes" PropertyName="_ChangelogReleaseNotes" />
+    </ExtractChangelogSection>
+    <PropertyGroup>
+      <PackageReleaseNotes Condition="'$(_ChangelogReleaseNotes)' != ''">$(_ChangelogReleaseNotes)</PackageReleaseNotes>
+    </PropertyGroup>
+  </Target>
+
+</Project>

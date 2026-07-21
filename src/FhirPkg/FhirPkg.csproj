@@ -47,4 +47,6 @@
     <InternalsVisibleTo Include="FhirPkg.Cli" />
   </ItemGroup>
 
+  <Import Project="..\common.targets" />
+
 </Project>
