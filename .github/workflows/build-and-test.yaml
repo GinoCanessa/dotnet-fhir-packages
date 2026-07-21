@@ -21,6 +21,12 @@ on:
       - 'global.json'
       - '.github/scripts/**'
       - '.github/workflows/**'
+  workflow_call:
+    inputs:
+      commit_sha:
+        description: Full source commit to build and test
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -36,6 +42,29 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        if: ${{ inputs.commit_sha == '' }}
+
+      - uses: actions/checkout@v4
+        if: ${{ inputs.commit_sha != '' }}
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Verify exact source commit
+        if: ${{ inputs.commit_sha != '' }}
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
+        run: |
+          if ($env:EXPECTED_COMMIT -notmatch '^[0-9a-f]{40}$')
+          {
+            throw "Expected a full lowercase commit SHA, got '$env:EXPECTED_COMMIT'."
+          }
+
+          $actualCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $env:EXPECTED_COMMIT)
+          {
+            throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
+          }
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -74,6 +103,7 @@ jobs:
           dotnet run `
             --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
             --configuration Release `
+            --framework net10.0 `
             --no-build `
             -- `
             --validate-only true `
@@ -92,6 +122,29 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        if: ${{ inputs.commit_sha == '' }}
+
+      - uses: actions/checkout@v4
+        if: ${{ inputs.commit_sha != '' }}
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Verify exact source commit
+        if: ${{ inputs.commit_sha != '' }}
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
+        run: |
+          if ($env:EXPECTED_COMMIT -notmatch '^[0-9a-f]{40}$')
+          {
+            throw "Expected a full lowercase commit SHA, got '$env:EXPECTED_COMMIT'."
+          }
+
+          $actualCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $env:EXPECTED_COMMIT)
+          {
+            throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
+          }
 
       - uses: actions/setup-dotnet@v4
         with:

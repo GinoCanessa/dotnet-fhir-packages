@@ -6,7 +6,9 @@ param(
     [Parameter(Mandatory)]
     [string] $Tag,
 
-    [string] $GitHubRef = $env:GITHUB_REF
+    [string] $GitHubRef = $env:GITHUB_REF,
+
+    [switch] $AllowPublishedVersion
 )
 
 Set-StrictMode -Version Latest
@@ -58,6 +60,12 @@ if ($LASTEXITCODE -ne 0 -or $headCommit -notmatch '^[0-9a-f]{40}$')
     throw 'Unable to resolve the checked-out commit.'
 }
 
+& git fetch --force origin "refs/tags/${Tag}:refs/tags/${Tag}"
+if ($LASTEXITCODE -ne 0)
+{
+    throw "Unable to fetch release tag '$Tag' from origin."
+}
+
 [string] $tagCommit = (& git rev-list -n 1 $Tag).Trim()
 if ($LASTEXITCODE -ne 0 -or $tagCommit -notmatch '^[0-9a-f]{40}$')
 {
@@ -69,17 +77,45 @@ if ($tagCommit -cne $headCommit)
     throw "Tag '$Tag' points to '$tagCommit', not checked-out commit '$headCommit'."
 }
 
-[object] $publishedVersions = Invoke-RestMethod `
-    -Uri 'https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/index.json'
-
-if (@($publishedVersions.versions) -contains $Version)
+& git fetch --no-tags origin `
+    '+refs/heads/main:refs/remotes/origin/main'
+if ($LASTEXITCODE -ne 0)
 {
-    throw "fhir-pkg-lib '$Version' is already published."
+    throw "Unable to fetch 'origin/main'."
+}
+
+[string] $mainCommit = (& git rev-parse origin/main).Trim()
+if ($LASTEXITCODE -ne 0 -or $mainCommit -notmatch '^[0-9a-f]{40}$')
+{
+    throw "Unable to resolve 'origin/main'."
+}
+
+& git merge-base --is-ancestor $headCommit origin/main
+if ($LASTEXITCODE -eq 1)
+{
+    throw "Release commit '$headCommit' is not an ancestor of origin/main '$mainCommit'."
+}
+
+if ($LASTEXITCODE -ne 0)
+{
+    throw "Unable to verify release ancestry against 'origin/main'."
+}
+
+if (!$AllowPublishedVersion)
+{
+    [object] $publishedVersions = Invoke-RestMethod `
+        -Uri 'https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/index.json'
+
+    if (@($publishedVersions.versions) -contains $Version)
+    {
+        throw "fhir-pkg-lib '$Version' is already published."
+    }
 }
 
 if (![string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT))
 {
     Add-Content -Path $env:GITHUB_OUTPUT -Value "commit=$headCommit"
+    Add-Content -Path $env:GITHUB_OUTPUT -Value "main_commit=$mainCommit"
 }
 
-Write-Output "Validated release $Version at $headCommit."
+Write-Output "Validated release $Version at $headCommit on origin/main $mainCommit."
