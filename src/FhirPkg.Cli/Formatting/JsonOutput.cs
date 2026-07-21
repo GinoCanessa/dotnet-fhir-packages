@@ -26,26 +26,7 @@ internal static class JsonOutput
     /// <param name="result">The install result to serialize.</param>
     public static void WriteInstallResult(PackageInstallResult result)
     {
-        Write(new
-        {
-            Directive = result.Directive,
-            Status = result.Status.ToString(),
-            result.ErrorMessage,
-            result.ErrorCode,
-            result.ErrorStage,
-            DependencyFailures = result.DependencyFailures.Select(
-                failure => new
-                {
-                    failure.Directive,
-                    Status = failure.Status.ToString(),
-                    failure.ErrorMessage,
-                    failure.ErrorCode,
-                    failure.ErrorStage,
-                }),
-            Package = result.Package is { } pkg
-                ? new { pkg.Reference.Name, pkg.Reference.Version, pkg.DirectoryPath, pkg.SizeBytes }
-                : null
-        });
+        Write(ProjectInstallResult(result));
     }
 
     /// <summary>
@@ -54,34 +35,24 @@ internal static class JsonOutput
     /// <param name="results">The install results to serialize.</param>
     public static void WriteInstallResults(IReadOnlyList<PackageInstallResult> results)
     {
+        InstallResultSummary summary =
+            InstallResultPresentation.Summarize(results);
         Write(new
         {
-            Results = results.Select(r => new
-            {
-                Directive = r.Directive,
-                Status = r.Status.ToString(),
-                r.ErrorMessage,
-                r.ErrorCode,
-                r.ErrorStage,
-                DependencyFailures = r.DependencyFailures.Select(
-                    failure => new
-                    {
-                        failure.Directive,
-                        Status = failure.Status.ToString(),
-                        failure.ErrorMessage,
-                        failure.ErrorCode,
-                        failure.ErrorStage,
-                    }),
-                Package = r.Package is { } pkg
-                    ? new { pkg.Reference.Name, pkg.Reference.Version, pkg.DirectoryPath, pkg.SizeBytes }
-                    : null
-            }),
+            Results = results.Select(ProjectInstallResult),
             Summary = new
             {
-                Total = results.Count,
-                Installed = results.Count(r => r.Status == PackageInstallStatus.Installed),
-                AlreadyCached = results.Count(r => r.Status == PackageInstallStatus.AlreadyCached),
-                Failed = results.Count(r => r.Status is PackageInstallStatus.Failed or PackageInstallStatus.NotFound)
+                summary.Total,
+                Installed = summary.CoarseInstalled,
+                summary.AlreadyCached,
+                summary.Failed,
+                Dispositions = new
+                {
+                    Installed = summary.DispositionInstalled,
+                    summary.Updated,
+                    summary.AlreadyCurrent,
+                    summary.Refreshed
+                }
             }
         });
     }
@@ -220,6 +191,69 @@ internal static class JsonOutput
     public static void WriteSuccess(string message)
     {
         Write(new { Success = true, Message = message });
+    }
+
+    private static IReadOnlyDictionary<string, object?> ProjectInstallResult(
+        PackageInstallResult result)
+    {
+        Dictionary<string, object?> projection = new()
+        {
+            ["directive"] = result.Directive,
+            ["status"] = result.Status.ToString(),
+            ["dependencyFailures"] = result.DependencyFailures
+                .Select(ProjectDependencyFailure)
+                .ToArray()
+        };
+        if (result.ErrorMessage is not null)
+            projection["errorMessage"] = result.ErrorMessage;
+        if (result.ErrorCode is not null)
+            projection["errorCode"] = result.ErrorCode;
+        if (result.ErrorStage is not null)
+            projection["errorStage"] = result.ErrorStage;
+        if (result.Package is PackageRecord package)
+            projection["package"] = ProjectPackage(package);
+        if (result.Status == PackageInstallStatus.Installed
+            && result.Disposition is PackageInstallDisposition disposition)
+        {
+            projection["disposition"] = disposition.ToString();
+            projection["previousManifestDate"] =
+                result.PreviousManifestDate;
+            projection["manifestDate"] = result.ManifestDate;
+        }
+
+        return projection;
+    }
+
+    private static IReadOnlyDictionary<string, object?>
+        ProjectDependencyFailure(PackageInstallResult failure)
+    {
+        Dictionary<string, object?> projection = new()
+        {
+            ["directive"] = failure.Directive,
+            ["status"] = failure.Status.ToString()
+        };
+        if (failure.ErrorMessage is not null)
+            projection["errorMessage"] = failure.ErrorMessage;
+        if (failure.ErrorCode is not null)
+            projection["errorCode"] = failure.ErrorCode;
+        if (failure.ErrorStage is not null)
+            projection["errorStage"] = failure.ErrorStage;
+        return projection;
+    }
+
+    private static IReadOnlyDictionary<string, object?> ProjectPackage(
+        PackageRecord package)
+    {
+        Dictionary<string, object?> projection = new()
+        {
+            ["name"] = package.Reference.Name,
+            ["directoryPath"] = package.DirectoryPath
+        };
+        if (package.Reference.Version is not null)
+            projection["version"] = package.Reference.Version;
+        if (package.SizeBytes is not null)
+            projection["sizeBytes"] = package.SizeBytes;
+        return projection;
     }
 
     private static void Write<T>(T value)

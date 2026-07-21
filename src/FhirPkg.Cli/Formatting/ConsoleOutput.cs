@@ -17,14 +17,28 @@ internal static class ConsoleOutput
     /// <param name="result">The install result to display.</param>
     public static void WriteInstallResult(PackageInstallResult result)
     {
-        string statusMarkup = result.Status switch
-        {
-            PackageInstallStatus.Installed => "[green]✓ installed[/]",
-            PackageInstallStatus.AlreadyCached => "[yellow]● already cached[/]",
-            PackageInstallStatus.NotFound => "[red]✗ not found[/]",
-            PackageInstallStatus.Failed => "[red]✗ failed[/]",
-            _ => "[grey]? unknown[/]"
-        };
+        string statusMarkup =
+            result.Status == PackageInstallStatus.Installed
+                ? result.Disposition switch
+                {
+                    PackageInstallDisposition.Updated =>
+                        "[green]✓ updated from CI[/]",
+                    PackageInstallDisposition.AlreadyCurrent =>
+                        "[green]✓ already current[/]",
+                    PackageInstallDisposition.Refreshed =>
+                        "[green]✓ refreshed[/]",
+                    _ => "[green]✓ installed[/]"
+                }
+                : result.Status switch
+                {
+                    PackageInstallStatus.AlreadyCached =>
+                        "[yellow]● already cached[/]",
+                    PackageInstallStatus.NotFound =>
+                        "[red]✗ not found[/]",
+                    PackageInstallStatus.Failed =>
+                        "[red]✗ failed[/]",
+                    _ => "[grey]? unknown[/]"
+                };
 
         AnsiConsole.MarkupLine($"  {Markup.Escape(result.Directive),-40} {statusMarkup}");
 
@@ -50,6 +64,8 @@ internal static class ConsoleOutput
                     Markup.Escape(description));
             }
         }
+
+        WriteManifestDate(result);
 
         if (result.Package is { } pkg)
         {
@@ -79,14 +95,16 @@ internal static class ConsoleOutput
 
         AnsiConsole.WriteLine();
 
-        int installed = results.Count(r => r.Status == PackageInstallStatus.Installed);
-        int cached = results.Count(r => r.Status == PackageInstallStatus.AlreadyCached);
-        int failed = results.Count(r => r.Status is PackageInstallStatus.Failed or PackageInstallStatus.NotFound);
+        InstallResultSummary summary =
+            InstallResultPresentation.Summarize(results);
 
         AnsiConsole.MarkupLine(
-            $"[bold]Summary:[/] [green]{installed} installed[/], " +
-            $"[yellow]{cached} already cached[/], " +
-            $"[red]{failed} failed[/]");
+            $"[bold]Summary:[/] [green]{summary.DispositionInstalled} installed[/], " +
+            $"[green]{summary.Updated} updated[/], " +
+            $"[green]{summary.AlreadyCurrent} already current[/], " +
+            $"[green]{summary.Refreshed} refreshed[/], " +
+            $"[yellow]{summary.AlreadyCached} already cached[/], " +
+            $"[red]{summary.Failed} failed[/]");
     }
 
     /// <summary>
@@ -358,6 +376,34 @@ internal static class ConsoleOutput
     public static void WriteVerbose(string message)
     {
         AnsiConsole.MarkupLine($"[grey]{Markup.Escape(message)}[/]");
+    }
+
+    private static void WriteManifestDate(PackageInstallResult result)
+    {
+        if (result.Status != PackageInstallStatus.Installed)
+            return;
+
+        switch (result.Disposition)
+        {
+            case PackageInstallDisposition.Installed:
+            case PackageInstallDisposition.AlreadyCurrent:
+                AnsiConsole.MarkupLine(
+                    $"    [grey]manifest date: " +
+                    $"{Markup.Escape(result.ManifestDate ?? "unavailable")}[/]");
+                break;
+            case PackageInstallDisposition.Updated:
+                AnsiConsole.MarkupLine(
+                    $"    [grey]manifest date: " +
+                    $"{Markup.Escape(result.PreviousManifestDate ?? "unavailable")} -> " +
+                    $"{Markup.Escape(result.ManifestDate ?? "unavailable")}[/]");
+                break;
+            case PackageInstallDisposition.Refreshed:
+                AnsiConsole.MarkupLine(
+                    $"    [grey]manifest date: " +
+                    $"{Markup.Escape(result.ManifestDate ?? "unavailable")} " +
+                    "(unchanged)[/]");
+                break;
+        }
     }
 
     private static string FormatBytes(long? bytes)
