@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
+    [ValidateSet('fhir-pkg-lib', 'fhir-pkg-cli')]
+    [string] $PackageId,
+
+    [Parameter(Mandatory)]
     [string] $CandidatePackagePath,
 
     [Parameter(Mandatory)]
@@ -45,7 +49,7 @@ if (![System.IO.File]::Exists($fullCandidatePath))
 [System.IO.Directory]::CreateDirectory($temporaryDirectory) | Out-Null
 [string] $publishedPath = [System.IO.Path]::Combine(
     $temporaryDirectory,
-    "fhir-pkg-lib.$Version.nupkg")
+    "$PackageId.$Version.nupkg")
 
 try
 {
@@ -147,6 +151,7 @@ try
     {
         $env:GITHUB_OUTPUT = ''
         & (Join-Path $PSScriptRoot 'Test-ReleasePackage.ps1') `
+            -PackageId $PackageId `
             -PackagePath $publishedPath `
             -Version $Version `
             -RepositoryCommit $RepositoryCommit
@@ -225,7 +230,7 @@ try
             -Value "published_sha256=$publishedSha256"
     }
 
-    Write-Output "Verified published release package $Version ($publishedSha256)."
+    Write-Output "Verified published $PackageId $Version ($publishedSha256)."
 }
 finally
 {
