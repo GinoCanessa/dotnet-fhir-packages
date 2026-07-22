@@ -31,6 +31,8 @@ qualification evidence) lives alongside this file under
 ### Fixed
 - Propagate installation failures and recompute the active resolution graph.
 - Make cache-cleanup selection safe.
+- Pack, qualify, publish, and independently verify `fhir-pkg-lib` and
+  `fhir-pkg-cli` as one synchronized release candidate.
 
 ## [2026.622.1701] - 2026-06-22
 

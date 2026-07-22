@@ -1,4 +1,4 @@
-name: Publish fhir-pkg-lib
+name: Publish synchronized FhirPkg SDK and CLI
 
 on:
   release:
