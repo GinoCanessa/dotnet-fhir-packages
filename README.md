@@ -13,7 +13,6 @@ managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
 | **fhir-pkg-cli** | CLI tool - installs the `fhir-pkg` command | [![NuGet fhir-pkg-cli](https://img.shields.io/nuget/v/fhir-pkg-cli.svg)](https://www.nuget.org/packages/fhir-pkg-cli) / [Synchronized release workflow](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml) |
 
 
-
 ## Features
 
 - **Multi-registry resolution** - queries the primary FHIR registry

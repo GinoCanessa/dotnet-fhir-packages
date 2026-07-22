@@ -10,6 +10,13 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+## [2026.722.1245]
+
+### Fixed
+- Regression causing CLI NuGet package not to be published during deployment.
+
+## [2026.722.1030]
+
 ### Added
 - Hardened, caller-owned package install contract: install from caller-owned
   streams or absolute HTTP/HTTPS URIs with bounded acquisition/extraction
