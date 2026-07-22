@@ -1,8 +1,14 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License. See LICENSE in the project root.
 
 using System.Net;
+using System.Security.Cryptography;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using FhirPkg.Cache;
+using FhirPkg.Installation;
 using FhirPkg.Models;
+using FhirPkg.Utilities;
 using Microsoft.Extensions.Logging;
 
 namespace FhirPkg.Registry;
@@ -18,6 +24,11 @@ namespace FhirPkg.Registry;
 /// </remarks>
 public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
 {
+    private const int CopyBufferSize = 81_920;
+    private const long MaxPublishManifestBytes = 1024 * 1024;
+    private readonly PackageInstallLimits _installLimits;
+    private readonly Func<string> _createTempDirectory;
+
     /// <summary>
     /// Initialises a new <see cref="NpmRegistryClient"/>.
     /// </summary>
@@ -28,8 +39,39 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
         HttpClient httpClient,
         RegistryEndpoint endpoint,
         ILogger<NpmRegistryClient> logger)
-        : base(httpClient, endpoint, logger)
+        : this(
+            RegistryHttpTransport.CreateUnverified(httpClient),
+            endpoint,
+            logger,
+            PackageInstallLimits.FromEnvironment())
     {
+    }
+
+    internal NpmRegistryClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<NpmRegistryClient> logger)
+        : this(
+            transport,
+            endpoint,
+            logger,
+            PackageInstallLimits.FromEnvironment())
+    {
+    }
+
+    internal NpmRegistryClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<NpmRegistryClient> logger,
+        PackageInstallLimits installLimits,
+        Func<string>? createTempDirectory = null)
+        : base(transport, endpoint, logger)
+    {
+        ArgumentNullException.ThrowIfNull(installLimits);
+
+        _installLimits = PackageInstallLimits.ResolveManager(installLimits);
+        _createTempDirectory = createTempDirectory
+            ?? (() => TempDirectory.Create("fhirpkg-npm-publish"));
     }
 
     // ── IRegistryClient properties ──────────────────────────────────────
@@ -117,6 +159,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
 
         if (listing is not null)
         {
+            listing = WithSourceProvenance(listing);
             Logger.LogDebug(
                 "NPM package {PackageId} has {VersionCount} version(s), latest = {Latest}",
                 packageId,
@@ -184,7 +227,9 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             Reference = new PackageReference(directive.PackageId, resolvedVersion),
             TarballUri = new Uri(tarballUrl),
             ShaSum = versionInfo.Distribution?.ShaSum,
-            SourceRegistry = Endpoint,
+            Integrity = versionInfo.Distribution?.Integrity,
+            SourceRegistry = Endpoint.ToProvenance(),
+            SourceClient = this,
             PublicationDate = DateTime.TryParse(versionInfo.PublicationDate, out DateTime pubDate) ? pubDate : null,
         };
     }
@@ -223,24 +268,42 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
 
     /// <inheritdoc />
     /// <remarks>
-    /// Sends <c>PUT {baseUrl}/{name}</c> with the tarball stream.
+    /// Sends a standard NPM package document to <c>PUT {baseUrl}/{name}</c>.
     /// Requires authentication to be configured on the endpoint.
     /// </remarks>
     public override async Task<PublishResult> PublishAsync(
         PackageReference reference, Stream tarballStream, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(tarballStream);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reference.Name);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reference.Version);
+        ValidateNpmPackageName(reference);
+        ValidateNpmVersion(reference);
 
-        string url = $"{BaseUrl}/{Uri.EscapeDataString(reference.Name)}";
+        string url = $"{BaseUrl}/{EncodeDocumentName(reference.Name)}";
 
         Logger.LogInformation(
             "Publishing {PackageId}@{Version} to NPM registry at {Url}",
             reference.Name, reference.Version, url);
 
+        string? workspacePath = null;
         try
         {
-            using HttpResponseMessage response = await PutStreamAsync(
-                    url, tarballStream, "application/gzip", cancellationToken)
+            workspacePath = _createTempDirectory();
+            NpmPublishPreparation preparation =
+                await PreparePublishAsync(
+                        reference,
+                        tarballStream,
+                        workspacePath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            using NpmPackumentContent content = CreatePackumentContent(
+                reference,
+                preparation);
+            using HttpResponseMessage response = await PutContentAsync(
+                    url,
+                    content,
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             Logger.LogInformation(
@@ -266,7 +329,539 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
                 Message = ex.Message,
             };
         }
+        finally
+        {
+            DeleteWorkspace(workspacePath);
+        }
     }
+
+    private async Task<NpmPublishPreparation> PreparePublishAsync(
+        PackageReference reference,
+        Stream tarballStream,
+        string workspacePath,
+        CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(workspacePath);
+        string archivePath = Path.Combine(workspacePath, "package.tgz");
+        string extractionPath = Path.Combine(workspacePath, "extracted");
+        long archiveLength = 0;
+
+        using IncrementalHash sha1 =
+            IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+        using IncrementalHash sha512 =
+            IncrementalHash.CreateHash(HashAlgorithmName.SHA512);
+        await using (FileStream spool = new FileStream(
+            archivePath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            CopyBufferSize,
+            FileOptions.Asynchronous | FileOptions.SequentialScan))
+        {
+            byte[] buffer = new byte[CopyBufferSize];
+            while (true)
+            {
+                int read = await tarballStream.ReadAsync(
+                        buffer.AsMemory(),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (read == 0)
+                    break;
+
+                if (read > _installLimits.MaxCompressedBytes - archiveLength)
+                {
+                    throw new PackageInstallException(
+                        PackageInstallErrorCode.CompressedSizeLimitExceeded,
+                        PackageInstallStage.Acquisition,
+                        $"Package publish exceeds the configured compressed size limit of {_installLimits.MaxCompressedBytes} bytes.",
+                        reference.FhirDirective);
+                }
+
+                sha1.AppendData(buffer, 0, read);
+                sha512.AppendData(buffer, 0, read);
+                await spool.WriteAsync(
+                        buffer.AsMemory(0, read),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                archiveLength += read;
+            }
+
+            await spool.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (FileStream archive = new FileStream(
+            archivePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            CopyBufferSize,
+            FileOptions.Asynchronous | FileOptions.SequentialScan))
+        {
+            ArchiveExtractionMetrics metrics =
+                await TarballExtractor.ExtractAsync(
+                        archive,
+                        extractionPath,
+                        _installLimits,
+                        reference.FhirDirective,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            PackageArchiveInventory inventory = metrics.Inventory
+                ?? throw InvalidArchive(
+                    reference,
+                    "Package archive inventory was not produced.");
+            PackageArchiveLayoutResult layout =
+                TarballExtractor.ValidateAndNormalizePackageStructure(
+                    extractionPath,
+                    inventory,
+                    reference.FhirDirective);
+            if (layout.Layout != PackageArchiveLayout.Standard)
+            {
+                throw InvalidArchive(
+                    reference,
+                    "Standard NPM publication requires a package/package.json archive layout.");
+            }
+
+            long manifestLimit = Math.Min(
+                MaxPublishManifestBytes,
+                _installLimits.MaxEntryBytes);
+            long manifestLength =
+                new FileInfo(layout.ManifestPath).Length;
+            if (manifestLength > manifestLimit)
+            {
+                throw InvalidArchive(
+                    reference,
+                    $"Package manifest exceeds the NPM publish limit of {manifestLimit} bytes.");
+            }
+
+            PackageIdentityExpectation expectation =
+                PackageIdentityValidator.CreateExpectation(
+                    reference,
+                    reference.FhirDirective);
+            _ = await PackageIdentityValidator.ValidateExpectedAsync(
+                    layout.ManifestPath,
+                    expectation,
+                    reference.FhirDirective,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            await using FileStream manifestStream = new FileStream(
+                layout.ManifestPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                16_384,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            JsonObject manifest =
+                await JsonNode.ParseAsync(
+                        manifestStream,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false) as JsonObject
+                ?? throw InvalidArchive(
+                    reference,
+                    "Package manifest JSON did not contain an object.");
+            ValidatePublishManifest(reference, manifest);
+            return new NpmPublishPreparation(
+                archivePath,
+                archiveLength,
+                Convert.ToHexString(sha1.GetHashAndReset())
+                    .ToLowerInvariant(),
+                $"sha512-{Convert.ToBase64String(sha512.GetHashAndReset())}",
+                manifest);
+        }
+    }
+
+    private NpmPackumentContent CreatePackumentContent(
+        PackageReference reference,
+        NpmPublishPreparation preparation)
+    {
+        string version = reference.Version!;
+        string attachmentName = CreateAttachmentName(reference);
+        string tarballUrl = CreateTarballUrl(reference, attachmentName);
+        JsonObject versionMetadata = preparation.Manifest;
+        versionMetadata.Remove("_id");
+        versionMetadata.Remove("dist");
+        versionMetadata.Remove("dist-tags");
+        versionMetadata.Remove("versions");
+        versionMetadata.Remove("_attachments");
+        versionMetadata.Remove("patchedDependencies");
+        versionMetadata["name"] = reference.Name;
+        versionMetadata["version"] = version;
+        versionMetadata["_id"] = $"{reference.Name}@{version}";
+        versionMetadata["dist"] = new JsonObject
+        {
+            ["tarball"] = tarballUrl,
+            ["shasum"] = preparation.Sha1,
+            ["integrity"] = preparation.Integrity,
+        };
+
+        string marker = $"__fhirpkg_{Guid.NewGuid():N}__";
+        JsonObject packument = new()
+        {
+            ["_id"] = reference.Name,
+            ["name"] = reference.Name,
+            ["description"] =
+                versionMetadata["description"]?.DeepClone(),
+            ["dist-tags"] = new JsonObject
+            {
+                ["latest"] = version,
+            },
+            ["versions"] = new JsonObject
+            {
+                [version] = versionMetadata,
+            },
+            ["_attachments"] = new JsonObject
+            {
+                [attachmentName] = new JsonObject
+                {
+                    ["content_type"] = "application/octet-stream",
+                    ["length"] = preparation.ArchiveLength,
+                    ["data"] = marker,
+                },
+            },
+            ["access"] = null,
+        };
+
+        return new NpmPackumentContent(
+            preparation.ArchivePath,
+            preparation.ArchiveLength,
+            packument,
+            marker);
+    }
+
+    private string CreateTarballUrl(
+        PackageReference reference,
+        string attachmentName)
+    {
+        string packagePath = string.Join(
+            '/',
+            reference.Name
+                .Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .Select(EncodePathSegment));
+        string attachmentPath = string.Join(
+            '/',
+            attachmentName
+                .Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .Select(EncodePathSegment));
+        return $"{BaseUrl}/{packagePath}/-/{attachmentPath}";
+    }
+
+    private static string CreateAttachmentName(
+        PackageReference reference)
+    {
+        return $"{reference.Name}-{reference.Version}.tgz";
+    }
+
+    private static string EncodeDocumentName(string packageName)
+    {
+        if (!packageName.StartsWith('@'))
+            return Uri.EscapeDataString(packageName);
+
+        int separator = packageName.IndexOf('/');
+        if (separator <= 1 || separator == packageName.Length - 1)
+        {
+            throw new ArgumentException(
+                "Scoped NPM package names must use the form '@scope/name'.",
+                nameof(packageName));
+        }
+
+        string scope = Uri.EscapeDataString(packageName[1..separator]);
+        string name = Uri.EscapeDataString(packageName[(separator + 1)..]);
+        return $"@{scope}%2F{name}";
+    }
+
+    private static string EncodePathSegment(string segment) =>
+        segment.StartsWith('@')
+            ? $"@{Uri.EscapeDataString(segment[1..])}"
+            : Uri.EscapeDataString(segment);
+
+    private static void ValidateNpmVersion(
+        PackageReference reference)
+    {
+        if (reference.Version is null
+            || !IsStrictNpmSemanticVersion(reference.Version))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPackageIdentity,
+                PackageInstallStage.IdentityValidation,
+                $"Package version '{reference.Version}' is not valid semantic version metadata for NPM publication.",
+                reference.FhirDirective);
+        }
+    }
+
+    private static void ValidateNpmPackageName(
+        PackageReference reference)
+    {
+        string name = reference.Name;
+        string leafName = name[
+            (name.LastIndexOf('/') + 1)..];
+        bool invalid =
+            name.Length > 214
+            || name != name.ToLowerInvariant()
+            || name.StartsWith('.')
+            || name.StartsWith('-')
+            || name.StartsWith('_')
+            || leafName.StartsWith('.')
+            || leafName.IndexOfAny(['~', '\'', '!', '(', ')', '*']) >= 0
+            || name.Equals(
+                "node_modules",
+                StringComparison.OrdinalIgnoreCase)
+            || name.Equals(
+                "favicon.ico",
+                StringComparison.OrdinalIgnoreCase)
+            || !IsValidNpmNameShape(name);
+        if (invalid)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPackageIdentity,
+                PackageInstallStage.IdentityValidation,
+                $"Package name '{name}' is not valid for NPM publication.",
+                reference.FhirDirective);
+        }
+    }
+
+    private static bool IsValidNpmNameShape(string name)
+    {
+        if (!name.StartsWith('@'))
+        {
+            return name.All(IsEncodeURIComponentSafe)
+                && !name.Any(character =>
+                    character is '/' or '@' or '+' or '%' or ':'
+                    || char.IsWhiteSpace(character));
+        }
+
+        int separator = name.IndexOf('/');
+        return separator > 1
+            && separator == name.LastIndexOf('/')
+            && separator < name.Length - 1
+            && IsValidNpmNameComponent(
+                name.AsSpan(1, separator - 1))
+            && IsValidNpmNameComponent(
+                name.AsSpan(separator + 1));
+    }
+
+    private static bool IsValidNpmNameComponent(
+        ReadOnlySpan<char> value)
+    {
+        foreach (char character in value)
+        {
+            if (!IsEncodeURIComponentSafe(character))
+                return false;
+        }
+
+        return !value.IsEmpty;
+    }
+
+    private static bool IsEncodeURIComponentSafe(char character) =>
+        character is >= 'a' and <= 'z'
+        or >= '0' and <= '9'
+        or '-' or '_' or '.' or '!' or '~' or '*' or '\'' or '(' or ')';
+
+    private static bool IsStrictNpmSemanticVersion(
+        string value)
+    {
+        int plusIndex = value.IndexOf('+');
+        if (plusIndex >= 0
+            && value.IndexOf('+', plusIndex + 1) >= 0)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<char> coreAndPreRelease = plusIndex >= 0
+            ? value.AsSpan(0, plusIndex)
+            : value.AsSpan();
+        ReadOnlySpan<char> buildMetadata = plusIndex >= 0
+            ? value.AsSpan(plusIndex + 1)
+            : [];
+        int dashIndex = coreAndPreRelease.IndexOf('-');
+        ReadOnlySpan<char> core = dashIndex >= 0
+            ? coreAndPreRelease[..dashIndex]
+            : coreAndPreRelease;
+        ReadOnlySpan<char> preRelease = dashIndex >= 0
+            ? coreAndPreRelease[(dashIndex + 1)..]
+            : [];
+        int firstDot = core.IndexOf('.');
+        if (firstDot <= 0)
+            return false;
+
+        ReadOnlySpan<char> afterFirst = core[(firstDot + 1)..];
+        int secondDot = afterFirst.IndexOf('.');
+        if (secondDot <= 0
+            || afterFirst[(secondDot + 1)..].Contains('.'))
+            return false;
+
+        ReadOnlySpan<char> major = core[..firstDot];
+        ReadOnlySpan<char> minor = afterFirst[..secondDot];
+        ReadOnlySpan<char> patch = afterFirst[(secondDot + 1)..];
+        if (!IsValidCoreIdentifier(major)
+            || !IsValidCoreIdentifier(minor)
+            || !IsValidCoreIdentifier(patch))
+            return false;
+
+        return (dashIndex < 0
+                || IsValidSemVerIdentifiers(
+                    preRelease,
+                    rejectLeadingZeroNumbers: true))
+            && (plusIndex < 0
+                || IsValidSemVerIdentifiers(
+                    buildMetadata,
+                    rejectLeadingZeroNumbers: false));
+    }
+
+    private static bool IsValidSemVerIdentifiers(
+        ReadOnlySpan<char> value,
+        bool rejectLeadingZeroNumbers)
+    {
+        if (value.IsEmpty)
+            return false;
+
+        int start = 0;
+        while (start <= value.Length)
+        {
+            int relativeDot = value[start..].IndexOf('.');
+            int end = relativeDot < 0
+                ? value.Length
+                : start + relativeDot;
+            ReadOnlySpan<char> identifier = value[start..end];
+            if (!IsValidSemVerIdentifier(identifier))
+            {
+                return false;
+            }
+
+            if (rejectLeadingZeroNumbers
+                && identifier.Length > 1
+                && identifier[0] == '0'
+                && IsNumericIdentifier(identifier))
+            {
+                return false;
+            }
+
+            if (relativeDot < 0)
+                return true;
+
+            start = end + 1;
+        }
+
+        return false;
+    }
+
+    private static bool IsValidCoreIdentifier(
+        ReadOnlySpan<char> value) =>
+        IsNumericIdentifier(value)
+        && (value.Length == 1 || value[0] != '0');
+
+    private static bool IsValidSemVerIdentifier(
+        ReadOnlySpan<char> value)
+    {
+        if (value.IsEmpty)
+            return false;
+
+        foreach (char character in value)
+        {
+            if (character is not (>= '0' and <= '9')
+                and not (>= 'A' and <= 'Z')
+                and not (>= 'a' and <= 'z')
+                and not '-')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsNumericIdentifier(
+        ReadOnlySpan<char> value)
+    {
+        if (value.IsEmpty)
+            return false;
+
+        foreach (char character in value)
+        {
+            if (character is not (>= '0' and <= '9'))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static void ValidatePublishManifest(
+        PackageReference reference,
+        JsonObject manifest)
+    {
+        if (manifest.TryGetPropertyValue(
+                "private",
+                out JsonNode? privateNode)
+            && IsJsonTruthy(privateNode))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPackageIdentity,
+                PackageInstallStage.IdentityValidation,
+                "Packages marked private cannot be published.",
+                reference.FhirDirective);
+        }
+
+        if (manifest.ContainsKey("packageExtensions"))
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.InvalidPackageIdentity,
+                PackageInstallStage.IdentityValidation,
+                "Package extensions are project policy and cannot be published.",
+                reference.FhirDirective);
+        }
+    }
+
+    private static bool IsJsonTruthy(JsonNode? node)
+    {
+        if (node is null)
+            return false;
+
+        if (node is JsonObject or JsonArray)
+            return true;
+
+        JsonValue value = (JsonValue)node;
+        if (value.TryGetValue<bool>(out bool boolean))
+            return boolean;
+        if (value.TryGetValue<string>(out string? text))
+            return !string.IsNullOrEmpty(text);
+        if (value.TryGetValue<double>(out double number))
+            return number != 0;
+
+        return true;
+    }
+
+    private void DeleteWorkspace(string? workspacePath)
+    {
+        if (workspacePath is null || !Directory.Exists(workspacePath))
+            return;
+
+        try
+        {
+            Directory.Delete(workspacePath, recursive: true);
+        }
+        catch (Exception exception)
+        {
+            Logger.LogWarning(
+                exception,
+                "Failed to delete NPM publish workspace {WorkspacePath}",
+                workspacePath);
+        }
+    }
+
+    private static PackageInstallException InvalidArchive(
+        PackageReference reference,
+        string message) =>
+        new(
+            PackageInstallErrorCode.InvalidArchive,
+            PackageInstallStage.ArchiveValidation,
+            message,
+            reference.FhirDirective);
+
+    private sealed record NpmPublishPreparation(
+        string ArchivePath,
+        long ArchiveLength,
+        string Sha1,
+        string Integrity,
+        JsonObject Manifest);
 
     // ── Internal DTOs for NPM search response ───────────────────────────
 

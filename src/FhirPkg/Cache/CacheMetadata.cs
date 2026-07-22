@@ -1,5 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Text.Json.Serialization;
+
 namespace FhirPkg.Cache;
 
 /// <summary>
@@ -37,4 +39,23 @@ public record CacheMetadataEntry
     /// May be <c>null</c> if the size was not recorded (e.g., for legacy cache entries).
     /// </summary>
     public long? SizeBytes { get; init; }
+
+    /// <summary>
+    /// Publication time reported by the package source, when available.
+    /// Used to evaluate mutable alias freshness.
+    /// </summary>
+    public DateTimeOffset? SourcePublicationDate { get; init; }
+
+    /// <summary>
+    /// SHA-256 of the compressed archive, when recorded.
+    /// Used to compare mutable aliases when publication metadata is unavailable.
+    /// </summary>
+    public string? ArchiveSha256 { get; init; }
+
+    /// <summary>
+    /// Opaque identifier for the committed package content generation.
+    /// Changes whenever package content is replaced.
+    /// </summary>
+    [JsonInclude]
+    public string? ContentGeneration { get; internal init; }
 }

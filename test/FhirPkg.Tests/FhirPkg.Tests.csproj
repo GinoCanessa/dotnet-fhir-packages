@@ -30,4 +30,19 @@
     <ProjectReference Include="..\..\src\FhirPkg\FhirPkg.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None
+      Include="..\..\.github\workflows\build-and-test.yaml"
+      Link="ReleaseContracts\build-and-test.yaml"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\.github\workflows\nuget-generator.yaml"
+      Link="ReleaseContracts\nuget-generator.yaml"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\test\FhirPkg.Qualification\FhirPkg.Qualification.csproj"
+      Link="ReleaseContracts\FhirPkg.Qualification.csproj"
+      CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

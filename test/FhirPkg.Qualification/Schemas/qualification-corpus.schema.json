@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GinoCanessa/dotnet-fhir-packages/qualification-corpus.schema.json",
+  "title": "FhirPkg qualification corpus",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "immutableArtifacts",
+    "mutableArtifacts",
+    "localFixture",
+    "downstreamClosure"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "immutableArtifacts": {
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 15,
+      "items": {
+        "$ref": "#/$defs/immutableArtifact"
+      }
+    },
+    "mutableArtifacts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/mutableArtifact"
+      }
+    },
+    "localFixture": {
+      "$ref": "#/$defs/localFixture"
+    },
+    "downstreamClosure": {
+      "$ref": "#/$defs/downstreamClosure"
+    }
+  },
+  "$defs": {
+    "packageName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "immutableArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "uri",
+        "sha256"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/packageName"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uri": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "mutableArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "selector",
+        "uri"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "$ref": "#/$defs/packageName"
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uri": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        }
+      }
+    },
+    "localFixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "selector",
+        "manifestVersion",
+        "sha256"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/packageName"
+        },
+        "selector": {
+          "const": "dev"
+        },
+        "manifestVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "downstreamClosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "roots",
+        "resolverMembers",
+        "requiredMembers"
+      ],
+      "properties": {
+        "roots": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "resolverMembers": {
+          "type": "array",
+          "minItems": 12,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "requiredMembers": {
+          "type": "array",
+          "minItems": 12,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

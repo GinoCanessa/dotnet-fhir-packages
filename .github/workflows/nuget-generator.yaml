@@ -1,34 +1,550 @@
-name: Publish dotnet generator
-# Basics from https://docs.microsoft.com/en-us/azure/dev-spaces/how-to/github-actions
+name: Publish fhir-pkg-lib
+
 on:
+  release:
+    types: [published]
   workflow_dispatch:
-  workflow_run:
-    workflows: ['Tests']
-    types: [completed]
-    branches:
-    - main
+    inputs:
+      version:
+        description: Three-component NuGet version (for example, 2026.717.1608)
+        required: true
+        type: string
+      tag:
+        description: Matching release tag (v<version>)
+        required: true
+        type: string
+      validation_only:
+        description: Validate the complete release pipeline without publishing
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  validate:
+    name: validate-release
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      main_commit: ${{ steps.release.outputs.main_commit }}
+      version: ${{ steps.inputs.outputs.version }}
+      tag: ${{ steps.inputs.outputs.tag }}
+      validation_only: ${{ steps.inputs.outputs.validation_only }}
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
 
-    - uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: |
-            10.0
-            9.0
-            8.0
+      - name: Resolve release inputs
+        id: inputs
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_VALIDATION_ONLY: ${{ inputs.validation_only }}
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if ($env:EVENT_NAME -ceq 'release')
+          {
+            $tag = $env:RELEASE_EVENT_TAG
+            if (!$tag.StartsWith('v', [StringComparison]::Ordinal))
+            {
+              throw "Release tag '$tag' must start with 'v'."
+            }
 
-    - name: Build and Publish
-      run: |
-        dotnet restore src/FhirPkg/FhirPkg.csproj
-        dotnet restore src/FhirPkg.Cli/FhirPkg.Cli.csproj
-        dotnet build -c Release ./src/FhirPkg/FhirPkg.csproj
-        dotnet build -c Release ./src/FhirPkg.Cli/FhirPkg.Cli.csproj
-        dotnet pack -c Release --no-build ./src/FhirPkg/FhirPkg.csproj -o ./nupkg
-        dotnet pack -c Release --no-build ./src/FhirPkg.Cli/FhirPkg.Cli.csproj -o ./nupkg
-        dotnet nuget push ./nupkg/*.nupkg --api-key ${{ secrets.GINOC_NUGET }} --source https://api.nuget.org/v3/index.json
+            $version = $tag.Substring(1)
+            $validationOnly = 'false'
+          }
+          elseif ($env:EVENT_NAME -ceq 'workflow_dispatch')
+          {
+            if ($env:INPUT_VALIDATION_ONLY -cne 'true')
+            {
+              throw 'Manual workflow dispatch is validation-only.'
+            }
+
+            $version = $env:INPUT_VERSION
+            $tag = $env:INPUT_TAG
+            $validationOnly = 'true'
+          }
+          else
+          {
+            throw "Unsupported release event '$env:EVENT_NAME'."
+          }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "validation_only=$validationOnly"
+
+      - name: Validate release inputs, tag, and main ancestry
+        id: release
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.inputs.outputs.version }}
+          RELEASE_TAG: ${{ steps.inputs.outputs.tag }}
+        run: |
+          ./.github/scripts/Test-ReleaseInputs.ps1 `
+            -Version $env:RELEASE_VERSION `
+            -Tag $env:RELEASE_TAG
+
+  source-ci:
+    name: exact-source-ci
+    needs: validate
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-and-test.yaml
+    with:
+      commit_sha: ${{ needs.validate.outputs.commit }}
+
+  pack:
+    name: pack-release-candidate
+    needs: [validate, source-ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      package_sha256: ${{ steps.candidate.outputs.sha256 }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Verify exact source commit
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          $actualCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $env:EXPECTED_COMMIT)
+          {
+            throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
+          }
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.302
+            9.0.119
+            8.0.423
+
+      - name: Restore library
+        run: dotnet restore src/FhirPkg/FhirPkg.csproj
+
+      - name: Pack release candidate once
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          $candidateDirectory =
+            Join-Path '${{ runner.temp }}' 'release-candidate'
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $candidateDirectory |
+            Out-Null
+          dotnet pack src/FhirPkg/FhirPkg.csproj `
+            --configuration Release `
+            --no-restore `
+            --output $candidateDirectory `
+            "-p:VersionPrefix=$env:RELEASE_VERSION" `
+            "-p:Version=$env:RELEASE_VERSION" `
+            "-p:PackageVersion=$env:RELEASE_VERSION" `
+            "-p:AssemblyVersion=0.$env:RELEASE_VERSION" `
+            "-p:FileVersion=0.$env:RELEASE_VERSION" `
+            "-p:RepositoryCommit=$env:RELEASE_COMMIT"
+
+      - name: Create SHA-512 manifest and release metadata
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          $candidateDirectory =
+            Join-Path '${{ runner.temp }}' 'release-candidate'
+          $packagePath = Join-Path `
+            $candidateDirectory `
+            "fhir-pkg-lib.$env:RELEASE_VERSION.nupkg"
+          $symbolsPath = Join-Path `
+            $candidateDirectory `
+            "fhir-pkg-lib.$env:RELEASE_VERSION.snupkg"
+          if (!(Test-Path -LiteralPath $packagePath -PathType Leaf))
+          {
+            throw "Package '$packagePath' was not created."
+          }
+
+          if (!(Test-Path -LiteralPath $symbolsPath -PathType Leaf))
+          {
+            throw "Symbols package '$symbolsPath' was not created."
+          }
+
+          [string[]] $manifestLines = foreach ($path in @(
+            $packagePath,
+            $symbolsPath))
+          {
+            $hash =
+              (Get-FileHash -Algorithm SHA512 -Path $path).Hash.ToLowerInvariant()
+            "$hash  $([System.IO.Path]::GetFileName($path))"
+          }
+          $manifestPath = Join-Path `
+            $candidateDirectory `
+            "fhir-pkg-lib.$env:RELEASE_VERSION.sha512"
+          $manifestLines |
+            Set-Content -Encoding ascii -Path $manifestPath
+
+          $packageSha256 =
+            (Get-FileHash -Algorithm SHA256 -Path $packagePath).Hash.ToLowerInvariant()
+          $metadata = [ordered]@{
+            version = $env:RELEASE_VERSION
+            tag = $env:RELEASE_TAG
+            repositoryCommit = $env:RELEASE_COMMIT
+            feed = 'https://api.nuget.org/v3/index.json'
+            preUploadSha256 = $packageSha256
+            packageSha512 = $manifestLines[0].Split(' ', 2)[0]
+            symbolsSha512 = $manifestLines[1].Split(' ', 2)[0]
+            sdkVersion = (dotnet --version).Trim()
+            sdkCommit = (
+              (dotnet --info |
+                Where-Object { $_ -match '^\s*Commit:\s+\S+' } |
+                Select-Object -First 1) -replace '^\s*Commit:\s+', ''
+            ).Trim()
+          }
+          $metadata |
+            ConvertTo-Json |
+            Set-Content `
+              -Encoding utf8 `
+              -Path (Join-Path $candidateDirectory 'release-metadata.json')
+
+      - name: Verify release candidate
+        id: candidate
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          ./.github/scripts/Test-ReleaseCandidate.ps1 `
+            -CandidateDirectory '${{ runner.temp }}/release-candidate' `
+            -Version $env:RELEASE_VERSION `
+            -RepositoryCommit $env:RELEASE_COMMIT
+
+      - name: Upload immutable release candidate
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: fhir-pkg-lib-${{ needs.validate.outputs.version }}-candidate
+          path: ${{ runner.temp }}/release-candidate/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+  package-qualification:
+    name: qualify-${{ matrix.os }}-${{ matrix.framework }}
+    needs: [validate, pack]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        framework: [net8.0, net9.0, net10.0]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Verify exact source commit
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          $actualCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $env:EXPECTED_COMMIT)
+          {
+            throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
+          }
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.302
+            9.0.119
+            8.0.423
+
+      - name: Configure isolated global packages folder
+        shell: pwsh
+        run: |
+          $globalPackages = Join-Path `
+            '${{ runner.temp }}' `
+            'qualification-global-packages'
+          Add-Content `
+            -Path $env:GITHUB_ENV `
+            -Value "NUGET_PACKAGES=$globalPackages"
+
+      - name: Download immutable release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: fhir-pkg-lib-${{ needs.validate.outputs.version }}-candidate
+          path: ${{ runner.temp }}/release-candidate
+
+      - name: Verify downloaded release candidate
+        id: candidate
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          PACKAGE_SHA256: ${{ needs.pack.outputs.package_sha256 }}
+        run: |
+          ./.github/scripts/Test-ReleaseCandidate.ps1 `
+            -CandidateDirectory '${{ runner.temp }}/release-candidate' `
+            -Version $env:RELEASE_VERSION `
+            -RepositoryCommit $env:RELEASE_COMMIT `
+            -ExpectedPackageSha256 $env:PACKAGE_SHA256
+
+      - name: Create isolated qualification package source
+        id: nuget
+        shell: pwsh
+        run: |
+          $candidateDirectory =
+            Join-Path '${{ runner.temp }}' 'release-candidate'
+          $escapedCandidateDirectory =
+            [System.Security.SecurityElement]::Escape($candidateDirectory)
+          $configPath =
+            Join-Path '${{ runner.temp }}' 'qualification.NuGet.Config'
+          @(
+            '<?xml version="1.0" encoding="utf-8"?>',
+            '<configuration>',
+            '  <packageSources>',
+            '    <clear />',
+            "    <add key=`"candidate`" value=`"$escapedCandidateDirectory`" />",
+            '    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />',
+            '  </packageSources>',
+            '  <packageSourceMapping>',
+            '    <packageSource key="candidate">',
+            '      <package pattern="fhir-pkg-lib" />',
+            '    </packageSource>',
+            '    <packageSource key="nuget.org">',
+            '      <package pattern="Microsoft.*" />',
+            '      <package pattern="NETStandard.*" />',
+            '      <package pattern="runtime.*" />',
+            '      <package pattern="System.*" />',
+            '    </packageSource>',
+            '  </packageSourceMapping>',
+            '</configuration>'
+          ) | Set-Content -Encoding utf8 -Path $configPath
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "config_path=$configPath"
+
+      - name: Restore qualification against exact local package
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          TARGET_FRAMEWORK: ${{ matrix.framework }}
+        run: |
+          dotnet restore `
+            test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
+            --configfile '${{ steps.nuget.outputs.config_path }}' `
+            --force `
+            --no-cache `
+            "-p:TargetFrameworks=$env:TARGET_FRAMEWORK" `
+            "-p:UsePublishedFhirPkg=true" `
+            "-p:FhirPkgQualificationPackageVersion=$env:RELEASE_VERSION"
+
+      - name: Verify exact package restore and selected framework asset
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          TARGET_FRAMEWORK: ${{ matrix.framework }}
+          PACKAGE_SHA256: ${{ needs.pack.outputs.package_sha256 }}
+        run: |
+          $candidatePackage = Join-Path `
+            '${{ runner.temp }}/release-candidate' `
+            "fhir-pkg-lib.$env:RELEASE_VERSION.nupkg"
+          foreach ($assetsPath in @(
+            'test/FhirPkg.Qualification/obj/project.assets.json',
+            'test/FhirPkg.ProcessTestHost/obj/project.assets.json'))
+          {
+            ./.github/scripts/Test-QualificationRestore.ps1 `
+              -AssetsPath $assetsPath `
+              -GlobalPackagesPath $env:NUGET_PACKAGES `
+              -CandidatePackagePath $candidatePackage `
+              -Version $env:RELEASE_VERSION `
+              -Framework $env:TARGET_FRAMEWORK `
+              -ExpectedPackageSha256 $env:PACKAGE_SHA256
+          }
+
+      - name: Record qualification candidate evidence
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          PACKAGE_SHA256: ${{ needs.pack.outputs.package_sha256 }}
+          ARTIFACT_DIGEST: ${{ needs.pack.outputs.artifact_digest }}
+          TARGET_FRAMEWORK: ${{ matrix.framework }}
+          MATRIX_OS: ${{ matrix.os }}
+        run: |
+          $evidence = [ordered]@{
+            version = $env:RELEASE_VERSION
+            repositoryCommit = $env:RELEASE_COMMIT
+            packageSha256 = $env:PACKAGE_SHA256
+            workflowArtifactDigest = $env:ARTIFACT_DIGEST
+            runner = $env:MATRIX_OS
+            framework = $env:TARGET_FRAMEWORK
+          }
+          $evidence |
+            ConvertTo-Json |
+            Set-Content `
+              -Encoding utf8 `
+              -Path '${{ runner.temp }}/qualification-candidate.json'
+
+      - name: Qualify exact local package
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          TARGET_FRAMEWORK: ${{ matrix.framework }}
+        run: |
+          $cache = Join-Path '${{ runner.temp }}' 'qualification-cache'
+          $report = Join-Path '${{ runner.temp }}' 'qualification-report.json'
+          dotnet run `
+            --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
+            --configuration Release `
+            --framework $env:TARGET_FRAMEWORK `
+            --no-restore `
+            "-p:TargetFrameworks=$env:TARGET_FRAMEWORK" `
+            "-p:UsePublishedFhirPkg=true" `
+            "-p:FhirPkgQualificationPackageVersion=$env:RELEASE_VERSION" `
+            -- `
+            --cache $cache `
+            --output $report `
+            --corpus test/FhirPkg.Qualification/qualification-corpus.json
+
+      - name: Upload qualification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualification-${{ matrix.os }}-${{ matrix.framework }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qualification-candidate.json
+            ${{ runner.temp }}/qualification-report.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  publish:
+    name: publish-nuget
+    needs: [validate, pack, package-qualification]
+    if: >-
+      ${{
+        needs.validate.outputs.validation_only == 'false' &&
+        github.event_name == 'release' &&
+        github.event.action == 'published' &&
+        github.event.release.tag_name == needs.validate.outputs.tag
+      }}
+    runs-on: ubuntu-latest
+    environment: nuget.org
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Verify exact source commit
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          $actualCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $env:EXPECTED_COMMIT)
+          {
+            throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
+          }
+
+      - name: Verify protected publishing environment
+        shell: pwsh
+        env:
+          PUBLISH_ENVIRONMENT_READY: ${{ vars.NUGET_PUBLISH_ENVIRONMENT_READY }}
+        run: |
+          if ($env:PUBLISH_ENVIRONMENT_READY -cne 'true')
+          {
+            throw "The protected nuget.org environment is not configured."
+          }
+
+      - name: Revalidate release tag and main ancestry
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          ./.github/scripts/Test-ReleaseInputs.ps1 `
+            -Version $env:RELEASE_VERSION `
+            -Tag $env:RELEASE_TAG `
+            -AllowPublishedVersion
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Download qualified release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: fhir-pkg-lib-${{ needs.validate.outputs.version }}-candidate
+          path: ${{ runner.temp }}/release-candidate
+
+      - name: Re-hash qualified release candidate
+        id: candidate
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          PACKAGE_SHA256: ${{ needs.pack.outputs.package_sha256 }}
+        run: |
+          ./.github/scripts/Test-ReleaseCandidate.ps1 `
+            -CandidateDirectory '${{ runner.temp }}/release-candidate' `
+            -Version $env:RELEASE_VERSION `
+            -RepositoryCommit $env:RELEASE_COMMIT `
+            -ExpectedPackageSha256 $env:PACKAGE_SHA256
+
+      - name: Push primary package to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
+        run: >-
+          dotnet nuget push
+          "${{ steps.candidate.outputs.package_path }}"
+          --api-key "$NUGET_API_KEY"
+          --source https://api.nuget.org/v3/index.json
+          --no-symbols
+          --skip-duplicate
+
+      - name: Confirm published package matches candidate
+        id: published
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          $versionPath = $env:RELEASE_VERSION.ToLowerInvariant()
+          $publishedUri =
+            "https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/$versionPath/fhir-pkg-lib.$versionPath.nupkg"
+          ./.github/scripts/Test-PublishedReleasePackage.ps1 `
+            -CandidatePackagePath '${{ steps.candidate.outputs.package_path }}' `
+            -PublishedPackageUri $publishedUri `
+            -Version $env:RELEASE_VERSION `
+            -RepositoryCommit $env:RELEASE_COMMIT
+
+      - name: Push symbols package to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
+        run: >-
+          dotnet nuget push
+          "${{ steps.candidate.outputs.symbols_path }}"
+          --api-key "$NUGET_API_KEY"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate

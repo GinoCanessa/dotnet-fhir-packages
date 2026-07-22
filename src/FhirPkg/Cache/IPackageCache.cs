@@ -1,9 +1,26 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using FhirPkg.Indexing;
+using FhirPkg.Installation;
 using FhirPkg.Models;
 
 namespace FhirPkg.Cache;
+
+internal enum PackageCacheInstallEffect
+{
+    Unknown,
+    Created,
+    Replaced,
+    Unchanged
+}
+
+internal sealed record PackageCacheInstallOutcome(
+    PackageCacheInstallEffect Effect,
+    string? PreviousManifestDate)
+{
+    internal static PackageCacheInstallOutcome Unknown { get; } =
+        new(PackageCacheInstallEffect.Unknown, null);
+}
 
 /// <summary>
 /// Interface for the local FHIR package cache (~/.fhir/packages).
@@ -20,7 +37,8 @@ public interface IPackageCache : IDisposable
 
     /// <summary>
     /// Checks if a specific package version is installed in the cache.
-    /// A package is considered installed if its content directory (package/) exists.
+    /// A package is installed only when its cache directory, content directory,
+    /// readable manifest, and manifest identity are valid.
     /// </summary>
     /// <param name="reference">The package identity to check.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -49,12 +67,48 @@ public interface IPackageCache : IDisposable
         CancellationToken ct = default);
 
     /// <summary>
+    /// Lists package summaries in the cache, optionally filtered by package ID
+    /// prefix and/or version. Summary records deliberately omit resource indexes.
+    /// </summary>
+    /// <param name="packageIdFilter">Optional filter; only packages whose ID starts with this value are returned.</param>
+    /// <param name="versionFilter">Optional exact version filter.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>
+    /// A read-only list of matching package records whose
+    /// <see cref="PackageRecord.Index"/> values are <c>null</c>.
+    /// </returns>
+    /// <remarks>
+    /// The default implementation preserves compatibility by cloning records
+    /// returned from <see cref="ListPackagesAsync"/> without their indexes.
+    /// It may therefore hydrate internally unless an implementation overrides
+    /// this method. Call <see cref="ListPackagesAsync"/> when resource indexes
+    /// are required.
+    /// </remarks>
+    async Task<IReadOnlyList<PackageRecord>> ListPackageSummariesAsync(
+        string? packageIdFilter = null,
+        string? versionFilter = null,
+        CancellationToken ct = default)
+    {
+        IReadOnlyList<PackageRecord> records = await ListPackagesAsync(
+                packageIdFilter,
+                versionFilter,
+                ct)
+            .ConfigureAwait(false);
+        return records
+            .Select(record => record with { Index = null })
+            .ToArray();
+    }
+
+    /// <summary>
     /// Installs a package from a tarball stream into the cache.
     /// Performs atomic extraction via a temporary directory, normalizes the package structure,
     /// and moves the result to the final cache location.
     /// </summary>
     /// <param name="reference">The package identity (name and version) to install.</param>
-    /// <param name="tarballStream">A readable stream containing the .tgz tarball.</param>
+    /// <param name="tarballStream">
+    /// A readable stream containing the .tgz tarball. The stream is consumed from
+    /// its current position and is left open.
+    /// </param>
     /// <param name="options">Optional installation options (overwrite, checksum verification).</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A <see cref="PackageRecord"/> for the newly installed package.</returns>
@@ -152,6 +206,18 @@ public class InstallCacheOptions
     public bool VerifyChecksum { get; set; } = true;
 
     /// <summary>
+    /// Optional finite resource limits for this installation. Values may tighten,
+    /// but not exceed, the limits configured for the cache.
+    /// </summary>
+    public PackageInstallLimits? Limits { get; set; }
+
+    /// <summary>
+    /// Content length reported by the source, when known. The actual byte count is
+    /// always enforced independently.
+    /// </summary>
+    public long? ReportedContentLength { get; set; }
+
+    /// <summary>
     /// Expected SHA-1 hash of the tarball. Used for integrity verification when
     /// <see cref="VerifyChecksum"/> is <c>true</c>.
     /// </summary>
@@ -162,4 +228,38 @@ public class InstallCacheOptions
     /// SHA-256 is preferred over SHA-1 for integrity verification.
     /// </summary>
     public string? ExpectedSha256Sum { get; set; }
+
+    /// <summary>
+    /// Source publication time associated with a mutable package alias, when known.
+    /// </summary>
+    public DateTimeOffset? SourcePublicationDate { get; set; }
+
+    /// <summary>
+    /// SHA-256 of the compressed archive used to install the package.
+    /// </summary>
+    public string? ArchiveSha256 { get; set; }
+
+    internal PackageContentAcquisition? AcquiredContent { get; set; }
+
+    internal PackageIdentityExpectation? IdentityExpectation { get; set; }
+
+    internal PackageCacheInstallOutcome InstallOutcome { get; set; } =
+        PackageCacheInstallOutcome.Unknown;
+
+    /// <summary>
+    /// Controls whether an invalid existing cache target is repaired or
+    /// reported. Hardened cache implementations must honor this policy before
+    /// consuming replacement content.
+    /// </summary>
+    public CorruptCacheBehavior CorruptCacheBehavior { get; set; } =
+        CorruptCacheBehavior.Repair;
+
+    /// <summary>
+    /// When <c>true</c>, a mutable alias whose acquired archive SHA-256 matches
+    /// the recorded archive may refresh metadata without replacing content.
+    /// </summary>
+    public bool SkipIfArchiveUnchanged { get; set; }
+
+    /// <summary>Optional progress callback for hardened cache work.</summary>
+    public IProgress<PackageProgress>? Progress { get; set; }
 }

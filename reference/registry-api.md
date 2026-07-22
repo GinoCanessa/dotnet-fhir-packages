@@ -2,6 +2,12 @@
 
 This document covers the FHIR package registry server API, including all endpoints, request parameters, response formats, and examples.
 
+> **Scope note:** This describes the **server-side** registry/CI API as observed
+> through live requests. FhirPkg consumes only a subset of it; the sections
+> marked *external context* (server database schema, error responses, security
+> headers, and the `version.info` / `package.rN.tgz` / IG manifest endpoints)
+> are **not** exercised by this repository and cannot be verified from its source.
+
 <!-- Validated: 2026-03-09 via live curl requests against production registries -->
 
 ## API Overview
@@ -15,7 +21,12 @@ The FHIR package server exposes an NPM-compatible API with FHIR-specific extensi
 | Primary (Firely) | `https://packages.fhir.org` |
 | Secondary (HL7) | `https://packages2.fhir.org/packages` |
 
-> **Note:** The primary registry is also accessible as `packages.simplifier.net`. Tarball download URLs returned by the primary registry use the `packages.simplifier.net` hostname.
+> **Note:** The primary registry is also accessible as
+> `packages.simplifier.net`. Tarball download URLs returned by the primary
+> registry use that different origin. The SDK does not forward registry
+> authorization or custom headers across origins by default. Private deployments
+> that intentionally authenticate a separate package CDN must add its exact
+> scheme, host, and port to `RegistryEndpoint.TrustedHeaderOrigins`.
 
 ## Endpoints
 
@@ -182,7 +193,10 @@ GET https://packages.fhir.org/hl7.fhir.us.core
 }
 ```
 
-> **Note:** Tarball URLs in the primary registry point to `packages.simplifier.net`, not `packages.fhir.org`. Clients should follow the URL as-is rather than constructing download URLs independently.
+> **Note:** Tarball URLs in the primary registry point to
+> `packages.simplifier.net`, not `packages.fhir.org`. Clients should follow the
+> URL as-is rather than constructing download URLs independently, but must not
+> forward credentials to that origin unless it is explicitly trusted.
 
 <!-- ✅ VALIDATED 2026-03-09: Secondary listing confirmed. Includes extra fields per version:
      _id (version-specific), date, fhirVersion (literal), kind, count, canonical, url,
@@ -289,6 +303,24 @@ The error format differs between registries:
 ```
 The package "nonexistent.package.xyz#1.0.0" is not known by this server
 ```
+
+---
+
+### Package Publication
+
+FHIR-NPM publication uses an endpoint-exact authenticated request:
+
+```http
+PUT /{package-id}
+Content-Type: application/gzip
+
+<raw .tgz bytes>
+```
+
+`FhirNpmRegistryClient` uses this raw-gzip shape. `NpmRegistryClient` targets
+standard NPM-compatible servers instead and sends a JSON packument containing
+`dist-tags`, `versions`, `_attachments`, SHA-1 `shasum`, and SHA-512
+`integrity`. The manager never retries a publish against another registry.
 
 ---
 
@@ -556,6 +588,9 @@ date=20260306154815
 
 > **Note:** The `version.info` file contains both `FhirVersion` and `version` fields (which may be identical). The `buildId` uses a git-describe format (e.g., `v5.0.0-5919-g576287d4e6`).
 
+> **External context:** FhirPkg does **not** fetch or parse `version.info`. CI
+> freshness is derived from the package manifest date instead.
+
 ---
 
 ## HL7 Website Endpoints
@@ -617,6 +652,10 @@ HTML listing of all FHIR publications with package download links.
 ---
 
 ## Server Database Schema
+
+> **External context:** The server's internal storage is not part of FhirPkg and
+> is described here only as observed through the public API. It cannot be
+> verified from this repository.
 
 The package server uses SQLite with the following core tables:
 

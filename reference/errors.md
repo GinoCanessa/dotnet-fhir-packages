@@ -2,6 +2,25 @@
 
 This document catalogs common error scenarios in FHIR package management, their causes, and recommended handling strategies.
 
+## FhirPkg Error Model
+
+Errors raised by this library are structured, not free-form:
+
+- **`PackageInstallException`** carries a `PackageInstallErrorCode` (e.g.
+  `InvalidPackageIdentity`, `InvalidArchive`, `ChecksumMismatch`,
+  `ExpandedSizeLimitExceeded`) and the `PackageInstallStage` at which it
+  occurred.
+- **`DependencyInstallationException`** wraps a failed transitive install;
+  unresolved dependencies are also surfaced non-throwing through
+  `PackageClosure.Missing`/`Failures` returned by `RestoreAsync`.
+- **`RegistryOperationException`** (with a `RegistryFailureCategory`) and
+  `RegistryResponseTimeoutException` cover registry and transport failures.
+
+The CLI maps these to stable process exit codes `0`–`8` (see
+[CLI Reference](../docs/cli-reference.md#exit-codes)); the full
+`PackageInstallErrorCode` table is in the
+[SDK API Reference](../docs/sdk-api-reference.md).
+
 ## Error Categories
 
 ```mermaid
@@ -41,7 +60,7 @@ flowchart TD
 | Implementation | Behavior |
 |---------------|----------|
 | SUSHI | Returns `LoadStatus.FAILED`, logs error |
-| Firely | Returns `null` from `PackageClient`, adds to `Missing` list |
+| FhirPkg | `ResolveAsync`/`GetPackageListingAsync` return `null` when all sources report absence; throw `RegistryOperationException` on registry failure |
 | CodeGen | Returns `null` from `GetOrInstallAsync` |
 | Java Publisher | Throws `FHIRException` with "Unknown Package {id}#{version}" |
 
@@ -175,9 +194,11 @@ flowchart TD
 **Required fields:** `name`, `version`
 
 ```csharp
-// Firely
-if (manifest == null)
-    throw new InvalidOperationException("Package does not have a package manifest");
+// FhirPkg — identity/manifest validation failure
+throw new PackageInstallException(
+    PackageInstallErrorCode.InvalidPackageIdentity,
+    PackageInstallStage.IdentityValidation,
+    "Package manifest name/version does not match the requested identity.");
 ```
 
 ### Missing package.json
@@ -210,7 +231,7 @@ catch {
 | Implementation | Behavior |
 |---------------|----------|
 | SUSHI | Logs error, continues with available packages |
-| Firely | Adds to `PackageClosure.Missing`, throws `AggregateException` at end |
+| FhirPkg | Populates `PackageClosure.Missing`/`Failures` (no throw on restore); a failed dependency install raises `DependencyInstallationException` |
 | CodeGen | Returns null for the specific package |
 | Java Publisher | Logs warning, continues |
 

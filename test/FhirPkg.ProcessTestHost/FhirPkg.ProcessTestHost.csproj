@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>
+    <LangVersion>14</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>FhirPkg.ProcessTestHost</RootNamespace>
+    <UsePublishedFhirPkg Condition="'$(UsePublishedFhirPkg)' == ''">false</UsePublishedFhirPkg>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(UsePublishedFhirPkg)' != 'true'">
+    <ProjectReference Include="..\..\src\FhirPkg\FhirPkg.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UsePublishedFhirPkg)' == 'true'">
+    <ProjectReference Remove="..\..\src\FhirPkg\FhirPkg.csproj" />
+    <PackageReference Include="fhir-pkg-lib" />
+  </ItemGroup>
+
+  <Target
+    Name="ValidatePublishedQualificationProperties"
+    BeforeTargets="CollectPackageReferences"
+    Condition="'$(UsePublishedFhirPkg)' == 'true'">
+    <Error
+      Condition="'$(FhirPkgQualificationPackageVersion)' == ''"
+      Text="FhirPkgQualificationPackageVersion is required when UsePublishedFhirPkg=true." />
+  </Target>
+
+</Project>

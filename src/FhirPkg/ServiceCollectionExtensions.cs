@@ -2,9 +2,11 @@
 
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
+using FhirPkg.Installation;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
+using FhirPkg.Utilities;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -48,6 +50,9 @@ public static class ServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
+        bool hasPreRegisteredOptions = services.Any(descriptor =>
+            descriptor.ServiceType == typeof(FhirPackageManagerOptions));
+
         // Register and configure options
         OptionsBuilder<FhirPackageManagerOptions> optionsBuilder = services.AddOptions<FhirPackageManagerOptions>();
         if (configure is not null)
@@ -55,24 +60,37 @@ public static class ServiceCollectionExtensions
             optionsBuilder.Configure(configure);
         }
 
-        // Register the options instance for direct injection
         services.TryAddSingleton(sp =>
         {
-            IOptions<FhirPackageManagerOptions> opts = sp.GetRequiredService<IOptions<FhirPackageManagerOptions>>();
-            return opts.Value;
+            FhirPackageManagerOptions configuredOptions = hasPreRegisteredOptions
+                ? sp.GetRequiredService<FhirPackageManagerOptions>()
+                : sp.GetRequiredService<IOptions<FhirPackageManagerOptions>>().Value;
+            return FhirPackageManagerConfiguration.Create(configuredOptions);
         });
+
+        if (!hasPreRegisteredOptions)
+        {
+            services.TryAddSingleton(sp =>
+            {
+                FhirPackageManagerConfiguration configuration =
+                    sp.GetRequiredService<FhirPackageManagerConfiguration>();
+                return FhirPackageManagerConfiguration.Create(
+                    configuration.Options,
+                    configuration.InstallLimits).Options;
+            });
+        }
 
         // Register HttpClient via the typed HttpClient factory
         services.AddHttpClient("FhirPackages", (sp, client) =>
         {
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
-            client.Timeout = options.HttpTimeout;
+            client.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
         }).ConfigurePrimaryHttpMessageHandler(sp =>
         {
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerOptions options =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>().Options;
             return new HttpClientHandler
             {
-                AllowAutoRedirect = true,
+                AllowAutoRedirect = false,
                 MaxAutomaticRedirections = options.MaxRedirects
             };
         });
@@ -80,22 +98,42 @@ public static class ServiceCollectionExtensions
         // Register IPackageCache as DiskPackageCache
         services.TryAddSingleton<IPackageCache>(sp =>
         {
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerConfiguration configuration =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>();
+            FhirPackageManagerOptions options = configuration.Options;
             ILogger<DiskPackageCache> logger = sp.GetRequiredService<ILogger<DiskPackageCache>>();
             TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
-            return new DiskPackageCache(options.CachePath, logger, timeProvider);
+            PackageInstallLimits installLimits = configuration.InstallLimits;
+            return new DiskPackageCache(options.CachePath, logger, timeProvider, installLimits);
         });
+        services.TryAddSingleton<IHardenedPackageCache>(sp =>
+            sp.GetRequiredService<IPackageCache>()
+                as IHardenedPackageCache
+            ?? throw new PackageInstallException(
+                PackageInstallErrorCode.UnsupportedCacheCapability,
+                PackageInstallStage.PolicyValidation,
+                "The configured package cache does not support hardened installation."));
 
         // Register IRegistryClient as a composite RedundantRegistryClient
         services.TryAddSingleton<IRegistryClient>(sp =>
         {
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerOptions options =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>().Options;
             IHttpClientFactory httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             HttpClient httpClient = httpClientFactory.CreateClient("FhirPackages");
             ILoggerFactory loggerFactory = sp.GetRequiredService<ILoggerFactory>();
             TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
+            RegistryHttpTransport transport =
+                RegistryHttpTransport.CreateRedirectControlled(
+                    httpClient,
+                    options.HttpTimeout,
+                    options.MaxRedirects);
 
-            return RegistryClientFactory.BuildRegistryClient(options, httpClient, loggerFactory, timeProvider);
+            return RegistryClientFactory.BuildRegistryClient(
+                options,
+                transport,
+                loggerFactory,
+                timeProvider);
         });
 
         // Register IVersionResolver as VersionResolver
@@ -114,7 +152,15 @@ public static class ServiceCollectionExtensions
             IPackageCache cache = sp.GetRequiredService<IPackageCache>();
             ILogger<DependencyResolver> logger = sp.GetRequiredService<ILogger<DependencyResolver>>();
             TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
-            return new DependencyResolver(registryClient, versionResolver, cache, logger, timeProvider);
+            PackageFixupPolicy fixupPolicy =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>().FixupPolicy;
+            return new DependencyResolver(
+                registryClient,
+                versionResolver,
+                cache,
+                logger,
+                fixupPolicy,
+                timeProvider);
         });
 
         // Register IPackageIndexer as PackageIndexer
@@ -135,15 +181,20 @@ public static class ServiceCollectionExtensions
             IVersionResolver versionResolver = sp.GetRequiredService<IVersionResolver>();
             IDependencyResolver dependencyResolver = sp.GetRequiredService<IDependencyResolver>();
             IPackageIndexer packageIndexer = sp.GetRequiredService<IPackageIndexer>();
-            FhirPackageManagerOptions options = sp.GetRequiredService<FhirPackageManagerOptions>();
+            FhirPackageManagerConfiguration configuration =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>();
+            FhirPackageManagerOptions options = configuration.Options;
             ILogger<FhirPackageManager> logger = sp.GetRequiredService<ILogger<FhirPackageManager>>();
+            PackageInstallLimits installLimits = configuration.InstallLimits;
+            IHttpClientFactory httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+            HttpClient httpClient = httpClientFactory.CreateClient("FhirPackages");
 
             // Only create in-memory resource cache when configured with a positive cache size
             MemoryResourceCache? memoryCache = options.ResourceCacheSize > 0
                 ? new MemoryResourceCache(options.ResourceCacheSize, options.ResourceCacheSafeMode)
                 : null;
 
-            return new FhirPackageManager(
+            return FhirPackageManager.CreateWithHttpClient(
                 cache,
                 registryClient,
                 versionResolver,
@@ -151,8 +202,26 @@ public static class ServiceCollectionExtensions
                 packageIndexer,
                 options,
                 logger,
-                memoryCache);
+                memoryCache,
+                installLimits,
+                httpClient,
+                sp.GetRequiredService<ILoggerFactory>(),
+                redirectsControlled: true);
         });
+
+        services.TryAddSingleton<IHardenedFhirPackageManager>(sp =>
+            sp.GetRequiredService<IFhirPackageManager>()
+                as IHardenedFhirPackageManager
+            ?? throw new PackageInstallException(
+                PackageInstallErrorCode.UnsupportedManagerCapability,
+                PackageInstallStage.PolicyValidation,
+                "The configured package manager does not support hardened installation sources."));
+
+        services.TryAddSingleton<IFhirPackageResourceManager>(sp =>
+            sp.GetRequiredService<IFhirPackageManager>()
+                as IFhirPackageResourceManager
+            ?? throw new InvalidOperationException(
+                "The configured package manager does not support resource indexing."));
 
         return services;
     }

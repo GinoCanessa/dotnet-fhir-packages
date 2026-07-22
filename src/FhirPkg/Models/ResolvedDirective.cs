@@ -24,9 +24,24 @@ public record ResolvedDirective
     /// </summary>
     public string? Sha256Sum { get; init; }
 
-    /// <summary>The registry endpoint that resolved this package.</summary>
+    /// <summary>
+    /// The Subresource Integrity value supplied by the selected registry source.
+    /// </summary>
+    public string? Integrity { get; init; }
+
+    /// <summary>
+    /// Credential-free registry-origin provenance for the source that resolved this package.
+    /// </summary>
     public RegistryEndpoint? SourceRegistry { get; init; }
+
+    internal IRegistryClient? SourceClient { get; init; }
 
     /// <summary>The date this version was published.</summary>
     public DateTime? PublicationDate { get; init; }
+
+    /// <summary>Dependencies declared by the selected source candidate.</summary>
+    public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
+
+    /// <summary>FHIR versions declared by the selected source candidate.</summary>
+    public IReadOnlyList<string>? FhirVersions { get; init; }
 }

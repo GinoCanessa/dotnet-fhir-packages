@@ -77,11 +77,11 @@ hl7.fhir.us.core#current$main   # CI build for a branch
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--with-dependencies` | `-d` | `bool` | `false` | Also install transitive dependencies declared in each package's manifest. |
-| `--overwrite` | — | `bool` | `false` | Re-download and overwrite packages that are already in the cache. |
+| `--overwrite` | — | `bool` | `false` | Re-download packages already in the cache. An unchanged mutable CI archive is reported as refreshed. |
 | `--fhir-version <release>` | `-f` | `string` | — | Preferred FHIR release when a package publishes multiple versions. Accepted values: `R4`, `R4B`, `R5`, `R6`. |
 | `--pre-release` | — | `bool` | `true` | Include pre-release versions when resolving wildcards, ranges, or `latest`. |
 | `--no-pre-release` | — | `bool` | `false` | Exclude pre-release versions. Takes precedence over `--pre-release`. |
-| `--registry <url>` | `-r` | `string` | — | Query a custom registry URL in addition to the default registries. |
+| `--registry <url>` | `-r` | `string` | — | Query a custom registry URL first; replaces the built-in primary/secondary registries (CI build and HL7 fallback still apply). |
 | `--auth <value>` | — | `string` | — | Authorization header value for the custom registry (e.g., `"Bearer <token>"`). |
 | `--no-ci` | — | `bool` | `false` | Exclude the FHIR CI build registry from resolution. |
 | `--progress` | — | `bool` | `true` | Show a download progress indicator. |
@@ -106,19 +106,40 @@ fhir-pkg install hl7.fhir.r4.core#4.0.1 --overwrite
 # Install latest CI build
 fhir-pkg install hl7.fhir.us.core#current
 
+# Explicitly refresh the current CI build
+fhir-pkg install hl7.fhir.us.core#current --overwrite
+
 # JSON output for scripting
-fhir-pkg install hl7.fhir.r4.core#4.0.1 --json
+fhir-pkg install hl7.fhir.us.core#current --json
 ```
+
+With `--with-dependencies`, the root package is committed before its active
+dependency closure is installed. If any requested dependency fails, the command
+returns exit code `6`, lists each failed child directive, and reports the root
+cache path as committed partial state.
 
 #### Output
 
-**Console mode** — shows a status icon per package:
+**Console mode** — exact and other immutable directives retain their existing
+installed/already-cached labels. Mutable CI aliases distinguish all successful
+cache effects:
 
+```text
+  first.package#current                   ✓ installed
+    manifest date: 20260721
+  updated.package#current                 ✓ updated from CI
+    manifest date: 20260720 -> 20260721
+  current.package#current                 ✓ already current
+    manifest date: 20260721
+  refreshed.package#current               ✓ refreshed
+    manifest date: 20260721 (unchanged)
+
+Summary: 1 installed, 1 updated, 1 already current, 1 refreshed,
+         0 already cached, 0 failed
 ```
-✓ hl7.fhir.r4.core#4.0.1           Installed
-● hl7.fhir.us.core#6.1.0           Already cached
-✗ some.missing.package#1.0.0       Not found
-```
+
+Missing manifest dates render as `unavailable`. `AlreadyCurrent` is a
+successful outcome and keeps exit code `0`.
 
 **JSON mode** — structured result with summary:
 
@@ -126,14 +147,41 @@ fhir-pkg install hl7.fhir.r4.core#4.0.1 --json
 {
   "results": [
     {
-      "directive": "hl7.fhir.r4.core#4.0.1",
-      "status": "installed",
-      "package": { "name": "hl7.fhir.r4.core", "version": "4.0.1" }
+      "directive": "updated.package#current",
+      "status": "Installed",
+      "dependencyFailures": [],
+      "package": {
+        "name": "updated.package",
+        "version": "current",
+        "directoryPath": "C:\\Users\\me\\.fhir\\packages\\updated.package#current"
+      },
+      "disposition": "Updated",
+      "previousManifestDate": "20260720",
+      "manifestDate": "20260721"
     }
   ],
-  "summary": { "total": 1, "installed": 1, "alreadyCached": 0, "failed": 0 }
+  "summary": {
+    "total": 1,
+    "installed": 1,
+    "alreadyCached": 0,
+    "failed": 0,
+    "dispositions": {
+      "installed": 0,
+      "updated": 1,
+      "alreadyCurrent": 0,
+      "refreshed": 0
+    }
+  }
 }
 ```
+
+The existing coarse `summary.installed` count is unchanged: every successful
+mutable-CI disposition contributes to it. The nested `summary.dispositions`
+object is non-overlapping and its four buckets total that coarse installed
+count. For a recognized mutable-CI disposition, both date keys are present and
+may be explicit JSON `null`. The disposition and date keys are omitted for
+non-CI results, failures, and successful installs whose cache implementation
+cannot report an authoritative effect.
 
 ---
 
@@ -156,10 +204,10 @@ fhir-pkg restore [project-path] [options]
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--lock-file <path>` | `-l` | `string` | — | Path to a lock file. If it exists, restore from it for deterministic results. |
-| `--no-lock` | — | `bool` | `false` | Do not write or update a lock file after restore. |
+| `--lock-file <path>` | `-l` | `string` | `<project-path>/fhirpkg.lock.json` | Lock file to read and write. Relative paths are resolved against `project-path`; absolute paths are unchanged. The filename `.fhirpkg-restore.lock` is reserved for coordination. |
+| `--no-lock` | — | `bool` | `false` | Do not write or update the lock file. A current existing lock can still be read. |
 | `--conflict-strategy <strategy>` | — | `enum` | `HighestWins` | How to handle version conflicts. Values: `HighestWins`, `FirstWins`, `Error`. |
-| `--max-depth <n>` | — | `int` | `20` | Maximum recursion depth for transitive dependency resolution. |
+| `--max-depth <n>` | — | `int` | `20` | Maximum root-relative depth for transitive dependency resolution. Must be non-negative; direct dependencies are depth `0`. |
 | `--fhir-version <release>` | `-f` | `string` | — | Preferred FHIR release (`R4`, `R4B`, `R5`, `R6`). |
 
 #### Examples
@@ -172,11 +220,26 @@ fhir-pkg restore
 fhir-pkg restore ./my-ig-project
 
 # Restore with a lock file
-fhir-pkg restore --lock-file ./fhirpkg.lock.json
+fhir-pkg restore ./my-ig-project --lock-file ./locks/fhirpkg.lock.json
 
 # Fail on version conflicts instead of auto-resolving
 fhir-pkg restore --conflict-strategy Error
 ```
+
+A schema-v2 lock is used as a fast path only when its project package identity
+and root directives exactly match the manifest and its conflict, prerelease,
+FHIR-release, depth, and version-fixup policies match the current request.
+Package names are matched case-insensitively; version text is matched exactly.
+Root order must also match for `FirstWins`. Legacy schema-v1, incomplete, stale,
+or missing locks are re-resolved. Unknown future schemas are rejected without
+changing the file. Locked dependency values must be concrete semantic-version
+pins, each effective root must be represented, and an empty root set requires
+an empty dependency map.
+
+Only a complete resolution is written. Lock replacement is a durable,
+same-directory atomic operation, so cancellation or a pre-commit failure leaves
+the previous lock unchanged. `--overwrite` is not a restore option: cache
+replacement and lock freshness are independent SDK concerns.
 
 #### Output
 
@@ -190,7 +253,7 @@ Resolved 12 packages:
   hl7.fhir.us.core                  6.1.0      R4
   ...
 
-✓ Restore complete (12 resolved, 0 missing)
+✓ Restore complete — 12 package(s) resolved.
 ```
 
 **JSON mode** — structured closure:
@@ -212,6 +275,9 @@ Resolved 12 packages:
 ### list
 
 List FHIR packages in the local cache.
+
+The command reads package manifests and cache metadata, but does not hydrate
+or validate persisted resource indexes (`.index.json`).
 
 ```
 fhir-pkg list [filter] [options]
@@ -262,7 +328,7 @@ hl7.fhir.us.core            6.1.0      R4      2026-03-05
 {
   "count": 2,
   "packages": [
-    { "name": "hl7.fhir.r4.core", "version": "4.0.1", "fhirVersion": "R4", "installed": "2026-03-01" }
+    { "name": "hl7.fhir.r4.core", "version": "4.0.1", "fhirVersion": "R4", "installedAt": "2026-03-01" }
   ]
 }
 ```
@@ -317,8 +383,8 @@ fhir-pkg clean [options]
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--force` | `-f` | `bool` | `false` | Skip the confirmation prompt. |
-| `--ci-only` | — | `bool` | `false` | Only remove CI build (pre-release snapshot) packages. |
-| `--older-than <days>` | — | `int` | — | Only remove packages not accessed in the last N days. |
+| `--ci-only` | — | `bool` | `false` | Only remove the `current` and `current$branch` CI aliases. |
+| `--older-than <days>` | — | non-negative `int` | — | Only remove packages installed more than N days ago. |
 
 #### Examples
 
@@ -329,12 +395,19 @@ fhir-pkg clean
 # Clean without prompting
 fhir-pkg clean --force
 
-# Remove only CI build packages
+# Remove current and current$branch aliases
 fhir-pkg clean --ci-only --force
 
-# Remove packages not used in the last 30 days
+# Remove packages installed more than 30 days ago
 fhir-pkg clean --older-than 30 --force
 ```
+
+Age is based on the cache installation/download timestamp, not file access
+time. Packages without a recorded timestamp are never selected by
+`--older-than`. When filters are combined, all filters must match; a package
+installed exactly at the cutoff is retained. Malformed timestamps are treated
+as unknown, and each selected package is removed only if its cache generation
+is unchanged since selection.
 
 ---
 
@@ -389,17 +462,21 @@ hl7.fhir.us.davinci-pas     2.0.1      R4      Da Vinci Prior Authorization
 **JSON mode:**
 
 ```json
-[
-  {
-    "name": "hl7.fhir.us.core",
-    "version": "6.1.0",
-    "fhirVersion": "R4",
-    "description": "US Core Implementation Guide",
-    "canonical": "http://hl7.org/fhir/us/core",
-    "kind": "IG",
-    "date": "2024-01-15"
-  }
-]
+{
+  "count": 1,
+  "results": [
+    {
+      "name": "hl7.fhir.us.core",
+      "version": "6.1.0",
+      "fhirVersion": "R4",
+      "description": "US Core Implementation Guide",
+      "canonical": "http://hl7.org/fhir/us/core",
+      "kind": "IG",
+      "date": "2024-01-15",
+      "url": "https://packages.fhir.org/hl7.fhir.us.core/6.1.0"
+    }
+  ]
+}
 ```
 
 ---
@@ -527,7 +604,7 @@ Published:  2024-01-15
 
 ### publish
 
-Publish a FHIR package tarball to a registry.
+Publish a FHIR package tarball to a FHIR-NPM registry.
 
 ```
 fhir-pkg publish <tarball> --registry <url> --auth <value>
@@ -545,6 +622,12 @@ fhir-pkg publish <tarball> --registry <url> --auth <value>
 |--------|-------|------|---------|----------|-------------|
 | `--registry <url>` | `-r` | `string` | — | **Yes** | Registry URL to publish to. |
 | `--auth <value>` | — | `string` | — | **Yes** | Authorization header value (e.g., `"Bearer <token>"`). |
+
+The CLI uses `RegistryType.FhirNpm`, validates the archive under the configured
+package limits, and sends the `.tgz` as the raw request body to exactly the
+specified endpoint. It does not fall back to configured read registries.
+Standard NPM packument publication is available through the SDK by passing a
+`RegistryEndpoint` whose type is `RegistryType.Npm`.
 
 #### Examples
 
@@ -589,6 +672,19 @@ fhir-pkg publish ./output/my.ig.package-1.0.0.tgz \
 | `7` | `CacheError` | An error occurred reading from or writing to the local cache. |
 | `8` | `AuthError` | Authentication or authorization failed. |
 
+An `already current` mutable-CI result is successful and returns code `0`.
+
+Notes on specific codes:
+
+- `2 InvalidArgs` is returned by explicit command validation — currently
+  `restore` with a negative `--max-depth` or an unsupported `--fhir-version`.
+  Malformed parser input (a missing required option, an unknown flag, a bad
+  arity) is reported by the command-line parser and exits with `1`.
+- `8 AuthError` is currently produced only by `publish` (on an
+  `UnauthorizedAccessException`). Other commands surface registry auth or HTTP
+  failures as `4 NetworkError`.
+- Cancellation (Ctrl-C) exits with `1 GeneralError`.
+
 Use exit codes in scripts:
 
 ```bash
@@ -613,7 +709,8 @@ if ($LASTEXITCODE -ne 0) {
 ## Configuration File
 
 `fhir-pkg` reads an optional `.fhir-pkg.json` file for default settings. The
-tool checks two locations:
+tool checks two locations, in order, and uses the **first file that exists** —
+the two files are never merged:
 
 1. The **current working directory** (project-level config)
 2. The **user's home directory** (user-level defaults)
@@ -621,10 +718,9 @@ tool checks two locations:
 **Precedence order** (highest to lowest):
 
 1. Command-line options
-2. Environment variables
-3. `.fhir-pkg.json` in current directory
-4. `.fhir-pkg.json` in home directory
-5. Built-in defaults
+2. Environment variables (for settings that have one — e.g. `PACKAGE_CACHE_FOLDER`)
+3. The first `.fhir-pkg.json` found (current directory, else home directory)
+4. Built-in defaults
 
 ### Schema
 
@@ -650,7 +746,7 @@ tool checks two locations:
 | `httpTimeout` | `int` | HTTP timeout in seconds. |
 | `includeCiBuilds` | `bool` | Whether to include the CI build registry. |
 | `verifyChecksums` | `bool` | Whether to verify SHA-1 checksums on download. |
-| `registries` | `array` | Additional registry endpoints. |
+| `registries` | `array` | Registry endpoints that replace the built-in primary/secondary (CI/HL7 fallback still apply). |
 | `registries[].url` | `string` | Registry base URL. |
 | `registries[].type` | `string` | Registry type: `FhirNpm`, `FhirCiBuild`, `FhirHttp`, `Npm`. |
 | `registries[].auth` | `string` | Authorization header value. |
@@ -662,15 +758,26 @@ tool checks two locations:
 | Variable | Description | Equivalent Option |
 |----------|-------------|-------------------|
 | `PACKAGE_CACHE_FOLDER` | Override the default cache directory. | `--package-cache-folder` |
-| `FHIR_REGISTRY` | Custom registry URL added to the default chain. | `--registry` |
-| `FHIR_REGISTRY_TOKEN` | Bearer token for registry authentication. | `--auth "Bearer ..."` |
-| `FHIR_PKG_NO_CI` | Set to `1` to disable CI build resolution. | `--no-ci` |
-| `FHIR_PKG_VERBOSE` | Set to `1` to enable verbose logging. | `--verbose` |
-| `FHIR_PKG_JSON` | Set to `1` to default to JSON output. | `--json` |
-| `NO_COLOR` | Set to any value to disable colored output. | `--no-color` |
-| `HTTPS_PROXY` | HTTPS proxy URL. | — |
-| `HTTP_PROXY` | HTTP proxy URL. | — |
+| `FHIR_PKG_VERBOSE` | Set to `1`, `true`, or `yes` (case-insensitive) to enable verbose logging. | `--verbose` |
+| `FHIR_PKG_JSON` | Set to `1`, `true`, or `yes` (case-insensitive) to default to JSON output. | `--json` |
+| `NO_COLOR` | Set to `1`, `true`, or `yes` (case-insensitive) to disable colored output. | `--no-color` |
+| `FHIRPKG_MAX_COMPRESSED_BYTES` | Max compressed (downloaded) archive size, in bytes (default 104857600). | — |
+| `FHIRPKG_MAX_EXPANDED_BYTES` | Max total expanded archive size, in bytes (default 1073741824). | — |
+| `FHIRPKG_MAX_ENTRY_BYTES` | Max expanded size of a single archive entry, in bytes (default 134217728). | — |
+| `FHIRPKG_MAX_ARCHIVE_ENTRIES` | Max number of entries in an archive (default 50000). | — |
+| `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH` | Max length of a normalized entry path, in characters (default 1024). | — |
+| `FHIRPKG_MAX_ARCHIVE_DEPTH` | Max directory-nesting depth of any entry (default 32). | — |
+| `HTTPS_PROXY` | HTTPS proxy URL (honored by .NET's `HttpClient`). | — |
+| `HTTP_PROXY` | HTTP proxy URL (honored by .NET's `HttpClient`). | — |
 | `NO_PROXY` | Comma-separated list of hosts to bypass proxy. | — |
+
+A custom registry and its credentials are configured with `--registry`/`-r` and
+`--auth` (or the `registries` array in `.fhir-pkg.json`) — there is no
+`FHIR_REGISTRY` or `FHIR_REGISTRY_TOKEN` variable. CI build resolution is
+disabled with `install --no-ci` or `"includeCiBuilds": false` — there is no
+`FHIR_PKG_NO_CI` variable. Each `FHIRPKG_MAX_*` value must be a positive base-10
+integer (invariant culture); a non-positive or non-numeric value aborts the
+operation.
 
 ---
 
@@ -692,8 +799,10 @@ Machine-readable JSON output written to stdout. All JSON output uses:
 
 - **camelCase** property names
 - **Indented** formatting
-- **Null suppression** — null properties are omitted
-- **camelCase enums** — enum values are serialized as camelCase strings
+- **Null suppression** — null properties are normally omitted; recognized
+  mutable-CI install results retain explicit null manifest-date keys
+- **Enum strings** — enum-typed fields use camelCase; the install `status` and
+  `disposition` compatibility strings retain their documented PascalCase values
 
 Errors in JSON mode are written as:
 

@@ -2,6 +2,7 @@
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
 using FhirPkg.Models;
+using FhirPkg.Utilities;
 
 namespace FhirPkg.Resolution;
 
@@ -18,8 +19,10 @@ public class DependencyResolveOptions
     public ConflictResolutionStrategy ConflictStrategy { get; set; } = ConflictResolutionStrategy.HighestWins;
 
     /// <summary>
-    /// Maximum recursion depth for transitive dependency resolution.
-    /// Prevents runaway resolution in deeply nested or circular dependency graphs.
+    /// Maximum root-relative depth for transitive dependency resolution.
+    /// Direct dependencies are depth zero, so a value of zero allows direct
+    /// dependencies while reporting their children as depth-limit failures.
+    /// Negative values are rejected.
     /// Default: 20.
     /// </summary>
     public int MaxDepth { get; set; } = 20;
@@ -35,4 +38,12 @@ public class DependencyResolveOptions
     /// When <c>null</c>, any FHIR release is accepted.
     /// </summary>
     public FhirRelease? PreferredFhirRelease { get; set; }
+
+    internal PackageFixupPolicy? FixupPolicy { get; set; }
+
+    internal PackageReference? RootReference { get; set; }
+
+    internal bool InstallCachedPackages { get; set; }
+
+    internal bool PreferCachedAliases { get; set; }
 }

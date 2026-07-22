@@ -10,8 +10,24 @@ namespace FhirPkg;
 /// Controls cache location, registry endpoints, HTTP behavior, checksum verification,
 /// and in-memory caching parameters.
 /// </summary>
+/// <remarks>
+/// A package manager validates and snapshots these values at construction time.
+/// Later mutations to this instance or its collections do not reconfigure that manager.
+/// </remarks>
 public class FhirPackageManagerOptions
 {
+    /// <summary>
+    /// Finite package-processing limits. Explicit values override environment
+    /// values; unspecified values use the environment and then documented defaults.
+    /// </summary>
+    public PackageInstallLimits InstallLimits { get; set; } = new PackageInstallLimits();
+
+    /// <summary>
+    /// Controls whether an invalid cache target is repaired or reported.
+    /// Default: <see cref="FhirPkg.CorruptCacheBehavior.Repair"/>.
+    /// </summary>
+    public CorruptCacheBehavior CorruptCacheBehavior { get; set; } = CorruptCacheBehavior.Repair;
+
     /// <summary>
     /// Path to the local package cache directory.
     /// When <c>null</c>, the <c>PACKAGE_CACHE_FOLDER</c> environment variable is used
@@ -75,9 +91,15 @@ public class FhirPackageManagerOptions
     /// Known package version fixups that correct well-known errata in the FHIR package ecosystem.
     /// Keys are in the format <c>"name@version"</c>; values are the corrected version strings.
     /// </summary>
+    /// <remarks>
+    /// The final <c>@</c> separates the package name from the concrete source version,
+    /// allowing scoped package names. An empty dictionary disables configured version
+    /// rewrites but not package-name canonicalization or <c>-cibuild</c> stripping.
+    /// </remarks>
     public Dictionary<string, string> VersionFixups { get; init; } = new()
     {
-        ["hl7.fhir.r4.core@4.0.0"] = "4.0.1"
+        ["hl7.fhir.r4.core@4.0.0"] = "4.0.1",
+        ["hl7.fhir.r4b.core@4.3.0-snapshot1"] = "4.3.0",
     };
 }
 
@@ -86,6 +108,12 @@ public class FhirPackageManagerOptions
 /// </summary>
 public class InstallOptions
 {
+    /// <summary>
+    /// Optional per-call package-processing limits. Specified values may only
+    /// tighten the manager-level limits.
+    /// </summary>
+    public PackageInstallLimits? InstallLimits { get; set; }
+
     /// <summary>
     /// Whether to recursively install transitive dependencies of the target package.
     /// Default: <c>false</c>.
@@ -117,11 +145,36 @@ public class InstallOptions
 }
 
 /// <summary>
+/// Options for manager-owned URI and stream package sources.
+/// </summary>
+public class PackageSourceInstallOptions : InstallOptions
+{
+    /// <summary>
+    /// Optional per-call override for handling an invalid existing cache
+    /// target. When omitted, the manager-level policy is used.
+    /// </summary>
+    public CorruptCacheBehavior? CorruptCacheBehavior { get; set; }
+
+    /// <summary>Optional expected SHA-256 checksum in hexadecimal form.</summary>
+    public string? ExpectedSha256 { get; set; }
+
+    /// <summary>Optional expected SHA-1 checksum in hexadecimal form.</summary>
+    public string? ExpectedSha1 { get; set; }
+}
+
+/// <summary>
 /// Options controlling how project dependency restoration is performed.
 /// Extends <see cref="InstallOptions"/> with conflict resolution and lock file settings.
 /// </summary>
 public class RestoreOptions : InstallOptions
 {
+    /// <summary>
+    /// Optional lock file path. Relative paths are resolved against the project
+    /// directory. When omitted, <c>fhirpkg.lock.json</c> in the project
+    /// directory is used.
+    /// </summary>
+    public string? LockFilePath { get; set; }
+
     /// <summary>
     /// Strategy for resolving version conflicts when multiple dependencies require
     /// different versions of the same package. Default: <see cref="ConflictResolutionStrategy.HighestWins"/>.
@@ -135,8 +188,9 @@ public class RestoreOptions : InstallOptions
     public bool WriteLockFile { get; set; } = true;
 
     /// <summary>
-    /// Maximum recursion depth for transitive dependency resolution.
-    /// Prevents infinite loops in circular dependency graphs. Default: 20.
+    /// Maximum root-relative depth for transitive dependency resolution.
+    /// Direct dependencies are depth zero. Negative values are rejected.
+    /// Default: 20.
     /// </summary>
     public int MaxDepth { get; set; } = 20;
 }
@@ -154,5 +208,9 @@ public class VersionResolveOptions
     /// <summary>
     /// FHIR release to restrict resolution to. When <c>null</c>, all releases are considered.
     /// </summary>
+    /// <remarks>
+    /// Explicit package metadata is authoritative. Package-name inference is used only
+    /// when no explicit FHIR-version metadata is present.
+    /// </remarks>
     public FhirRelease? FhirRelease { get; set; }
 }

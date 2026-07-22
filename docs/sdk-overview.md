@@ -2,7 +2,8 @@
 
 FhirPkg is a C# SDK for discovering, resolving, downloading, caching, and managing
 [FHIR packages](https://registry.fhir.org/) from multiple registries. It targets
-**.NET 8+** (8, 9, and 10; 10 recommended) and is distributed as the **FhirPkg** NuGet package.
+**.NET 8+** (8, 9, and 10; 10 recommended) and is distributed as the
+**fhir-pkg-lib** NuGet package.
 
 ## Features
 
@@ -29,7 +30,7 @@ FhirPkg is a C# SDK for discovering, resolving, downloading, caching, and managi
 ## Installation
 
 ```bash
-dotnet add package FhirPkg
+dotnet add package fhir-pkg-lib
 ```
 
 ## Quick Start
@@ -37,36 +38,84 @@ dotnet add package FhirPkg
 ### Standalone Usage
 
 ```csharp
+using System.Text.Json.Nodes;
 using FhirPkg;
+using FhirPkg.Indexing;
+using FhirPkg.Models;
 
 // Create a manager with default options
-using var manager = new FhirPackageManager();
+using FhirPackageManager manager = new();
 
 // Install a single package
-var record = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
+PackageRecord? record =
+    await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
 Console.WriteLine($"Installed to {record?.ContentPath}");
 
-// Install multiple packages with dependencies
-var results = await manager.InstallManyAsync(
-    ["hl7.fhir.us.core#6.1.0", "hl7.fhir.uv.extensions.r4#1.0.0"],
-    new InstallOptions { IncludeDependencies = true });
+// Install multiple packages and inspect mutable-CI outcomes
+IReadOnlyList<PackageInstallResult> results =
+    await manager.InstallManyAsync(
+        ["hl7.fhir.us.core#current", "hl7.fhir.uv.extensions.r4#1.0.0"],
+        new InstallOptions { IncludeDependencies = true });
 
-foreach (var r in results)
-    Console.WriteLine($"{r.Directive}: {r.Status}");
+foreach (PackageInstallResult result in results)
+{
+    Console.WriteLine(
+        $"{result.Directive}: {result.Status} / " +
+        $"{result.Disposition?.ToString() ?? "no CI disposition"}");
+    if (result.Disposition == PackageInstallDisposition.Updated)
+    {
+        Console.WriteLine(
+            $"  manifest date: {result.PreviousManifestDate ?? "unavailable"} -> " +
+            $"{result.ManifestDate ?? "unavailable"}");
+    }
+    else if (result.Disposition is not null)
+    {
+        Console.WriteLine(
+            $"  manifest date: {result.ManifestDate ?? "unavailable"}");
+    }
+}
 
-// List cached packages
-var cached = await manager.ListCachedAsync();
-foreach (var pkg in cached)
+// List cached package summaries
+IReadOnlyList<PackageRecord> cached =
+    await manager.ListCachedSummariesAsync();
+foreach (PackageRecord pkg in cached)
     Console.WriteLine($"{pkg.Reference.FhirDirective} ({pkg.SizeBytes} bytes)");
 
 // Search registries
-var entries = await manager.SearchAsync(
-    new PackageSearchCriteria { Name = "hl7.fhir.us", FhirVersion = "R4" });
+IReadOnlyList<CatalogEntry> entries =
+    await manager.SearchAsync(
+        new PackageSearchCriteria
+        {
+            Name = "hl7.fhir.us",
+            FhirVersion = "R4"
+        });
 
 // Resolve without downloading
-var resolved = await manager.ResolveAsync("hl7.fhir.us.core#latest");
+ResolvedDirective? resolved =
+    await manager.ResolveAsync("hl7.fhir.us.core#latest");
 Console.WriteLine($"Resolved to {resolved?.Reference.Version} at {resolved?.TarballUri}");
+
+// Search and read resources from cached packages
+ResourceInfo? profile = await manager.FindByCanonicalUrlAsync(
+    "http://hl7.org/fhir/StructureDefinition/Patient",
+    "hl7.fhir.r4.core#4.0.1");
+JsonNode? resource = profile is null
+    ? null
+    : await manager.ReadResourceAsync(profile);
 ```
+
+Use `ListCachedAsync` instead when the caller needs populated
+`PackageRecord.Index` values.
+
+When dependency installation is requested, a failed child makes the aggregate
+root operation fail. `PackageInstallResult.Package` retains the committed root
+and `DependencyFailures` lists failed child directives. Single-package
+`InstallAsync` overloads throw `DependencyInstallationException` with the same
+partial-state information.
+
+The directive-based single-package `InstallAsync` overload still returns only
+`PackageRecord?`. Use `InstallManyAsync` when callers need the nullable mutable
+CI disposition and manifest-date fields.
 
 ### Dependency Injection
 
@@ -102,12 +151,14 @@ var manager = provider.GetRequiredService<IFhirPackageManager>();
 | `FhirPackageManagerOptions` | Singleton (configured via the callback) |
 | `HttpClient` | Via `IHttpClientFactory` |
 | `IPackageCache` | `DiskPackageCache` |
+| `IHardenedPackageCache` | Same `DiskPackageCache` singleton (cast; throws `UnsupportedCacheCapability` if unsupported) |
 | `IRegistryClient` | `RedundantRegistryClient` (chains all configured endpoints) |
 | `IVersionResolver` | `VersionResolver` |
 | `IDependencyResolver` | `DependencyResolver` |
 | `IPackageIndexer` | `PackageIndexer` |
-| `MemoryResourceCache` | Singleton (if `ResourceCacheSize > 0`) |
 | `IFhirPackageManager` | `FhirPackageManager` |
+| `IHardenedFhirPackageManager` | Same `FhirPackageManager` singleton (cast; throws `UnsupportedManagerCapability` if unsupported) |
+| `IFhirPackageResourceManager` | Same `FhirPackageManager` singleton |
 
 ### Restore from a Project Manifest
 
@@ -116,6 +167,7 @@ If your project contains a `package.json` with FHIR dependencies:
 ```csharp
 var closure = await manager.RestoreAsync("./my-ig-project", new RestoreOptions
 {
+    LockFilePath = "./locks/fhirpkg.lock.json",
     ConflictStrategy = ConflictResolutionStrategy.HighestWins,
     WriteLockFile = true,
     MaxDepth = 20,
@@ -134,6 +186,8 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
+| `InstallLimits` | `PackageInstallLimits` | 100 MiB compressed, 1 GiB expanded, 128 MiB/entry, 50,000 entries, path 1,024, depth 32 | Archive-processing safety limits (env-overridable) |
+| `CorruptCacheBehavior` | `CorruptCacheBehavior` | `Repair` | How an invalid cache target is handled (`Repair`, `Strict`) |
 | `CachePath` | `string?` | `PACKAGE_CACHE_FOLDER` env var, or `~/.fhir/packages` | Local package cache directory |
 | `Registries` | `List<RegistryEndpoint>` | `[]` | Custom registry endpoints (priority order) |
 | `IncludeCiBuilds` | `bool` | `true` | Query the FHIR CI build registry |
@@ -144,7 +198,7 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 | `MaxParallelRegistryQueries` | `int` | `3` | Concurrency limit for batch registry queries |
 | `ResourceCacheSize` | `int` | `200` | Max entries in in-memory resource cache (0 = disabled) |
 | `ResourceCacheSafeMode` | `SafeMode` | `Off` | Cache return behavior: `Off`, `Clone`, `Freeze` |
-| `VersionFixups` | `Dictionary<string, string>` | `{"hl7.fhir.r4.core@4.0.0": "4.0.1"}` | Known version corrections |
+| `VersionFixups` | `Dictionary<string, string>` | `{"hl7.fhir.r4.core@4.0.0": "4.0.1", "hl7.fhir.r4b.core@4.3.0-snapshot1": "4.3.0"}` | Known version corrections |
 
 ## Architecture
 
@@ -170,7 +224,23 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 The **`IFhirPackageManager`** interface is the primary entry point. It
 orchestrates the registry client chain, version resolver, dependency resolver,
 cache, and indexer to provide high-level workflows (install, restore, search,
-publish).
+publish). Additive extension methods expose resource indexing, lookup, and read
+operations without changing the original interface contract.
+
+The concrete manager also implements **`IFhirPackageResourceManager`**. New
+installs are indexed eagerly, while searches lazily generate any missing
+relevant indexes. Valid schema-v2 indexes are loaded from disk after restart;
+generated indexes are atomically persisted under the package identity lease
+before registration. Explicit and lazy indexing failures propagate and can be
+retried. Eager indexing failures are logged without changing installation
+success.
+
+`ReadResourceAsync` returns `JsonNode` and caches parsed resources by canonical
+package identity plus normalized contained path. Set `ResourceCacheSize` to
+zero to bypass memory caching. Custom package caches without generation-aware
+reads also bypass parsed-resource caching. Package overwrite, repair, removal,
+force reindex, and cache clean operations invalidate the affected resource
+state.
 
 ## Next Steps
 

@@ -389,3 +389,6 @@ msbuild.wrn
 /scratch
 
 *.local.json
+
+!docs/releases/
+!docs/releases/**

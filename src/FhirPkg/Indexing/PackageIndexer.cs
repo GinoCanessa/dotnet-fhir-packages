@@ -5,6 +5,8 @@ using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Text.Json;
 
+using FhirPkg.Installation;
+using FhirPkg.Models;
 using Microsoft.Extensions.Logging;
 
 namespace FhirPkg.Indexing;
@@ -31,7 +33,9 @@ namespace FhirPkg.Indexing;
 ///   <item><description><b>Resource</b>: kind == "resource" and derivation == "specialization"</description></item>
 /// </list>
 /// </remarks>
-public class PackageIndexer : IPackageIndexer
+public class PackageIndexer :
+    IPackageIndexer,
+    IManagedPackageIndexer
 {
     private const string IndexFileName = ".index.json";
 
@@ -42,17 +46,19 @@ public class PackageIndexer : IPackageIndexer
         ReadCommentHandling = JsonCommentHandling.Skip,
     };
 
-    private static readonly JsonSerializerOptions s_writeOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        WriteIndented = true,
-    };
-
     /// <summary>
-    /// In-memory store of indexed resources, keyed by package identity ("name#version" or content path).
-    /// Thread-safe for concurrent indexing.
+    /// In-memory stores of indexed resources. Manager-owned registrations are
+    /// kept separate from legacy path registrations so their lifecycles do not
+    /// interfere.
     /// </summary>
-    private readonly ConcurrentDictionary<string, IReadOnlyList<ResourceInfo>> _indexedPackages = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<
+        string,
+        IReadOnlyList<ResourceInfo>> _legacyIndexedPackages =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<
+        string,
+        IReadOnlyList<ResourceInfo>> _managedIndexedPackages =
+        new(StringComparer.Ordinal);
 
     private readonly ILogger _logger;
 
@@ -88,7 +94,7 @@ public class PackageIndexer : IPackageIndexer
             if (existingIndex is not null)
             {
                 _logger.LogDebug("Using existing .index.json from '{Path}'.", packageContentPath);
-                RegisterIndex(packageContentPath, existingIndex);
+                RegisterLegacyIndex(packageContentPath, existingIndex);
                 return existingIndex;
             }
         }
@@ -97,17 +103,97 @@ public class PackageIndexer : IPackageIndexer
         _logger.LogInformation("Generating index for package at '{Path}'.", packageContentPath);
         PackageIndex index = await BuildIndexAsync(packageContentPath, cancellationToken).ConfigureAwait(false);
 
-        RegisterIndex(packageContentPath, index);
+        RegisterLegacyIndex(packageContentPath, index);
 
         return index;
     }
+
+    async Task<PackageIndex> IManagedPackageIndexer.BuildIndexAsync(
+        PackageRecord package,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        _ = PackageCacheKey.Create(package.Reference);
+        if (!Directory.Exists(package.ContentPath))
+        {
+            throw new DirectoryNotFoundException(
+                $"Package content directory not found: {package.ContentPath}");
+        }
+
+        return await BuildIndexAsync(
+                package.ContentPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    void IManagedPackageIndexer.RegisterPersistedIndex(
+        PackageReference reference,
+        PackageIndex index)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        if (!PackageIndexValidation.TryValidateStructure(
+                index,
+                out string? failureReason))
+        {
+            throw new InvalidDataException(
+                $"The package index cannot be registered: {failureReason}");
+        }
+
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        RegisterIndex(
+            _managedIndexedPackages,
+            GetManagedRegistrationKey(cacheKey),
+            cacheKey.CanonicalReference,
+            index);
+    }
+
+    bool IManagedPackageIndexer.Unregister(
+        PackageReference reference)
+    {
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        return _managedIndexedPackages.TryRemove(
+            GetManagedRegistrationKey(cacheKey),
+            out IReadOnlyList<ResourceInfo>? _);
+    }
+
+    void IManagedPackageIndexer.Clear() =>
+        _managedIndexedPackages.Clear();
+
+    IReadOnlyList<ResourceInfo>
+        IManagedPackageIndexer.FindManagedResources(
+            ResourceSearchCriteria criteria) =>
+        FindResources(
+            criteria,
+            GetOrderedResources(
+                _managedIndexedPackages));
+
+    IReadOnlyList<ResourceInfo>
+        IManagedPackageIndexer.FindManagedByResourceType(
+            string resourceType,
+            string? packageScope) =>
+        FindByResourceType(
+            resourceType,
+            packageScope,
+            GetOrderedResources(
+                _managedIndexedPackages));
 
     /// <inheritdoc />
     public IReadOnlyList<ResourceInfo> FindResources(ResourceSearchCriteria criteria)
     {
         ArgumentNullException.ThrowIfNull(criteria);
 
-        IEnumerable<ResourceInfo> results = _indexedPackages.Values.SelectMany(r => r);
+        return FindResources(
+            criteria,
+            GetPublicOrderedResources(
+                _legacyIndexedPackages,
+                _managedIndexedPackages));
+    }
+
+    private static IReadOnlyList<ResourceInfo> FindResources(
+        ResourceSearchCriteria criteria,
+        IEnumerable<ResourceInfo> source)
+    {
+        IEnumerable<ResourceInfo> results = source;
 
         // Package scope filter
         if (!string.IsNullOrEmpty(criteria.PackageScope))
@@ -152,8 +238,9 @@ public class PackageIndexer : IPackageIndexer
     {
         ArgumentNullException.ThrowIfNull(canonicalUrl);
 
-        return _indexedPackages.Values
-            .SelectMany(r => r)
+        return GetPublicOrderedResources(
+                _legacyIndexedPackages,
+                _managedIndexedPackages)
             .FirstOrDefault(r => string.Equals(r.Url, canonicalUrl, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -162,7 +249,20 @@ public class PackageIndexer : IPackageIndexer
     {
         ArgumentNullException.ThrowIfNull(resourceType);
 
-        IEnumerable<ResourceInfo> results = _indexedPackages.Values.SelectMany(r => r);
+        return FindByResourceType(
+            resourceType,
+            packageScope,
+            GetPublicOrderedResources(
+                _legacyIndexedPackages,
+                _managedIndexedPackages));
+    }
+
+    private static IReadOnlyList<ResourceInfo> FindByResourceType(
+        string resourceType,
+        string? packageScope,
+        IEnumerable<ResourceInfo> source)
+    {
+        IEnumerable<ResourceInfo> results = source;
 
         results = results.Where(r =>
             string.Equals(r.ResourceType, resourceType, StringComparison.OrdinalIgnoreCase));
@@ -193,11 +293,35 @@ public class PackageIndexer : IPackageIndexer
             await using FileStream stream = File.OpenRead(indexPath);
             PackageIndex? index = await JsonSerializer.DeserializeAsync<PackageIndex>(stream, s_readOptions, cancellationToken)
                 .ConfigureAwait(false);
-            return index;
+            string? failureReason = null;
+            if (index is not null
+                && PackageIndexValidation.TryValidateReferencedFiles(
+                    index,
+                    packageContentPath,
+                    out failureReason))
+            {
+                return index;
+            }
+
+            _logger.LogWarning(
+                "Ignoring invalid .index.json at '{Path}': {Reason}",
+                indexPath,
+                failureReason);
+            return null;
         }
         catch (JsonException ex)
         {
             _logger.LogWarning(ex, "Failed to deserialize .index.json at '{Path}'. Will regenerate.", indexPath);
+            return null;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger.LogWarning(ex, "Failed to read .index.json at '{Path}'. Will regenerate.", indexPath);
+            return null;
+        }
+        catch (IOException ex)
+        {
+            _logger.LogWarning(ex, "Failed to read .index.json at '{Path}'. Will regenerate.", indexPath);
             return null;
         }
     }
@@ -210,8 +334,9 @@ public class PackageIndexer : IPackageIndexer
         string packageContentPath,
         CancellationToken cancellationToken)
     {
-        List<ResourceIndexEntry> entries = new List<ResourceIndexEntry>();
+        List<ResourceIndexEntry> entries = [];
         string[] jsonFiles = Directory.GetFiles(packageContentPath, "*.json", SearchOption.TopDirectoryOnly);
+        Array.Sort(jsonFiles, StringComparer.Ordinal);
 
         foreach (string filePath in jsonFiles)
         {
@@ -382,11 +507,32 @@ public class PackageIndexer : IPackageIndexer
     /// Registers an index's entries in the in-memory store, converting them to <see cref="ResourceInfo"/>
     /// enriched with package metadata extracted from the content path.
     /// </summary>
-    private void RegisterIndex(string packageContentPath, PackageIndex index)
+    private void RegisterLegacyIndex(
+        string packageContentPath,
+        PackageIndex index)
     {
         (string? packageName, string? packageVersion) = ExtractPackageIdentity(packageContentPath);
-        string key = packageVersion is not null ? $"{packageName}#{packageVersion}" : packageContentPath;
+        PackageReference reference = new(
+            packageName ?? string.Empty,
+            packageVersion);
+        string key = packageVersion is null
+            ? $"path:{Path.GetFullPath(packageContentPath)}"
+            : $"identity:{packageName}#{packageVersion}";
+        RegisterIndex(
+            _legacyIndexedPackages,
+            key,
+            reference,
+            index);
+    }
 
+    private void RegisterIndex(
+        ConcurrentDictionary<
+            string,
+            IReadOnlyList<ResourceInfo>> registrations,
+        string key,
+        PackageReference reference,
+        PackageIndex index)
+    {
         ReadOnlyCollection<ResourceInfo> resources = index.Files.Select(entry => new ResourceInfo
         {
             ResourceType = entry.ResourceType,
@@ -394,16 +540,120 @@ public class PackageIndexer : IPackageIndexer
             Url = entry.Url,
             Name = entry.Name,
             Version = entry.Version,
-            PackageName = packageName,
-            PackageVersion = packageVersion,
+            PackageName = string.IsNullOrEmpty(reference.Name)
+                ? null
+                : reference.Name,
+            PackageVersion = reference.Version,
             FilePath = entry.Filename,
             SdFlavor = entry.SdFlavor,
-        }).ToList().AsReadOnly();
+        })
+            .OrderBy(
+                resource => resource.FilePath,
+                StringComparer.Ordinal)
+            .ThenBy(
+                resource => resource.ResourceType,
+                StringComparer.Ordinal)
+            .ThenBy(
+                resource => resource.Url,
+                StringComparer.Ordinal)
+            .ThenBy(
+                resource => resource.Id,
+                StringComparer.Ordinal)
+            .ToList()
+            .AsReadOnly();
 
-        _indexedPackages[key] = resources;
+        registrations[key] = resources;
 
         _logger.LogDebug("Registered {Count} resources for package '{Key}'.", resources.Count, key);
     }
+
+    private static IEnumerable<ResourceInfo> GetOrderedResources(
+        params ConcurrentDictionary<
+            string,
+            IReadOnlyList<ResourceInfo>>[] registrations) =>
+        registrations
+            .SelectMany(registration =>
+                registration)
+            .OrderBy(
+                pair => pair.Key,
+                StringComparer.Ordinal)
+            .SelectMany(pair => pair.Value);
+
+    private static IEnumerable<ResourceInfo>
+        GetPublicOrderedResources(
+            ConcurrentDictionary<
+                string,
+                IReadOnlyList<ResourceInfo>> legacyRegistrations,
+            ConcurrentDictionary<
+                string,
+                IReadOnlyList<ResourceInfo>> managedRegistrations)
+    {
+        Dictionary<string, ResourceInfo> resources =
+            new(StringComparer.Ordinal);
+        int unversionedIndex = 0;
+        foreach (ResourceInfo resource
+                 in GetOrderedResources(
+                     legacyRegistrations)
+                     .Concat(
+                         GetOrderedResources(
+                             managedRegistrations)))
+        {
+            string key =
+                CreatePublicResourceKey(
+                    resource,
+                    unversionedIndex);
+            resources[key] = resource;
+            unversionedIndex++;
+        }
+
+        return resources.Values
+            .OrderBy(
+                resource => resource.PackageName,
+                StringComparer.OrdinalIgnoreCase)
+            .ThenBy(
+                resource => resource.PackageName,
+                StringComparer.Ordinal)
+            .ThenBy(
+                resource => resource.PackageVersion,
+                StringComparer.Ordinal)
+            .ThenBy(
+                resource => resource.FilePath,
+                StringComparer.Ordinal)
+            .ThenBy(
+                resource => resource.ResourceType,
+                StringComparer.Ordinal)
+            .ThenBy(
+                resource => resource.Url,
+                StringComparer.Ordinal)
+            .ThenBy(
+                resource => resource.Id,
+                StringComparer.Ordinal);
+    }
+
+    private static string CreatePublicResourceKey(
+        ResourceInfo resource,
+        int unversionedIndex)
+    {
+        if (string.IsNullOrEmpty(
+                resource.PackageVersion))
+        {
+            return $"unversioned:{unversionedIndex}";
+        }
+
+        return string.Join(
+            "\0",
+            resource.PackageName
+                ?.ToUpperInvariant()
+                ?? string.Empty,
+            resource.PackageVersion,
+            resource.FilePath
+                ?.ToUpperInvariant()
+                ?? string.Empty);
+    }
+
+    private static string GetManagedRegistrationKey(
+        PackageCacheKey cacheKey) =>
+        $"managed:{cacheKey.CanonicalIdentity}";
 
     /// <summary>
     /// Extracts the package name and version from a content path.

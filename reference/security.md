@@ -21,9 +21,10 @@ All package registries and CI build servers use HTTPS:
 
 When following HTTP redirects:
 
-- Follow redirects but validate the destination URL
-- Limit the number of redirects (recommended: maximum 5)
-- Do not follow redirects from HTTPS to HTTP
+- Redirects are followed up to the configured limit (`MaxRedirects`, default 5)
+- Authorization and custom headers are re-attached **only** when the redirect
+  destination exactly matches a trusted origin (scheme, host, and port), so
+  credentials are never forwarded to a downgraded or cross-origin destination
 
 ## Authentication
 
@@ -89,16 +90,16 @@ Package registries include SHA checksums in version metadata:
 **Verification process:**
 
 1. Download the tarball
-2. Compute SHA-1 hash of the downloaded content
-3. Compare against the `shasum` value from the registry
-4. Reject the package if checksums don't match
+2. Always compute the SHA-256 hash of the content (verified first when available)
+3. When the registry supplies a `shasum`, also compute and compare the SHA-1 hash
+4. Reject the package if any available checksum does not match
 
 **Implementation support:**
 
 | Implementation | Checksum Verification |
 |---------------|----------------------|
 | SUSHI | Not implemented |
-| Firely | ✅ `CheckSum` utility class |
+| FhirPkg | ✅ `CheckSum` utility (SHA-256 always; SHA-1 when supplied) |
 | CodeGen | ✅ Via `ResolvedDirectiveUri.ShaSum` |
 | Java Publisher | Not implemented |
 
@@ -111,7 +112,28 @@ After extracting a package, validate:
 3. **Version matches:** Manifest `version` should match the resolved version
 4. **Structure valid:** Package contents should be within the `package/` directory
 
+### Client-Side Install Limits
+
+FhirPkg enforces hard archive/extraction limits while installing a package, so a
+malicious or malformed tarball cannot exhaust disk or memory. Defaults come from
+`PackageInstallLimits`; each is overridable via a `FHIRPKG_MAX_*` environment
+variable, and a per-call override may only **tighten** a limit:
+
+| Limit | Default | Environment override |
+|-------|---------|----------------------|
+| Compressed archive size | 100 MiB | `FHIRPKG_MAX_COMPRESSED_BYTES` |
+| Expanded size | 1 GiB | `FHIRPKG_MAX_EXPANDED_BYTES` |
+| Single entry size | 128 MiB | `FHIRPKG_MAX_ENTRY_BYTES` |
+| Entry count | 50,000 | `FHIRPKG_MAX_ARCHIVE_ENTRIES` |
+| Entry path length | 1,024 | `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH` |
+| Path depth | 32 | `FHIRPKG_MAX_ARCHIVE_DEPTH` |
+
 ## Server-Side Security
+
+> **External context:** This section describes protections implemented by the
+> registry and CI **servers**, observed through their public behavior. They are
+> not implemented or enforced by FhirPkg and cannot be verified from this
+> repository.
 
 ### Request Validation
 

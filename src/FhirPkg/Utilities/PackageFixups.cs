@@ -27,22 +27,6 @@ namespace FhirPkg.Utilities;
 public static class PackageFixups
 {
     /// <summary>
-    /// Map of known (name, version) pairs to their corrected versions.
-    /// Keys are lowercase package names; values map from bad versions to good versions.
-    /// </summary>
-    private static readonly Dictionary<string, Dictionary<string, string>> s_versionFixups = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["hl7.fhir.r4.core"] = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["4.0.0"] = "4.0.1"
-        },
-        ["hl7.fhir.r4b.core"] = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ["4.3.0-snapshot1"] = "4.3.0"
-        }
-    };
-
-    /// <summary>
     /// Map of generic extension package names to FHIR-version-specific names.
     /// The key is the generic name; the value maps FHIR major version prefixes
     /// to the corresponding version-specific package name.
@@ -76,8 +60,15 @@ public static class PackageFixups
     ///   <item><description>Apply package name remapping for generic extension packages.</description></item>
     /// </list>
     /// </remarks>
-    public static PackageReference Apply(PackageReference reference)
+    public static PackageReference Apply(PackageReference reference) =>
+        Apply(reference, PackageFixupPolicy.Default);
+
+    internal static PackageReference Apply(
+        PackageReference reference,
+        PackageFixupPolicy fixupPolicy)
     {
+        ArgumentNullException.ThrowIfNull(fixupPolicy);
+
         string name = reference.Name;
         string? version = reference.Version;
 
@@ -88,11 +79,9 @@ public static class PackageFixups
         }
 
         // Step 2: Apply known version fixups
-        if (version is not null
-            && s_versionFixups.TryGetValue(name, out Dictionary<string, string>? versionMap)
-            && versionMap.TryGetValue(version, out string? correctedVersion))
+        if (version is not null)
         {
-            version = correctedVersion;
+            version = fixupPolicy.ApplyVersion(name, version);
         }
 
         // Step 3: Apply package name remapping (e.g., generic extensions → version-specific)

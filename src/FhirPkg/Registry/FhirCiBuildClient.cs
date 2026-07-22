@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License. See LICENSE in the project root.
 
 using FhirPkg.Models;
+using FhirPkg.Resolution;
 using Microsoft.Extensions.Logging;
 
 namespace FhirPkg.Registry;
@@ -45,6 +46,16 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
         ILogger<FhirCiBuildClient> logger,
         TimeProvider? timeProvider = null)
         : base(httpClient, endpoint, logger)
+    {
+        _timeProvider = timeProvider ?? TimeProvider.System;
+    }
+
+    internal FhirCiBuildClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<FhirCiBuildClient> logger,
+        TimeProvider? timeProvider = null)
+        : base(transport, endpoint, logger)
     {
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -117,12 +128,27 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
             directive.VersionType,
             directive.CiBranch ?? "(default)");
 
+        if (options?.AllowPreRelease == false)
+        {
+            Logger.LogDebug(
+                "CI build resolution for {PackageId} was skipped because pre-release versions are disabled",
+                directive.PackageId);
+            return null;
+        }
+
+        if (options?.FhirRelease is FhirRelease preferredRelease
+            && directive.NameType is PackageNameType.CoreFull or PackageNameType.CorePartial
+            && FhirReleaseMapping.FromPackageName(directive.PackageId) != preferredRelease)
+        {
+            return null;
+        }
+
         if (directive.NameType is PackageNameType.CoreFull or PackageNameType.CorePartial)
         {
             return ResolveCorePackage(directive);
         }
 
-        return await ResolveIgPackageAsync(directive, cancellationToken).ConfigureAwait(false);
+        return await ResolveIgPackageAsync(directive, options, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -198,19 +224,31 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
         {
             Reference = new PackageReference(directive.PackageId, "current"),
             TarballUri = new Uri(tarballUrl),
-            SourceRegistry = Endpoint,
+            SourceRegistry = Endpoint.ToProvenance(),
+            SourceClient = this,
         };
     }
 
     // ── IG package resolution via qas.json ──────────────────────────────
 
     private async Task<ResolvedDirective?> ResolveIgPackageAsync(
-        PackageDirective directive, CancellationToken cancellationToken)
+        PackageDirective directive,
+        VersionResolveOptions? options,
+        CancellationToken cancellationToken)
     {
         IReadOnlyList<CiBuildRecord> records = await GetQasRecordsAsync(cancellationToken).ConfigureAwait(false);
 
         IEnumerable<CiBuildRecord> matching = records.Where(r =>
             string.Equals(r.PackageId, directive.PackageId, StringComparison.OrdinalIgnoreCase));
+
+        if (options?.FhirRelease is FhirRelease preferredRelease)
+        {
+            matching = matching.Where(record =>
+                record.FhirVersion is string fhirVersion
+                    ? FhirReleaseExtractor.TryMap(fhirVersion, out FhirRelease release)
+                        && release == preferredRelease
+                    : FhirReleaseMapping.FromPackageName(record.PackageId) == preferredRelease);
+        }
 
         if (directive.VersionType is VersionType.CiBuildBranch && directive.CiBranch is not null)
         {
@@ -263,7 +301,8 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient
         {
             Reference = new PackageReference(directive.PackageId, newest.IgVersion ?? "current"),
             TarballUri = new Uri(tarballUrl),
-            SourceRegistry = Endpoint,
+            SourceRegistry = Endpoint.ToProvenance(),
+            SourceClient = this,
             PublicationDate = TryParseDate(newest.DateISO8601 ?? newest.Date),
         };
     }

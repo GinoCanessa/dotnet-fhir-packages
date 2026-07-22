@@ -2,16 +2,21 @@
 
 This document provides a cross-reference of the FHIR package management client implementations: their architectures, APIs, and design decisions.
 
+> **Scope note:** Only the **FhirPkg (C#)** column and section describe this
+> repository and are verified against its source. The SUSHI, Fhir.CodeGen, and
+> Java Publisher entries describe third-party tools and are provided for
+> comparison only — they are not verified against this codebase and may drift.
+
 ## Implementation Overview
 
-| Feature | SUSHI (TypeScript) | Firely (C#) | CodeGen (C#) | Java Publisher |
+| Feature | SUSHI (TypeScript) | FhirPkg (C#) | CodeGen (C#) | Java Publisher |
 |---------|-------------------|-------------|--------------|---------------|
 | **Language** | TypeScript/Node.js | C# (.NET) | C# (.NET 9) | Java |
-| **Package** | `fhir-package-loader` | `FhirPkg` | `Fhir.CodeGen.Packages` | Part of IG Publisher |
-| **CLI** | `fpl install` | N/A | N/A | Part of publisher CLI |
+| **Package** | `fhir-package-loader` | `fhir-pkg-lib` | `Fhir.CodeGen.Packages` | Part of IG Publisher |
+| **CLI** | `fpl install` | `fhir-pkg` | N/A | Part of publisher CLI |
 | **Browser Support** | Yes (IndexedDB) | No | No | No |
-| **Primary Registry** | `packages.fhir.org` | `packages.simplifier.net` | `packages2.fhir.org` | Via canonical URLs |
-| **CI Build Support** | Yes | No | Yes | Yes |
+| **Primary Registry** | `packages.fhir.org` | `packages.fhir.org` | `packages2.fhir.org` | Via canonical URLs |
+| **CI Build Support** | Yes | Yes | Yes | Yes |
 | **NPM Registry Support** | Yes (configurable) | Yes | No | No |
 | **Dependency Resolution** | Per-package loading | Full tree restoration | Per-directive | Recursive with fixups |
 
@@ -120,92 +125,89 @@ await loader.loadVirtualPackage(virtualPkg);
 ```mermaid
 flowchart TD
     subgraph Public["Public API"]
-        FPS[FhirPackageSource<br/>IAsyncResourceResolver]
-        PR[PackageRestorer<br/>Dependency tree resolution]
-        PC[PackageContext<br/>Orchestration]
+        IFPM[IFhirPackageManager<br/>Primary entry point]
     end
 
-    subgraph Interfaces["Contracts"]
-        IPS[IPackageServer]
+    subgraph Registry["Registry Layer"]
+        RCF[RegistryClientFactory<br/>Builds the client chain]
+        RRC[RedundantRegistryClient<br/>Parallel query + merge]
+        FNC[FhirNpmRegistryClient<br/>packages.fhir.org / packages2]
+        NRC[NpmRegistryClient<br/>registry.npmjs.org]
+        CIC[FhirCiBuildClient<br/>build.fhir.org]
+        H7C[Hl7WebsiteClient<br/>hl7.org/fhir fallback]
+    end
+
+    subgraph Cache["Cache Layer"]
         IPC[IPackageCache]
-        IP[IProject]
-        IPUP[IPackageUrlProvider]
+        DPC[DiskPackageCache<br/>~/.fhir/packages]
+        MRC[MemoryResourceCache<br/>LRU resource cache]
     end
 
-    subgraph Impl["Implementations"]
-        PKC[PackageClient<br/>HTTP client]
-        DPC[DiskPackageCache<br/>File system cache]
-        FP[FolderProject<br/>Disk-based project]
-    end
-
-    subgraph URL["URL Providers"]
-        FPUP[FhirPackageUrlProvider<br/>packages.simplifier.net]
-        NPUP[NodePackageUrlProvider<br/>registry.npmjs.org]
-    end
-
-    FPS --> PC
-    PR --> PC
-    PC --> IPC
-    PC --> IPS
-    PC --> IP
-    PKC -.-> IPS
-    DPC -.-> IPC
-    FP -.-> IP
-    PKC --> IPUP
-    IPUP -.-> FPUP
-    IPUP -.-> NPUP
+    IFPM --> RCF
+    IFPM --> IPC
+    RCF --> RRC
+    RRC --> FNC
+    RRC --> NRC
+    RRC --> CIC
+    RRC --> H7C
+    IPC -.-> DPC
+    IFPM --> MRC
 ```
 
 ### Key API
 
 ```csharp
-// Create client for Simplifier registry
-var client = PackageClient.Create(); // Default: packages.simplifier.net
+// Register with DI and resolve the manager
+var services = new ServiceCollection();
+services.AddFhirPackageManagement(options =>
+{
+    options.IncludeCiBuilds = true;   // CI builds are part of the default chain
+    options.ConflictStrategy = ConflictResolutionStrategy.HighestWins;
+});
+using ServiceProvider provider = services.BuildServiceProvider();
+var manager = provider.GetRequiredService<IFhirPackageManager>();
 
-// Resolve a specific package by canonical URL
-var entries = await client.CatalogPackagesAsync(
-    pkgname: "hl7.fhir.us.core", 
-    canonical: null, 
-    fhirversion: "R4", 
-    preview: false);
+// Install a package (resolve + download + extract to the cache)
+PackageRecord? record = await manager.InstallAsync("hl7.fhir.us.core#6.1.0");
 
-// Set up package context
-var cache = new DiskPackageCache();
-var project = new FolderProject("./my-ig");
-var context = new PackageContext(cache, project, client);
+// Restore all dependencies declared in a project's package.json
+PackageClosure closure = await manager.RestoreAsync("./my-ig");
+// closure.Resolved   — resolved packages, keyed by package id
+// closure.Missing    — unresolved dependencies, keyed by package id
+// closure.Failures   — structured DependencyResolutionFailure entries
+// closure.IsComplete — true when Missing and Failures are both empty
 
-// Restore all dependencies
-var restorer = new PackageRestorer(context);
-PackageClosure closure = await restorer.Restore();
-// closure.References — all resolved packages
-// closure.Missing — unresolved dependencies
-// closure.Complete — true if all deps resolved
+// Search, then resolve without downloading
+IReadOnlyList<CatalogEntry> hits =
+    await manager.SearchAsync(new PackageSearchCriteria { Name = "us.core" });
+ResolvedDirective? resolved = await manager.ResolveAsync("hl7.fhir.r4.core");
 
-// High-level artifact resolution
-var source = FhirPackageSource.CreateCorePackageSource(
-    provider, FhirRelease.R4);
-var patient = await source.ResolveByCanonicalUriAsync(
-    "http://hl7.org/fhir/StructureDefinition/Patient");
+// Enumerate the local cache
+IReadOnlyList<PackageRecord> cached = await manager.ListCachedAsync("hl7.fhir.r4");
 ```
 
 ### Version Resolution
 
-```csharp
-// Supported version patterns
-var versions = await client.DownloadListingAsync("hl7.fhir.us.core");
-Version? resolved = versions.Resolve("4.0.x");    // Wildcard
-Version? latest = versions.Latest(stable: true);   // Latest stable
-Version? range = versions.Resolve("^3.0.1");       // SemVer range
-Version? alt = versions.Resolve("1.0.0|2.0.0");   // Alternatives
-```
+Version selection happens inside `ResolveAsync`/`InstallAsync` using `FhirSemVer`
+(see [Versioning](versioning.md)). Exact versions, trailing wildcards (`4.0.x`),
+SemVer ranges (`^3.0.1`), alternation (`1.0.0 || 2.0.0`), and the keywords
+`latest`, `current`, and `dev` are all accepted.
 
 ### Pre-configured Registries
 
+Well-known endpoints are exposed as static `RegistryEndpoint` values, and the
+default chains are assembled from them:
+
 ```csharp
-PackageUrlProviders.Simplifier    // https://packages.simplifier.net (FHIR format)
-PackageUrlProviders.SimplifierNpm // https://packages.simplifier.net (NPM format)
-PackageUrlProviders.Npm           // https://registry.npmjs.org
-PackageUrlProviders.Staging       // https://packages-staging.simplifier.net
+RegistryEndpoint.FhirPrimary    // https://packages.fhir.org/
+RegistryEndpoint.FhirSecondary  // https://packages2.fhir.org/packages
+RegistryEndpoint.FhirCiBuild    // https://build.fhir.org/
+RegistryEndpoint.Hl7Website     // https://hl7.org/fhir/ (core fallback)
+RegistryEndpoint.NpmPublic      // https://registry.npmjs.org/
+
+// Default chains
+RegistryEndpoint.DefaultPublishedChain // Primary -> Secondary -> HL7 Website
+RegistryEndpoint.DefaultFullChain      // Primary -> Secondary -> CI Build -> HL7 Website
 ```
 
 ---
@@ -390,13 +392,13 @@ NpmPackage pkg = pf.pcm.loadPackage(packageId, version);
 
 ## Feature Comparison Matrix
 
-| Feature | SUSHI | Firely | CodeGen | Java |
+| Feature | SUSHI | FhirPkg | CodeGen | Java |
 |---------|-------|--------|---------|------|
 | Disk cache | ✅ | ✅ | ✅ | ✅ |
 | Browser cache (IndexedDB) | ✅ | ❌ | ❌ | ❌ |
-| In-memory resource cache (LRU) | ✅ | ❌ | ❌ | ❌ |
-| CI build resolution | ✅ | ❌ | ✅ | ✅ |
-| Branch-specific CI | ✅ | ❌ | ✅ | ❌ |
+| In-memory resource cache (LRU) | ✅ | ✅ | ❌ | ❌ |
+| CI build resolution | ✅ | ✅ | ✅ | ✅ |
+| Branch-specific CI | ✅ | ✅ | ✅ | ❌ |
 | Wildcard versions | ✅ (patch only) | ✅ (full SemVer) | ✅ (full) | ❌ |
 | Version ranges | ❌ | ✅ | ❌ | ❌ |
 | NPM alias support | ❌ | ✅ | ✅ | ❌ |
@@ -407,7 +409,7 @@ NpmPackage pkg = pf.pcm.loadPackage(packageId, version);
 | Package publish | ❌ | ✅ | ❌ | ❌ |
 | Lock file | ❌ | ✅ | ❌ | ❌ |
 | Full dep tree restore | ❌ | ✅ | ❌ | ✅ |
-| Parallel registry queries | ❌ | ❌ | ✅ | ❌ |
-| Resource type indexing | ✅ (SQLite) | ✅ (.firely.index) | ✅ (.index.json) | ✅ (in-memory) |
+| Parallel registry queries | ❌ | ✅ | ✅ | ❌ |
+| Resource type indexing | ✅ (SQLite) | ✅ (.index.json) | ✅ (.index.json) | ✅ (in-memory) |
 | StructureDefinition flavor | ✅ | ✅ | ❌ | ❌ |
 | Shasum verification | ❌ | ✅ | ✅ | ❌ |

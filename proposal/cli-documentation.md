@@ -6,13 +6,13 @@ The `fhir-pkg` command-line tool provides a terminal interface for managing FHIR
 
 ```bash
 # Install as a global .NET tool
-dotnet tool install --global fhir-pkg
+dotnet tool install --global fhir-pkg-cli
 
 # Or install as a local project tool
-dotnet tool install fhir-pkg
+dotnet tool install fhir-pkg-cli
 ```
 
-**Minimum Requirements:** .NET 9.0 Runtime
+**Minimum Requirements:** .NET 8.0 Runtime
 
 ---
 
@@ -300,8 +300,8 @@ fhir-pkg clean [options]
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `--force` | `-f` | Clean without confirmation | `false` |
-| `--ci-only` | | Remove only CI build packages (`#current`) | `false` |
-| `--older-than <days>` | | Remove packages not accessed in N days | |
+| `--ci-only` | | Remove only `#current` and `#current$branch` CI aliases | `false` |
+| `--older-than <days>` | | Remove packages installed more than N non-negative days ago | |
 
 **Examples:**
 
@@ -309,15 +309,20 @@ fhir-pkg clean [options]
 # Clean entire cache
 fhir-pkg clean
 
-# Clean only CI builds
+# Clean current and current$branch aliases
 fhir-pkg clean --ci-only
 
-# Clean packages older than 90 days
+# Clean packages installed more than 90 days ago
 fhir-pkg clean --older-than 90
 
 # Clean without confirmation
 fhir-pkg clean --force
 ```
+
+`--older-than` uses the recorded installation/download time. Entries without a
+recorded timestamp are retained, exact-cutoff entries are retained, and
+combined filters use logical AND. Malformed timestamps are treated as unknown,
+and a concurrently refreshed package is retained.
 
 **Output:**
 

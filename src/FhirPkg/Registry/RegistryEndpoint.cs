@@ -30,15 +30,39 @@ public record RegistryEndpoint
     public string? AuthHeaderValue { get; init; }
 
     /// <summary>
-    /// Gets optional custom HTTP headers sent with every request to this endpoint.
+    /// Gets optional custom HTTP headers sent only to trusted request origins.
     /// </summary>
     public IReadOnlyList<(string Name, string Value)>? CustomHeaders { get; init; }
+
+    /// <summary>
+    /// Gets additional exact origins that may receive the configured authorization
+    /// and custom headers. The registry endpoint's own origin is always trusted.
+    /// </summary>
+    /// <remarks>
+    /// Origins are matched by scheme, IDN-normalized host, and effective port.
+    /// Paths, subdomains, and wildcards do not broaden trust.
+    /// </remarks>
+    public IReadOnlyList<string> TrustedHeaderOrigins { get; init; } = [];
 
     /// <summary>
     /// Gets the optional <c>User-Agent</c> header value.
     /// When <see langword="null"/>, a default user-agent is used.
     /// </summary>
     public string? UserAgent { get; init; }
+
+    internal RegistryEndpoint ToProvenance()
+    {
+        string origin = RegistryAttemptFailure.SanitizeOrigin(Url);
+        string safeUrl = origin == "unknown"
+            ? "urn:fhir-package-registry:unknown"
+            : origin + "/";
+
+        return new RegistryEndpoint
+        {
+            Url = safeUrl,
+            Type = Type,
+        };
+    }
 
     // ── Well-known endpoints ────────────────────────────────────────────
 

@@ -1,44 +1,173 @@
 name: Tests
-# Basics from https://learn.microsoft.com/en-us/dotnet/devops/dotnet-test-github-action
+
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
-    - '**.cs'
-    - '**.csproj'
+      - 'src/**'
+      - 'test/**'
+      - 'FhirPkg.sln'
+      - 'Directory.Packages.props'
+      - 'global.json'
+      - '.github/scripts/**'
+      - '.github/workflows/**'
   pull_request:
-    branches: [ main ]
+    branches: [main]
     paths:
-    - '**.cs'
-    - '**.csproj'
+      - 'src/**'
+      - 'test/**'
+      - 'FhirPkg.sln'
+      - 'Directory.Packages.props'
+      - 'global.json'
+      - '.github/scripts/**'
+      - '.github/workflows/**'
+  workflow_call:
+    inputs:
+      commit_sha:
+        description: Full source commit to build and test
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
-
-    name: build-and-test-${{matrix.os}}
+    name: build-and-test-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        if: ${{ inputs.commit_sha == '' }}
 
-    - uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: |
-            10.0
-            9.0
-            8.0
+      - uses: actions/checkout@v4
+        if: ${{ inputs.commit_sha != '' }}
+        with:
+          ref: ${{ inputs.commit_sha }}
 
-    - name: Install dependencies
-      run: dotnet restore
-      
-    - name: Build
-      run: dotnet build --configuration Release --no-restore
-    
-    - name: Unit Tests
-      run: dotnet test test/FhirPkg.Tests --configuration Release --no-restore --verbosity normal
+      - name: Verify exact source commit
+        if: ${{ inputs.commit_sha != '' }}
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
+        run: |
+          if ($env:EXPECTED_COMMIT -notmatch '^[0-9a-f]{40}$')
+          {
+            throw "Expected a full lowercase commit SHA, got '$env:EXPECTED_COMMIT'."
+          }
 
-    - name: Integration Tests (net10.0 only)
-      run: dotnet test test/FhirPkg.IntegrationTests --configuration Release --no-restore --verbosity normal --framework net10.0
+          $actualCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $env:EXPECTED_COMMIT)
+          {
+            throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
+          }
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.302
+            9.0.119
+            8.0.423
+
+      - name: Restore
+        run: dotnet restore FhirPkg.sln
+
+      - name: Build
+        run: dotnet build FhirPkg.sln --configuration Release --no-restore
+
+      - name: Unit tests
+        run: >-
+          dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj
+          --configuration Release
+          --no-build
+          --verbosity normal
+
+      - name: Remaining integration tests (net10.0)
+        run: >-
+          dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --verbosity normal
+          --filter "FullyQualifiedName!~HardenedInstallationIntegrationTests&FullyQualifiedName!~CrossProcessCacheIntegrationTests"
+
+      - name: Validate qualification corpus
+        shell: pwsh
+        run: |
+          $cache = Join-Path '${{ runner.temp }}' 'qualification-validation-cache'
+          $report = Join-Path '${{ runner.temp }}' 'qualification-validation.json'
+          dotnet run `
+            --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
+            --configuration Release `
+            --framework net10.0 `
+            --no-build `
+            -- `
+            --validate-only true `
+            --cache $cache `
+            --output $report `
+            --corpus test/FhirPkg.Qualification/qualification-corpus.json
+
+  hardened-integration:
+    name: hardened-${{ matrix.os }}-${{ matrix.framework }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        framework: [net8.0, net9.0, net10.0]
+
+    steps:
+      - uses: actions/checkout@v4
+        if: ${{ inputs.commit_sha == '' }}
+
+      - uses: actions/checkout@v4
+        if: ${{ inputs.commit_sha != '' }}
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Verify exact source commit
+        if: ${{ inputs.commit_sha != '' }}
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit_sha }}
+        run: |
+          if ($env:EXPECTED_COMMIT -notmatch '^[0-9a-f]{40}$')
+          {
+            throw "Expected a full lowercase commit SHA, got '$env:EXPECTED_COMMIT'."
+          }
+
+          $actualCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $env:EXPECTED_COMMIT)
+          {
+            throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
+          }
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.302
+            9.0.119
+            8.0.423
+
+      - name: Restore
+        run: dotnet restore test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
+
+      - name: Build
+        run: >-
+          dotnet build test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
+          --configuration Release
+          --framework ${{ matrix.framework }}
+          --no-restore
+
+      - name: Hardened integration tests
+        run: >-
+          dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
+          --configuration Release
+          --framework ${{ matrix.framework }}
+          --no-build
+          --verbosity normal
+          --filter "FullyQualifiedName~HardenedInstallationIntegrationTests|FullyQualifiedName~CrossProcessCacheIntegrationTests"

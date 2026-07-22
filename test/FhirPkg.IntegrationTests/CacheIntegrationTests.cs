@@ -25,6 +25,32 @@ public class CacheIntegrationTests : IntegrationTestBase
         packages.ShouldBeEmpty();
     }
 
+    [Fact]
+    public async Task Reads_CorruptPackageDirectory_IsNeverACacheHit()
+    {
+        DiskPackageCache cache = CreateCache();
+        PackageReference reference = "test.package#1.0.0";
+        string contentPath = Path.Combine(
+            TempCacheDir,
+            "test.package#1.0.0",
+            "package");
+        Directory.CreateDirectory(contentPath);
+        await File.WriteAllTextAsync(
+            Path.Combine(contentPath, "package.json"),
+            """{"name":"other.package","version":"1.0.0"}""",
+            TestContext.Current.CancellationToken);
+
+        (await cache.IsInstalledAsync(
+            reference,
+            TestContext.Current.CancellationToken)).ShouldBeFalse();
+        (await cache.GetPackageAsync(
+            reference,
+            TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await cache.ListPackagesAsync(
+            ct: TestContext.Current.CancellationToken)).ShouldBeEmpty();
+        cache.GetPackageContentPath(reference).ShouldBeNull();
+    }
+
     // ───────────────────────── Install ─────────────────────────
 
     [Fact]
@@ -50,7 +76,7 @@ public class CacheIntegrationTests : IntegrationTestBase
     }
 
     [Fact]
-    public async Task Install_AlreadyExists_ThrowsByDefault()
+    public async Task Install_AlreadyExists_ReturnsWinnerWithoutReadingSource()
     {
         DiskPackageCache cache = CreateCache();
         PackageReference reference = "test.package#1.0.0";
@@ -59,9 +85,15 @@ public class CacheIntegrationTests : IntegrationTestBase
         await cache.InstallAsync(reference, tarball1, ct: TestContext.Current.CancellationToken);
 
         using Stream tarball2 = CreateTestTarball("test.package", "1.0.0");
-        Func<Task<PackageRecord>> act = () => cache.InstallAsync(reference, tarball2);
+        long initialPosition = tarball2.Position;
 
-        await Should.ThrowAsync<InvalidOperationException>(act);
+        PackageRecord winner = await cache.InstallAsync(
+            reference,
+            tarball2,
+            ct: TestContext.Current.CancellationToken);
+
+        winner.Reference.ShouldBe(reference);
+        tarball2.Position.ShouldBe(initialPosition);
     }
 
     [Fact]
@@ -149,6 +181,28 @@ public class CacheIntegrationTests : IntegrationTestBase
 
         IReadOnlyList<PackageRecord> remaining = await cache.ListPackagesAsync(ct: TestContext.Current.CancellationToken);
         remaining.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Clear_PreservesUnrelatedIniSections()
+    {
+        DiskPackageCache cache = CreateCache();
+        using Stream tarball = CreateTestTarball("pkg.a", "1.0.0");
+        await cache.InstallAsync(
+            PackageReference.Parse("pkg.a#1.0.0"),
+            tarball,
+            ct: TestContext.Current.CancellationToken);
+        string iniPath = Path.Combine(TempCacheDir, "packages.ini");
+        await File.AppendAllTextAsync(
+            iniPath,
+            $"{Environment.NewLine}[custom]{Environment.NewLine}value = keep{Environment.NewLine}",
+            TestContext.Current.CancellationToken);
+
+        await cache.ClearAsync(TestContext.Current.CancellationToken);
+
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>
+            sections = IniParser.ParseFile(iniPath);
+        sections["custom"]["value"].ShouldBe("keep");
     }
 
     // ───────────────────── GetPackageContentPath ─────────────────────

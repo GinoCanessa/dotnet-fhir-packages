@@ -60,7 +60,8 @@ internal static class ListCommand
                     ConsoleOutput.WriteVerbose($"Listing cached packages (filter: {filter ?? "*"}, sort: {sort})");
                 }
 
-                IReadOnlyList<PackageRecord> packages = await manager.ListCachedAsync(filter, ct);
+                IReadOnlyList<PackageRecord> packages =
+                    await manager.ListCachedSummariesAsync(filter, ct);
 
                 // Apply client-side sorting
                 IReadOnlyList<PackageRecord> sorted = sort?.ToLowerInvariant() switch

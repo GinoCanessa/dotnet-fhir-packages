@@ -5,6 +5,8 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FhirPkg.Models;
+using FhirPkg.Resolution;
+using FhirPkg.Utilities;
 using Microsoft.Extensions.Logging;
 
 namespace FhirPkg.Registry;
@@ -13,20 +15,33 @@ namespace FhirPkg.Registry;
 /// Abstract base class that provides shared HTTP infrastructure for registry client implementations.
 /// </summary>
 /// <remarks>
-/// Applies authentication headers, user-agent, and custom headers from the
-/// <see cref="RegistryEndpoint"/> on each outbound request (via per-request
-/// <see cref="HttpRequestMessage"/> headers) so that a single <see cref="HttpClient"/>
-/// instance can be safely shared across multiple registry clients. Provides protected
+/// Applies user-agent on every outbound request and scopes authentication and
+/// custom headers to exact trusted origins. Per-request
+/// <see cref="HttpRequestMessage"/> headers allow one <see cref="HttpClient"/>
+/// instance to be safely shared across multiple registry clients. Provides protected
 /// helper methods for common HTTP operations with consistent error handling:
 /// <list type="bullet">
 ///   <item><description>HTTP 404 → <see langword="null"/> (not found).</description></item>
 ///   <item><description>HTTP 5xx → <see cref="HttpRequestException"/> (server error).</description></item>
-///   <item><description>Timeout → <see cref="TaskCanceledException"/> (propagated).</description></item>
+///   <item><description>Timeout → <see cref="RegistryResponseTimeoutException"/>.</description></item>
 /// </list>
 /// </remarks>
 public abstract class RegistryClientBase : IRegistryClient
 {
     private const string DefaultUserAgent = "FhirPkg/1.0";
+    private static readonly HttpStatusCode[] s_redirectStatusCodes =
+    [
+        HttpStatusCode.MultipleChoices,
+        HttpStatusCode.MovedPermanently,
+        HttpStatusCode.Found,
+        HttpStatusCode.SeeOther,
+        HttpStatusCode.TemporaryRedirect,
+        HttpStatusCode.PermanentRedirect
+    ];
+
+    private readonly RegistryHttpTransport _transport;
+    private readonly HashSet<RegistryOrigin> _trustedHeaderOrigins;
+    private readonly Uri _baseUri;
 
     /// <summary>
     /// Shared <see cref="JsonSerializerOptions"/> configured for case-insensitive property matching
@@ -72,15 +87,49 @@ public abstract class RegistryClientBase : IRegistryClient
     /// <paramref name="logger"/> is <see langword="null"/>.
     /// </exception>
     protected RegistryClientBase(HttpClient httpClient, RegistryEndpoint endpoint, ILogger logger)
+        : this(
+            RegistryHttpTransport.CreateUnverified(httpClient),
+            endpoint,
+            logger)
     {
-        ArgumentNullException.ThrowIfNull(httpClient);
+    }
+
+    /// <summary>
+    /// Initialises the base class with an explicit redirect-controlled transport capability.
+    /// </summary>
+    /// <param name="transport">The HTTP transport to use for requests.</param>
+    /// <param name="endpoint">The registry endpoint configuration.</param>
+    /// <param name="logger">The logger instance.</param>
+    protected RegistryClientBase(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(logger);
 
-        Http = httpClient;
+        _transport = transport;
+        Http = transport.HttpClient;
         EndpointConfig = endpoint;
         Logger = logger;
-        BaseUrl = endpoint.Url.TrimEnd('/');
+        _baseUri = ParseAbsoluteHttpUri(
+            endpoint.Url.TrimEnd('/') + "/",
+            nameof(endpoint));
+        BaseUrl = _baseUri.AbsoluteUri.TrimEnd('/');
+        _trustedHeaderOrigins =
+        [
+            RegistryOrigin.Create(_baseUri)
+        ];
+
+        foreach (string trustedOrigin in endpoint.TrustedHeaderOrigins ?? [])
+        {
+            _trustedHeaderOrigins.Add(
+                RegistryOrigin.Create(
+                    ParseAbsoluteHttpUri(
+                        trustedOrigin,
+                        nameof(endpoint.TrustedHeaderOrigins))));
+        }
     }
 
     // ── Protected HTTP helpers ──────────────────────────────────────────
@@ -97,20 +146,19 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("GET JSON {Uri}", requestUri);
 
-        using HttpRequestMessage request = CreateRequestMessage(HttpMethod.Get, requestUri);
-        using HttpResponseMessage response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
-
-        if (response.StatusCode is HttpStatusCode.NotFound)
-        {
-            Logger.LogDebug("GET {Uri} returned 404 Not Found", requestUri);
-            return null;
-        }
-
-        await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
-
-        await using Stream stream = await response.Content
-            .ReadAsStreamAsync(cancellationToken)
+        using RegistryResponseContext? response = await SendGetAsync(
+                requestUri,
+                cancellationToken)
             .ConfigureAwait(false);
+        if (response is null)
+            return null;
+
+        await using DeadlineAwareHttpStream stream =
+            await CreateResponseStreamAsync(
+                    response,
+                    response.Response.Content,
+                    cancellationToken)
+                .ConfigureAwait(false);
 
         return await JsonSerializer
             .DeserializeAsync<T>(stream, JsonOptions, cancellationToken)
@@ -126,20 +174,19 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("GET JSON {Uri}", requestUri);
 
-        using HttpRequestMessage request = CreateRequestMessage(HttpMethod.Get, requestUri);
-        using HttpResponseMessage response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
-
-        if (response.StatusCode is HttpStatusCode.NotFound)
-        {
-            Logger.LogDebug("GET {Uri} returned 404 Not Found", requestUri);
-            return null;
-        }
-
-        await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
-
-        await using Stream stream = await response.Content
-            .ReadAsStreamAsync(cancellationToken)
+        using RegistryResponseContext? response = await SendGetAsync(
+                requestUri,
+                cancellationToken)
             .ConfigureAwait(false);
+        if (response is null)
+            return null;
+
+        await using DeadlineAwareHttpStream stream =
+            await CreateResponseStreamAsync(
+                    response,
+                    response.Response.Content,
+                    cancellationToken)
+                .ConfigureAwait(false);
 
         return await JsonSerializer
             .DeserializeAsync<T>(stream, JsonOptions, cancellationToken)
@@ -160,39 +207,18 @@ public abstract class RegistryClientBase : IRegistryClient
         string requestUri, CancellationToken cancellationToken)
     {
         Logger.LogDebug("GET stream {Uri}", requestUri);
-
-        HttpRequestMessage request = CreateRequestMessage(HttpMethod.Get, requestUri);
-        HttpResponseMessage response;
-        try
-        {
-            response = await Http.SendAsync(
-                    request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch
-        {
-            request.Dispose();
-            throw;
-        }
-
-        if (response.StatusCode is HttpStatusCode.NotFound)
-        {
-            Logger.LogDebug("GET {Uri} returned 404 Not Found", requestUri);
-            response.Dispose();
+        RegistryResponseContext? context = await SendGetAsync(
+                requestUri,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (context is null)
             return null;
-        }
 
-        try
-        {
-            await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            response.Dispose();
-            throw;
-        }
-
-        return response;
+        HttpContent originalContent = context.Response.Content;
+        context.Response.Content = new DeadlineAwareResponseContent(
+            originalContent,
+            context);
+        return context.Response;
     }
 
     /// <summary>
@@ -213,11 +239,37 @@ public abstract class RegistryClientBase : IRegistryClient
         using HttpRequestMessage request = CreateRequestMessage(HttpMethod.Post, requestUri);
         request.Content = httpContent;
 
-        HttpResponseMessage response = await Http.SendAsync(request, cancellationToken)
-            .ConfigureAwait(false);
-
-        await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
-        return response;
+        EnsureDefaultHeadersAreSafe();
+        EnsureBodyRequestHasControlledTransport();
+        using CancellationTokenSource timeoutSource = CreateTimeoutSource();
+        using CancellationTokenSource linkedSource =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                timeoutSource.Token);
+        HttpResponseMessage? response = null;
+        try
+        {
+            response = await Http.SendAsync(request, linkedSource.Token)
+                .ConfigureAwait(false);
+            await EnsureSuccessAsync(
+                    response,
+                    ResolveRequestUri(requestUri),
+                    timeoutSource,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return response;
+        }
+        catch (OperationCanceledException exception)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            response?.Dispose();
+            throw CreateTimeoutException(ResolveRequestUri(requestUri), exception);
+        }
+        catch
+        {
+            response?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -233,15 +285,68 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("PUT stream {Uri} ({ContentType})", requestUri, contentType);
 
-        using StreamContent httpContent = new StreamContent(stream);
+        using StreamContent httpContent = new StreamContent(
+            new NonDisposingStream(stream));
         httpContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        return await PutContentAsync(
+                requestUri,
+                httpContent,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends an HTTP PUT with caller-provided content and returns the response message.
+    /// The content is consumed during the request and must not be reused.
+    /// </summary>
+    /// <param name="requestUri">The absolute or relative request URI.</param>
+    /// <param name="content">The request content.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The HTTP response message. The caller must dispose it.</returns>
+    protected async Task<HttpResponseMessage> PutContentAsync(
+        string requestUri,
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        Logger.LogDebug(
+            "PUT content {Uri} ({ContentType})",
+            requestUri,
+            content.Headers.ContentType?.MediaType ?? "(unspecified)");
 
         using HttpRequestMessage request = CreateRequestMessage(HttpMethod.Put, requestUri);
-        request.Content = httpContent;
-        HttpResponseMessage response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
-
-        await EnsureSuccessAsync(response, requestUri, cancellationToken).ConfigureAwait(false);
-        return response;
+        request.Content = content;
+        EnsureDefaultHeadersAreSafe();
+        EnsureBodyRequestHasControlledTransport();
+        using CancellationTokenSource timeoutSource = CreateTimeoutSource();
+        using CancellationTokenSource linkedSource =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                timeoutSource.Token);
+        HttpResponseMessage? response = null;
+        try
+        {
+            response = await Http.SendAsync(request, linkedSource.Token)
+                .ConfigureAwait(false);
+            await EnsureSuccessAsync(
+                    response,
+                    ResolveRequestUri(requestUri),
+                    timeoutSource,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return response;
+        }
+        catch (OperationCanceledException exception)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            response?.Dispose();
+            throw CreateTimeoutException(ResolveRequestUri(requestUri), exception);
+        }
+        catch
+        {
+            response?.Dispose();
+            throw;
+        }
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
@@ -251,16 +356,22 @@ public abstract class RegistryClientBase : IRegistryClient
     /// response is disposed when the download result is disposed.
     /// </summary>
     protected static async Task<PackageDownloadResult> CreateDownloadResultAsync(
-        HttpResponseMessage response, CancellationToken cancellationToken)
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
     {
+        bool responseOwnedByStream =
+            response.Content is DeadlineAwareResponseContent;
         Stream innerStream = await response.Content
             .ReadAsStreamAsync(cancellationToken)
             .ConfigureAwait(false);
 
         return new PackageDownloadResult
         {
-            Content = new ResponseOwningStream(innerStream, response),
-            ContentType = response.Content.Headers.ContentType?.MediaType ?? "application/gzip",
+            Content = responseOwnedByStream
+                ? innerStream
+                : new ResponseOwningStream(innerStream, response),
+            ContentType = response.Content.Headers.ContentType?.MediaType
+                ?? "application/gzip",
             ContentLength = response.Content.Headers.ContentLength,
         };
     }
@@ -273,41 +384,214 @@ public abstract class RegistryClientBase : IRegistryClient
     /// </summary>
     private protected HttpRequestMessage CreateRequestMessage(HttpMethod method, string requestUri)
     {
-        HttpRequestMessage request = new HttpRequestMessage(method, requestUri);
+        Uri resolvedRequestUri = ResolveRequestUri(requestUri);
+        HttpRequestMessage request = new HttpRequestMessage(
+            method,
+            resolvedRequestUri);
 
         request.Headers.TryAddWithoutValidation(
             "User-Agent",
             EndpointConfig.UserAgent ?? DefaultUserAgent);
 
-        if (EndpointConfig.AuthHeaderValue is not null)
+        if (_trustedHeaderOrigins.Contains(
+                RegistryOrigin.Create(resolvedRequestUri)))
         {
-            request.Headers.TryAddWithoutValidation(
-                "Authorization", EndpointConfig.AuthHeaderValue);
-        }
-
-        if (EndpointConfig.CustomHeaders is { Count: > 0 } headers)
-        {
-            foreach ((string? name, string? value) in headers)
+            if (EndpointConfig.AuthHeaderValue is not null)
             {
-                request.Headers.TryAddWithoutValidation(name, value);
+                request.Headers.TryAddWithoutValidation(
+                    "Authorization",
+                    EndpointConfig.AuthHeaderValue);
+            }
+
+            if (EndpointConfig.CustomHeaders is { Count: > 0 } headers)
+            {
+                foreach ((string? name, string? value) in headers)
+                {
+                    request.Headers.TryAddWithoutValidation(name, value);
+                }
             }
         }
 
         return request;
     }
 
+    private async Task<RegistryResponseContext?> SendGetAsync(
+        string requestUri,
+        CancellationToken cancellationToken)
+    {
+        EnsureDefaultHeadersAreSafe();
+        EnsureSensitiveHeadersHaveControlledTransport();
+
+        Uri currentUri = ResolveRequestUri(requestUri);
+        CancellationTokenSource timeoutSource = CreateTimeoutSource();
+        HttpResponseMessage? response = null;
+        try
+        {
+            int redirectsFollowed = 0;
+            while (true)
+            {
+                using HttpRequestMessage request =
+                    CreateRequestMessage(HttpMethod.Get, currentUri.AbsoluteUri);
+                using CancellationTokenSource linkedSource =
+                    CancellationTokenSource.CreateLinkedTokenSource(
+                        cancellationToken,
+                        timeoutSource.Token);
+
+                response = await Http.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        linkedSource.Token)
+                    .ConfigureAwait(false);
+
+                if (_transport.RedirectsControlled
+                    && IsRedirect(response.StatusCode)
+                    && response.Headers.Location is Uri location)
+                {
+                    if (redirectsFollowed >= _transport.MaxRedirects)
+                    {
+                        throw new HttpRequestException(
+                            $"The registry request exceeded the configured redirect limit of {_transport.MaxRedirects}.",
+                            inner: null,
+                            response.StatusCode);
+                    }
+
+                    Uri nextUri = location.IsAbsoluteUri
+                        ? location
+                        : new Uri(currentUri, location);
+                    response.Dispose();
+                    response = null;
+                    currentUri = nextUri;
+                    redirectsFollowed++;
+                    continue;
+                }
+
+                if (response.StatusCode is HttpStatusCode.NotFound)
+                {
+                    Logger.LogDebug(
+                        "GET {Uri} returned 404 Not Found",
+                        currentUri);
+                    response.Dispose();
+                    response = null;
+                    timeoutSource.Dispose();
+                    return null;
+                }
+
+                await EnsureSuccessAsync(
+                        response,
+                        currentUri,
+                        timeoutSource,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                RegistryResponseContext context = new(
+                    response,
+                    timeoutSource,
+                    cancellationToken,
+                    currentUri);
+                response = null;
+                return context;
+            }
+        }
+        catch (OperationCanceledException exception)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            response?.Dispose();
+            timeoutSource.Dispose();
+            throw CreateTimeoutException(currentUri, exception);
+        }
+        catch
+        {
+            response?.Dispose();
+            timeoutSource.Dispose();
+            throw;
+        }
+    }
+
+    private static async Task<DeadlineAwareHttpStream> CreateResponseStreamAsync(
+        RegistryResponseContext response,
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource linkedSource =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                response.OperationToken,
+                cancellationToken,
+                response.TimeoutSource.Token);
+        try
+        {
+            Stream innerStream = await content
+                .ReadAsStreamAsync(linkedSource.Token)
+                .ConfigureAwait(false);
+            DeadlineAwareHttpStream stream = new(
+                innerStream,
+                response.Response,
+                response.TimeoutSource,
+                response.OperationToken,
+                () => CreateTimeoutException(response.RequestUri),
+                content.Headers.ContentLength);
+            response.TransferOwnership();
+            return stream;
+        }
+        catch (OperationCanceledException exception)
+            when (response.OperationToken.IsCancellationRequested)
+        {
+            response.Dispose();
+            throw new OperationCanceledException(
+                exception.Message,
+                exception,
+                response.OperationToken);
+        }
+        catch (OperationCanceledException exception)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            response.Dispose();
+            throw new OperationCanceledException(
+                exception.Message,
+                exception,
+                cancellationToken);
+        }
+        catch (OperationCanceledException exception)
+            when (response.TimeoutSource.IsCancellationRequested)
+        {
+            response.Dispose();
+            throw CreateTimeoutException(response.RequestUri, exception);
+        }
+        catch
+        {
+            response.Dispose();
+            throw;
+        }
+    }
+
     private async Task EnsureSuccessAsync(
-        HttpResponseMessage response, string requestUri, CancellationToken cancellationToken)
+        HttpResponseMessage response,
+        Uri requestUri,
+        CancellationTokenSource timeoutSource,
+        CancellationToken cancellationToken)
     {
         if (response.IsSuccessStatusCode)
             return;
 
         string body;
+        using CancellationTokenSource linkedSource =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                timeoutSource.Token);
         try
         {
             body = await response.Content
-                .ReadAsStringAsync(cancellationToken)
+                .ReadAsStringAsync(linkedSource.Token)
                 .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException exception)
+            when (timeoutSource.IsCancellationRequested)
+        {
+            throw CreateTimeoutException(requestUri, exception);
         }
         catch
         {
@@ -324,74 +608,389 @@ public abstract class RegistryClientBase : IRegistryClient
             response.StatusCode);
     }
 
-    // ── ResponseOwningStream ────────────────────────────────────────────
-
-    /// <summary>
-    /// A <see cref="Stream"/> wrapper that takes ownership of an <see cref="HttpResponseMessage"/>,
-    /// disposing it when the stream is disposed.
-    /// </summary>
-    private protected sealed class ResponseOwningStream(Stream inner, HttpResponseMessage response) : Stream
+    private void EnsureSensitiveHeadersHaveControlledTransport()
     {
-        /// <inheritdoc />
+        if (_transport.RedirectsControlled
+            || (EndpointConfig.AuthHeaderValue is null
+                && EndpointConfig.CustomHeaders is not { Count: > 0 }))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "Authenticated or custom-header registry requests require a redirect-controlled transport.");
+    }
+
+    private void EnsureBodyRequestHasControlledTransport()
+    {
+        if (_transport.RedirectsControlled)
+            return;
+
+        throw new InvalidOperationException(
+            "Registry requests with a body require a redirect-controlled transport.");
+    }
+
+    private void EnsureDefaultHeadersAreSafe()
+    {
+        if (!Http.DefaultRequestHeaders.Any())
+            return;
+
+        throw new InvalidOperationException(
+            "Registry HTTP clients must not define DefaultRequestHeaders; configure user-agent, authorization, and custom headers through RegistryEndpoint.");
+    }
+
+    private Uri ResolveRequestUri(string requestUri)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestUri);
+        return Uri.TryCreate(requestUri, UriKind.Absolute, out Uri? absolute)
+            ? ParseAbsoluteHttpUri(absolute.AbsoluteUri, nameof(requestUri))
+            : new Uri(_baseUri, requestUri);
+    }
+
+    private CancellationTokenSource CreateTimeoutSource()
+    {
+        CancellationTokenSource source = new();
+        if (_transport.Timeout != System.Threading.Timeout.InfiniteTimeSpan)
+        {
+            source.CancelAfter(_transport.Timeout);
+        }
+
+        return source;
+    }
+
+    private static bool IsRedirect(HttpStatusCode statusCode) =>
+        s_redirectStatusCodes.Contains(statusCode);
+
+    private static Uri ParseAbsoluteHttpUri(string value, string parameterName)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
+            || (uri.Scheme != Uri.UriSchemeHttp
+                && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new ArgumentException(
+                "Registry URLs and trusted origins must be absolute HTTP or HTTPS URIs.",
+                parameterName);
+        }
+
+        return uri;
+    }
+
+    private static RegistryResponseTimeoutException CreateTimeoutException(
+        Uri requestUri,
+        Exception? innerException = null)
+    {
+        string safeUri =
+            $"{requestUri.Scheme}://{requestUri.IdnHost}:{requestUri.Port}{requestUri.AbsolutePath}";
+        return new RegistryResponseTimeoutException(
+            $"The registry response from '{safeUri}' did not complete before the configured deadline.",
+            innerException);
+    }
+
+    private sealed class RegistryResponseContext : IDisposable
+    {
+        private int _ownershipTransferred;
+        private int _disposed;
+
+        internal RegistryResponseContext(
+            HttpResponseMessage response,
+            CancellationTokenSource timeoutSource,
+            CancellationToken operationToken,
+            Uri requestUri)
+        {
+            Response = response;
+            TimeoutSource = timeoutSource;
+            OperationToken = operationToken;
+            RequestUri = requestUri;
+        }
+
+        internal HttpResponseMessage Response { get; }
+
+        internal CancellationTokenSource TimeoutSource { get; }
+
+        internal CancellationToken OperationToken { get; }
+
+        internal Uri RequestUri { get; }
+
+        internal void TransferOwnership() =>
+            Interlocked.Exchange(ref _ownershipTransferred, 1);
+
+        public void Dispose()
+        {
+            if (Volatile.Read(ref _ownershipTransferred) != 0
+                || Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            Response.Dispose();
+            TimeoutSource.Dispose();
+        }
+    }
+
+    private sealed class DeadlineAwareResponseContent : HttpContent
+    {
+        private readonly HttpContent _inner;
+        private readonly RegistryResponseContext _context;
+
+        internal DeadlineAwareResponseContent(
+            HttpContent inner,
+            RegistryResponseContext context)
+        {
+            _inner = inner;
+            _context = context;
+            foreach (KeyValuePair<string, IEnumerable<string>> header in inner.Headers)
+            {
+                Headers.TryAddWithoutValidation(header.Key, header.Value);
+            }
+        }
+
+        protected override Task SerializeToStreamAsync(
+            Stream stream,
+            TransportContext? context) =>
+            SerializeToStreamWithDeadlineAsync(
+                stream,
+                CancellationToken.None);
+
+        protected override Task SerializeToStreamAsync(
+            Stream stream,
+            TransportContext? context,
+            CancellationToken cancellationToken) =>
+            SerializeToStreamWithDeadlineAsync(
+                stream,
+                cancellationToken);
+
+        protected override void SerializeToStream(
+            Stream stream,
+            TransportContext? context,
+            CancellationToken cancellationToken) =>
+            SerializeToStreamWithDeadlineAsync(
+                    stream,
+                    cancellationToken)
+                .GetAwaiter()
+                .GetResult();
+
+        protected override Stream CreateContentReadStream(
+            CancellationToken cancellationToken) =>
+            CreateResponseStreamAsync(
+                    _context,
+                    _inner,
+                    cancellationToken)
+                .GetAwaiter()
+                .GetResult();
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            CreateContentReadStreamAsync(CancellationToken.None);
+
+        protected override async Task<Stream> CreateContentReadStreamAsync(
+            CancellationToken cancellationToken) =>
+            await CreateResponseStreamAsync(
+                    _context,
+                    _inner,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+        protected override bool TryComputeLength(out long length)
+        {
+            if (_inner.Headers.ContentLength is long contentLength)
+            {
+                length = contentLength;
+                return true;
+            }
+
+            length = 0;
+            return false;
+        }
+
+        private async Task SerializeToStreamWithDeadlineAsync(
+            Stream destination,
+            CancellationToken cancellationToken)
+        {
+            using CancellationTokenSource linkedSource =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    _context.OperationToken,
+                    cancellationToken,
+                    _context.TimeoutSource.Token);
+            try
+            {
+                await _inner.CopyToAsync(
+                        destination,
+                        linkedSource.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException exception)
+                when (_context.OperationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(
+                    exception.Message,
+                    exception,
+                    _context.OperationToken);
+            }
+            catch (OperationCanceledException exception)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(
+                    exception.Message,
+                    exception,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException exception)
+                when (_context.TimeoutSource.IsCancellationRequested)
+            {
+                throw CreateTimeoutException(
+                    _context.RequestUri,
+                    exception);
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _inner.Dispose();
+                _context.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+    }
+
+    private readonly record struct RegistryOrigin(
+        string Scheme,
+        string Host,
+        int Port)
+    {
+        internal static RegistryOrigin Create(Uri uri) =>
+            new(
+                uri.Scheme.ToLowerInvariant(),
+                uri.IdnHost.ToLowerInvariant(),
+                uri.Port);
+    }
+
+    private sealed class NonDisposingStream(Stream inner) : Stream
+    {
         public override bool CanRead => inner.CanRead;
 
-        /// <inheritdoc />
         public override bool CanSeek => inner.CanSeek;
 
-        /// <inheritdoc />
-        public override bool CanWrite => false;
+        public override bool CanWrite => inner.CanWrite;
 
-        /// <inheritdoc />
         public override long Length => inner.Length;
 
-        /// <inheritdoc />
         public override long Position
         {
             get => inner.Position;
             set => inner.Position = value;
         }
 
-        /// <inheritdoc />
-        public override int Read(byte[] buffer, int offset, int count) =>
-            inner.Read(buffer, offset, count);
-
-        /// <inheritdoc />
-        public override int Read(Span<byte> buffer) =>
-            inner.Read(buffer);
-
-        /// <inheritdoc />
-        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) =>
-            inner.ReadAsync(buffer, offset, count, ct);
-
-        /// <inheritdoc />
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) =>
-            inner.ReadAsync(buffer, ct);
-
-        /// <inheritdoc />
-        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
-
-        /// <inheritdoc />
-        public override void SetLength(long value) => inner.SetLength(value);
-
-        /// <inheritdoc />
-        public override void Write(byte[] buffer, int offset, int count) =>
-            throw new NotSupportedException();
-
-        /// <inheritdoc />
         public override void Flush() => inner.Flush();
 
-        /// <inheritdoc />
         public override Task FlushAsync(CancellationToken cancellationToken) =>
             inner.FlushAsync(cancellationToken);
 
-        /// <inheritdoc />
-        public override Task CopyToAsync(Stream destination, int bufferSize, CancellationToken ct) =>
-            inner.CopyToAsync(destination, bufferSize, ct);
+        public override int Read(byte[] buffer, int offset, int count) =>
+            inner.Read(buffer, offset, count);
 
-        /// <inheritdoc />
+        public override int Read(Span<byte> buffer) =>
+            inner.Read(buffer);
+
+        public override Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken) =>
+            inner.ReadAsync(buffer, offset, count, cancellationToken);
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            inner.ReadAsync(buffer, cancellationToken);
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            inner.Seek(offset, origin);
+
+        public override void SetLength(long value) =>
+            inner.SetLength(value);
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            inner.Write(buffer, offset, count);
+
+        public override void Write(ReadOnlySpan<byte> buffer) =>
+            inner.Write(buffer);
+
+        public override Task WriteAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken) =>
+            inner.WriteAsync(buffer, offset, count, cancellationToken);
+
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            inner.WriteAsync(buffer, cancellationToken);
+
         protected override void Dispose(bool disposing)
         {
-            if (disposing)
+            base.Dispose(disposing);
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            GC.SuppressFinalize(this);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class ResponseOwningStream(
+        Stream inner,
+        HttpResponseMessage response) : Stream
+    {
+        private int _disposed;
+
+        public override bool CanRead => inner.CanRead;
+
+        public override bool CanSeek => inner.CanSeek;
+
+        public override bool CanWrite => false;
+
+        public override long Length => inner.Length;
+
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public override void Flush() => inner.Flush();
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            inner.Read(buffer, offset, count);
+
+        public override Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken) =>
+            inner.ReadAsync(buffer, offset, count, cancellationToken);
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            inner.ReadAsync(buffer, cancellationToken);
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            inner.Seek(offset, origin);
+
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing
+                && Interlocked.Exchange(ref _disposed, 1) == 0)
             {
                 inner.Dispose();
                 response.Dispose();
@@ -400,11 +999,15 @@ public abstract class RegistryClientBase : IRegistryClient
             base.Dispose(disposing);
         }
 
-        /// <inheritdoc />
         public override async ValueTask DisposeAsync()
         {
-            await inner.DisposeAsync().ConfigureAwait(false);
-            response.Dispose();
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                await inner.DisposeAsync().ConfigureAwait(false);
+                response.Dispose();
+            }
+
+            GC.SuppressFinalize(this);
         }
     }
 
@@ -439,19 +1042,42 @@ public abstract class RegistryClientBase : IRegistryClient
 
     // ── Version resolution helpers ──────────────────────────────────────
 
+    /// <summary>Adds source provenance to a registry listing without changing its JSON shape.</summary>
+    protected PackageListing WithSourceProvenance(PackageListing listing)
+    {
+        ArgumentNullException.ThrowIfNull(listing);
+
+        Dictionary<string, PackageVersionInfo> versions =
+            new(StringComparer.OrdinalIgnoreCase);
+        List<PackageVersionInfo> candidates = [];
+        foreach ((string key, PackageVersionInfo versionInfo) in listing.Versions)
+        {
+            bool isLatest = listing.DistTags is not null
+                && listing.DistTags.TryGetValue("latest", out string? latest)
+                && key.Equals(latest, StringComparison.OrdinalIgnoreCase);
+            PackageVersionInfo candidate = versionInfo with
+            {
+                Version = key,
+                SourceRegistry = Endpoint.ToProvenance(),
+                SourceClient = this,
+                IsSourceLatest = versionInfo.IsSourceLatest || isLatest,
+            };
+            versions[key] = candidate;
+            candidates.Add(candidate);
+        }
+
+        return listing with
+        {
+            Versions = versions,
+            SourceRegistry = Endpoint.ToProvenance(),
+            VersionCandidates = candidates,
+        };
+    }
+
     /// <summary>Resolves the best matching version from a <see cref="PackageListing"/>.</summary>
     protected static string? ResolveVersion(
         PackageDirective directive, PackageListing listing, VersionResolveOptions? options)
-    {
-        return directive.VersionType switch
-        {
-            VersionType.Exact => ResolveExact(listing, directive.RequestedVersion!),
-            VersionType.Latest => listing.LatestVersion,
-            VersionType.Wildcard => ResolveWildcard(listing, directive.RequestedVersion!, options),
-            VersionType.Range => ResolveRange(listing, directive.RequestedVersion!, options),
-            _ => null,
-        };
-    }
+        => PackageVersionSelector.Select(directive, listing, options)?.Key;
 
     /// <summary>Returns <paramref name="requestedVersion"/> if it exists in the listing, otherwise <see langword="null"/>.</summary>
     protected static string? ResolveExact(PackageListing listing, string requestedVersion)

@@ -522,7 +522,10 @@ public record PackageManifest
 }
 
 /// <summary>NPM distribution metadata.</summary>
-public record NpmDistribution(string? ShaSum, string? TarballUrl);
+public record NpmDistribution(string? ShaSum, string? TarballUrl)
+{
+    public string? Integrity { get; init; }
+}
 
 /// <summary>NPM repository metadata.</summary>
 public record NpmRepository(string? Type, string? Url, string? Directory);
@@ -616,8 +619,12 @@ public record ResolvedDirective
     public required PackageReference Reference { get; init; }
     public required Uri TarballUri { get; init; }
     public string? ShaSum { get; init; }
+    public string? Sha256Sum { get; init; }
+    public string? Integrity { get; init; }
     public RegistryEndpoint? SourceRegistry { get; init; }
     public DateTime? PublicationDate { get; init; }
+    public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
+    public IReadOnlyList<string>? FhirVersions { get; init; }
 }
 
 /// <summary>

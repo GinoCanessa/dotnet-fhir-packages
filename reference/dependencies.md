@@ -56,12 +56,12 @@ flowchart TD
 ### Resolution Steps
 
 1. **Read the root manifest** — Parse `package.json` from the root package
-2. **For each dependency:**
-   a. Check if already in the resolution closure (prevents circular dependencies)
-   b. Resolve the version (query registries, check cache)
-   c. Install to cache if not present
-   d. Add to closure
-   e. Recursively process the dependency's own dependencies
+2. **For each active dependency edge:**
+   a. Resolve the version through the registry policy
+   b. Select the package version using the configured conflict strategy
+   c. Read the selected version's registry metadata, then fall back to cache
+   d. Replace child edges if the selected version changes
+   e. Recompute reachability so losing-only descendants and failures disappear
 3. **Return the closure** — A complete list of all resolved packages
 
 ### Package Closure
@@ -84,19 +84,58 @@ A package closure is the complete set of resolved transitive dependencies:
 The closure records:
 
 - **Resolved dependencies:** Package name → exact resolved version
-- **Missing dependencies:** Packages that could not be resolved
-- **Completeness:** A closure is complete when there are no missing dependencies
+- **Structured failures:** Missing versions, conflicts, depth truncation,
+  incomplete metadata, registry failures, and unstable graph states
+- **Missing dependencies:** A compatibility map projected from structured
+  failures
+- **Completeness:** A closure is complete when there are no failures
+
+## Restore Locks
+
+`RestoreAsync` persists complete closures in a schema-v2 lock. In addition to
+the flattened exact dependency versions, the lock records:
+
+- the exact direct root directives from the project manifest;
+- the exact project package name and version used for root back-edge checks;
+- conflict strategy, prerelease policy, preferred FHIR release, and max depth;
+- a deterministic identity hash of the active version-fixup policy; and
+- the complete dependency-first replay order, preserving mutable aliases while
+  the dependency map retains exact expected manifest identities; and
+- structured resolution failures, which are empty in every newly written lock.
+
+The lock fast path requires exact root-set, project identity, and policy
+equality. Package names are compared case-insensitively while version text
+remains ordinal and case-sensitive. Root order is also significant for
+`FirstWins`. Every dependency value must be a concrete semantic-version pin and
+each effective root must be represented. Removing or reordering an applicable
+root, changing project identity or any policy input, or loading a
+legacy/incomplete lock forces graph resolution. A complete highest-wins result
+contains only the active winner and its reachable descendants; superseded nodes
+and their failures are not installed or locked.
 
 ## Circular Dependency Prevention
 
-Before resolving each dependency, implementations check whether the package is already in the current resolution set:
+The resolver tracks active parent edges rather than using one global visited
+set. A cycle does not expand forever, but encountering a package through one
+path does not suppress a valid shared-DAG path through another parent:
 
 ```
 Resolving: A → B → C → A  (circular!)
                          ↑ Already in closure — skip
 ```
 
-This prevents infinite recursion. The package is simply not re-processed.
+Version-dependent cycles that cannot reach a stable active graph are returned
+as typed unstable-resolution failures.
+
+## Depth Semantics
+
+Depth is measured from the root's dependency edges:
+
+- Direct dependencies are depth `0`.
+- Their children are depth `1`.
+- `MaxDepth = 0` resolves direct dependencies but reports their children as
+  depth-limit failures.
+- Negative values are rejected.
 
 ## Version Conflicts
 
@@ -116,21 +155,33 @@ Root
 | SUSHI | Loads both — each package gets its resolved version |
 | Java Publisher | Logs a warning about version mismatch |
 
+**This SDK** resolves conflicts with the `ConflictStrategy` option (default
+`HighestWins`; also `FirstWins` and `Error`). Under `HighestWins` the highest
+pinned version across active edges wins; `FirstWins` keeps the first-encountered
+version (root order is significant); `Error` reports a `VersionConflict` failure
+when active edges pin different exact versions.
+
 ## Known Package Fixups
 
-Some implementations apply workarounds for known package issues:
+This SDK applies the following fixups by default (via `PackageFixups`) before
+resolution, in addition to any configured `VersionFixups`:
 
 ### HL7 Core Package Version Fix
 
 `hl7.fhir.r4.core@4.0.0` is automatically upgraded to `4.0.1` because the `4.0.0` publication had errors.
 
+### R4B Snapshot Alias
+
+`hl7.fhir.r4b.core@4.3.0-snapshot1` is rewritten to `4.3.0` (the `snapshot1` pre-release aliases the release).
+
 ### Extension Package Mapping
 
-The Java Publisher maps generic extension packages to version-specific ones:
+Generic extension packages are remapped to the version-specific package for the resolved FHIR release:
 
 ```
-hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r4   (for R4 projects)
-hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r5   (for R5 projects)
+hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r4    (R4)
+hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r4b   (R4B)
+hl7.fhir.uv.extensions → hl7.fhir.uv.extensions.r5    (R5)
 ```
 
 And strips `-cibuild` suffixes from versions.

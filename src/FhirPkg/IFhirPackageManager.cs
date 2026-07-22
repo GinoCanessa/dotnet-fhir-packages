@@ -2,6 +2,7 @@
 
 using FhirPkg.Models;
 using FhirPkg.Registry;
+using FhirPkg.Installation;
 
 namespace FhirPkg;
 
@@ -62,6 +63,37 @@ public interface IFhirPackageManager
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Lists package summaries currently in the local cache, optionally
+    /// filtered by package ID prefix. Summary records deliberately omit
+    /// resource indexes.
+    /// </summary>
+    /// <param name="filter">Optional filter; only packages whose ID starts with this value are returned.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>
+    /// A read-only list of cached package records whose
+    /// <see cref="PackageRecord.Index"/> values are <c>null</c>.
+    /// </returns>
+    /// <remarks>
+    /// The default implementation preserves compatibility by cloning records
+    /// returned from <see cref="ListCachedAsync"/> without their indexes.
+    /// It may therefore hydrate internally unless an implementation overrides
+    /// this method. Call <see cref="ListCachedAsync"/> when resource indexes
+    /// are required.
+    /// </remarks>
+    async Task<IReadOnlyList<PackageRecord>> ListCachedSummariesAsync(
+        string? filter = null,
+        CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<PackageRecord> records = await ListCachedAsync(
+                filter,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return records
+            .Select(record => record with { Index = null })
+            .ToArray();
+    }
+
+    /// <summary>
     /// Removes a package from the local cache.
     /// </summary>
     /// <param name="directive">Package directive identifying the cached package to remove.</param>
@@ -93,7 +125,14 @@ public interface IFhirPackageManager
     /// </summary>
     /// <param name="packageId">The package identifier to look up (e.g., "hl7.fhir.us.core").</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A <see cref="PackageListing"/> with all known versions, or <c>null</c> if not found.</returns>
+    /// <returns>
+    /// A merged <see cref="PackageListing"/> with all known versions, or <c>null</c>
+    /// when every successful source reports absence. Check
+    /// <see cref="PackageListing.IsComplete"/> before making global selections.
+    /// </returns>
+    /// <exception cref="RegistryOperationException">
+    /// No registry produced a listing and at least one registry attempt failed.
+    /// </exception>
     Task<PackageListing?> GetPackageListingAsync(
         string packageId,
         CancellationToken cancellationToken = default);
@@ -103,7 +142,13 @@ public interface IFhirPackageManager
     /// </summary>
     /// <param name="directive">Package directive (name#version or name@version).</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A <see cref="ResolvedDirective"/> with the exact version and tarball URI, or <c>null</c> if not found.</returns>
+    /// <returns>
+    /// A <see cref="ResolvedDirective"/> with exact, source-coherent metadata, or
+    /// <c>null</c> when all successful sources report absence.
+    /// </returns>
+    /// <exception cref="RegistryOperationException">
+    /// Registry failures prevent an authoritative resolution.
+    /// </exception>
     Task<ResolvedDirective?> ResolveAsync(
         string directive,
         CancellationToken cancellationToken = default);
@@ -119,4 +164,82 @@ public interface IFhirPackageManager
         string tarballPath,
         RegistryEndpoint registry,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Installs URI content under an explicit expected identity.</summary>
+    Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (this is IHardenedFhirPackageManager hardenedManager)
+        {
+            return hardenedManager.InstallAsync(
+                expectedReference,
+                packageUri,
+                options,
+                cancellationToken);
+        }
+
+        throw UnsupportedManagerCapability();
+    }
+
+    /// <summary>Installs caller-owned stream content under an expected identity.</summary>
+    Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (this is IHardenedFhirPackageManager hardenedManager)
+        {
+            return hardenedManager.InstallAsync(
+                expectedReference,
+                packageStream,
+                options,
+                cancellationToken);
+        }
+
+        throw UnsupportedManagerCapability();
+    }
+
+    /// <summary>Imports URI content using its validated manifest identity.</summary>
+    Task<PackageRecord> ImportAsync(
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (this is IHardenedFhirPackageManager hardenedManager)
+        {
+            return hardenedManager.ImportAsync(
+                packageUri,
+                options,
+                cancellationToken);
+        }
+
+        throw UnsupportedManagerCapability();
+    }
+
+    /// <summary>Imports caller-owned stream content using its validated manifest identity.</summary>
+    Task<PackageRecord> ImportAsync(
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (this is IHardenedFhirPackageManager hardenedManager)
+        {
+            return hardenedManager.ImportAsync(
+                packageStream,
+                options,
+                cancellationToken);
+        }
+
+        throw UnsupportedManagerCapability();
+    }
+
+    private static PackageInstallException UnsupportedManagerCapability() =>
+        new(
+            PackageInstallErrorCode.UnsupportedManagerCapability,
+            PackageInstallStage.PolicyValidation,
+            "The package manager does not support hardened URI or stream installation.");
 }

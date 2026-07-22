@@ -387,20 +387,137 @@ public class FhirSemVerTests
     }
 
     [Fact]
-    public void SatisfyingRange_Pipe_EitherVersion()
+    public void SatisfyingRange_ComparatorsIntersect()
     {
-        FhirSemVer[] versions = new[]
-        {
+        FhirSemVer[] versions =
+        [
+            FhirSemVer.Parse("2.0.0"),
+            FhirSemVer.Parse("1.5.0"),
+            FhirSemVer.Parse("1.0.0"),
+            FhirSemVer.Parse("1.9.9"),
+            FhirSemVer.Parse("0.9.9"),
+        ];
+
+        List<string> results = FhirSemVer
+            .SatisfyingRange(versions, ">= 1.0.0 <2.0.0")
+            .Select(version => version.ToString())
+            .ToList();
+        string[] expected = ["1.5.0", "1.0.0", "1.9.9"];
+
+        results.ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData("<2.0.0", "1.0.0")]
+    [InlineData("<=2.0.0", "1.0.0,2.0.0")]
+    [InlineData(">2.0.0", "3.0.0")]
+    [InlineData(">=2.0.0", "2.0.0,3.0.0")]
+    [InlineData("=2.0.0", "2.0.0")]
+    public void SatisfyingRange_ComparatorOperators(
+        string expression,
+        string expectedVersions)
+    {
+        FhirSemVer[] versions =
+        [
             FhirSemVer.Parse("1.0.0"),
             FhirSemVer.Parse("2.0.0"),
             FhirSemVer.Parse("3.0.0"),
-        };
+        ];
 
-        List<FhirSemVer> results = FhirSemVer.SatisfyingRange(versions, "1.0.0|3.0.0").ToList();
+        string actual = string.Join(
+            ',',
+            FhirSemVer.SatisfyingRange(versions, expression));
 
-        results.Count.ShouldBe(2);
-        results.ShouldContain(v => v.Major == 1);
-        results.ShouldContain(v => v.Major == 3);
+        actual.ShouldBe(expectedVersions);
+    }
+
+    [Fact]
+    public void SatisfyingRange_HyphenRangeIsInclusive()
+    {
+        FhirSemVer[] versions =
+        [
+            FhirSemVer.Parse("2.0.1"),
+            FhirSemVer.Parse("1.0.0"),
+            FhirSemVer.Parse("2.0.0"),
+            FhirSemVer.Parse("1.5.0"),
+            FhirSemVer.Parse("0.9.9"),
+        ];
+
+        List<string> results = FhirSemVer
+            .SatisfyingRange(versions, "1.0.0 - 2.0.0")
+            .Select(version => version.ToString())
+            .ToList();
+        string[] expected = ["1.0.0", "2.0.0", "1.5.0"];
+
+        results.ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData("^1.2.3", "1.2.3", "1.9.9", "2.0.0")]
+    [InlineData("^0.2.3", "0.2.3", "0.2.9", "0.3.0")]
+    [InlineData("^0.0.3", "0.0.3", null, "0.0.4")]
+    public void SatisfyingRange_CaretUsesFirstNonZeroCeiling(
+        string expression,
+        string lowerVersion,
+        string? includedVersion,
+        string ceilingVersion)
+    {
+        List<FhirSemVer> versions = [FhirSemVer.Parse(lowerVersion)];
+        if (includedVersion is not null)
+            versions.Add(FhirSemVer.Parse(includedVersion));
+        versions.Add(FhirSemVer.Parse(ceilingVersion));
+
+        List<FhirSemVer> results = FhirSemVer.SatisfyingRange(versions, expression).ToList();
+
+        results.ShouldContain(FhirSemVer.Parse(lowerVersion));
+        if (includedVersion is not null)
+            results.ShouldContain(FhirSemVer.Parse(includedVersion));
+        results.ShouldNotContain(FhirSemVer.Parse(ceilingVersion));
+    }
+
+    [Fact]
+    public void SatisfyingRange_Pipe_PreservesCandidateOrder()
+    {
+        FhirSemVer[] versions =
+        [
+            FhirSemVer.Parse("3.0.0"),
+            FhirSemVer.Parse("2.0.0"),
+            FhirSemVer.Parse("1.0.0"),
+        ];
+
+        List<string> results = FhirSemVer
+            .SatisfyingRange(versions, "1.0.0|3.0.0")
+            .Select(version => version.ToString())
+            .ToList();
+        string[] expected = ["3.0.0", "1.0.0"];
+
+        results.ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData("^2.0.0", "1.0.0", false, false)]
+    [InlineData("^2.0.0", "3.0.0", false, true)]
+    [InlineData("2.x", "3.0.0", false, true)]
+    [InlineData(
+        ">1.0.0-alpha <1.0.0-rc",
+        "2.0.0",
+        true,
+        true)]
+    public void Range_HasSatisfyingVersionAtOrBelow_UsesBounds(
+        string expression,
+        string ceiling,
+        bool allowPreRelease,
+        bool expected)
+    {
+        FhirSemVerRange range =
+            FhirSemVerRange.Parse(expression);
+
+        bool actual =
+            range.HasSatisfyingVersionAtOrBelow(
+                FhirSemVer.Parse(ceiling),
+                allowPreRelease);
+
+        actual.ShouldBe(expected);
     }
 
     [Fact]

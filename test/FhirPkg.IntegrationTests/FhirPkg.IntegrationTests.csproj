@@ -28,6 +28,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\FhirPkg\FhirPkg.csproj" />
     <ProjectReference Include="..\..\src\FhirPkg.Cli\FhirPkg.Cli.csproj" />
+    <ProjectReference
+      Include="..\FhirPkg.ProcessTestHost\FhirPkg.ProcessTestHost.csproj"
+      ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

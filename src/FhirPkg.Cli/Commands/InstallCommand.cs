@@ -2,6 +2,7 @@
 
 using System.CommandLine;
 using FhirPkg.Cli.Formatting;
+using FhirPkg.Installation;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using Spectre.Console;
@@ -182,10 +183,7 @@ internal static class InstallCommand
                     ConsoleOutput.WriteInstallResults(results);
                 }
 
-                bool hasFailures = results.Any(r =>
-                    r.Status is PackageInstallStatus.Failed or PackageInstallStatus.NotFound);
-
-                return hasFailures ? ExitCodes.NotFound : ExitCodes.Success;
+                return GetExitCode(results);
             }
             catch (HttpRequestException ex)
             {
@@ -205,5 +203,60 @@ internal static class InstallCommand
         });
 
         return command;
+    }
+
+    internal static int GetExitCode(
+        IReadOnlyList<PackageInstallResult> results)
+    {
+        PackageInstallResult[] failures = results
+            .Where(result => result.Status
+                is PackageInstallStatus.Failed
+                    or PackageInstallStatus.NotFound)
+            .ToArray();
+        if (failures.Length == 0)
+            return ExitCodes.Success;
+
+        if (failures.Any(result =>
+            result.ErrorCode == PackageInstallErrorCode.ChecksumMismatch))
+        {
+            return ExitCodes.ChecksumFail;
+        }
+
+        if (failures.Any(result =>
+            result.ErrorCode
+                == PackageInstallErrorCode.DependencyInstallationFailed
+            || result.ErrorStage
+                == PackageInstallStage.DependencyInstallation))
+        {
+            return ExitCodes.DependencyResolutionFail;
+        }
+
+        if (failures.Any(result =>
+            result.ErrorCode == PackageInstallErrorCode.DownloadFailed
+            || (result.Status == PackageInstallStatus.Failed
+                && (result.ErrorCode
+                        == PackageInstallErrorCode.ResolutionFailed
+                    || result.ErrorStage
+                        == PackageInstallStage.Resolution))))
+        {
+            return ExitCodes.NetworkError;
+        }
+
+        if (failures.Any(result => result.ErrorCode is
+            PackageInstallErrorCode.CorruptCache
+                or PackageInstallErrorCode.CoordinationFailed
+                or PackageInstallErrorCode.CommitFailed
+                or PackageInstallErrorCode.UnsupportedCacheCapability))
+        {
+            return ExitCodes.CacheError;
+        }
+
+        if (failures.All(result =>
+            result.Status == PackageInstallStatus.NotFound))
+        {
+            return ExitCodes.NotFound;
+        }
+
+        return ExitCodes.GeneralError;
     }
 }

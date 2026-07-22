@@ -40,4 +40,13 @@
     <PackageReference Include="Microsoft.Extensions.Options" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="FhirPkg.Tests" />
+    <InternalsVisibleTo Include="FhirPkg.IntegrationTests" />
+    <InternalsVisibleTo Include="FhirPkg.ProcessTestHost" />
+    <InternalsVisibleTo Include="FhirPkg.Cli" />
+  </ItemGroup>
+
+  <Import Project="..\common.targets" />
+
 </Project>

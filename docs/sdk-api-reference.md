@@ -1,6 +1,8 @@
 # SDK API Reference
 
-This document covers every public type in the **FhirPkg** SDK. For a high-level
+This document is the public API reference for the **FhirPkg** SDK, covering its
+interfaces, options, models, enumerations, cache, registry, resolution,
+indexing, utilities, and dependency-injection types. For a high-level
 introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
 
 ---
@@ -8,9 +10,12 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
 ## Table of Contents
 
 - [Core Interface — IFhirPackageManager](#core-interface--ifhirpackagemanager)
+  - [Resource Capability — IFhirPackageResourceManager](#resource-capability--ifhirpackageresourcemanager)
+- [Hardened Manager Sources](#hardened-manager-sources)
 - [Options](#options)
   - [FhirPackageManagerOptions](#fhirpackagemanageroptions)
   - [InstallOptions](#installoptions)
+  - [PackageSourceInstallOptions](#packagesourceinstalloptions)
   - [RestoreOptions](#restoreoptions)
   - [VersionResolveOptions](#versionresolveoptions)
 - [Models](#models)
@@ -33,6 +38,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
 - [Enumerations](#enumerations)
 - [Cache](#cache)
   - [IPackageCache](#ipackagecache)
+  - [IHardenedPackageCache](#ihardenedpackagecache)
   - [DiskPackageCache](#diskpackagecache)
   - [MemoryResourceCache](#memoryresourcecache)
 - [Registry](#registry)
@@ -76,6 +82,10 @@ public interface IFhirPackageManager
         string? filter = null,
         CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<PackageRecord>> ListCachedSummariesAsync(
+        string? filter = null,
+        CancellationToken cancellationToken = default);
+
     Task<bool> RemoveAsync(
         string directive,
         CancellationToken cancellationToken = default);
@@ -99,6 +109,28 @@ public interface IFhirPackageManager
         string tarballPath,
         RegistryEndpoint registry,
         CancellationToken cancellationToken = default);
+
+    Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken);
+
+    Task<PackageRecord> InstallAsync(
+        PackageReference expectedReference,
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken);
+
+    Task<PackageRecord> ImportAsync(
+        Uri packageUri,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken);
+
+    Task<PackageRecord> ImportAsync(
+        Stream packageStream,
+        PackageSourceInstallOptions? options,
+        CancellationToken cancellationToken);
 }
 ```
 
@@ -112,29 +144,36 @@ cache. Returns the `PackageRecord` on success, or `null` if the package could no
 be found.
 
 ```csharp
-var record = await manager.InstallAsync("hl7.fhir.us.core#6.1.0");
+PackageRecord? record =
+    await manager.InstallAsync("hl7.fhir.us.core#6.1.0");
 ```
 
 #### `InstallManyAsync`
 
 Installs multiple packages with concurrency control. Returns a result per
-directive with its status (`Installed`, `AlreadyCached`, `NotFound`, `Failed`).
+directive with its compatibility status (`Installed`, `AlreadyCached`,
+`NotFound`, `Failed`). Successful `current` and `current$branch` results can
+also expose a nullable `PackageInstallDisposition` that distinguishes first
+install, replacement, already-current, and same-content refresh outcomes.
 
 ```csharp
-var results = await manager.InstallManyAsync(
-    ["hl7.fhir.r4.core#4.0.1", "hl7.fhir.us.core#6.1.0"],
-    new InstallOptions { IncludeDependencies = true });
+IReadOnlyList<PackageInstallResult> results =
+    await manager.InstallManyAsync(
+        ["hl7.fhir.r4.core#4.0.1", "hl7.fhir.us.core#6.1.0"],
+        new InstallOptions { IncludeDependencies = true });
 ```
 
 #### `RestoreAsync`
 
 Reads a `package.json` manifest from `projectPath`, resolves the full transitive
 dependency closure, installs all resolved packages, and optionally writes a lock
-file.
+file. A current schema-v2 lock can bypass graph resolution only when its exact
+root directives and complete resolution-policy identity match this request.
 
 ```csharp
 var closure = await manager.RestoreAsync("./my-ig", new RestoreOptions
 {
+    LockFilePath = "./locks/fhirpkg.lock.json",
     ConflictStrategy = ConflictResolutionStrategy.HighestWins,
     WriteLockFile = true,
 });
@@ -149,6 +188,22 @@ against package ID prefixes.
 var all = await manager.ListCachedAsync();
 var r4Only = await manager.ListCachedAsync("hl7.fhir.r4");
 ```
+
+#### `ListCachedSummariesAsync`
+
+Lists package-level cache metadata without requiring resource indexes.
+Every returned `PackageRecord` has `Index == null`; use `ListCachedAsync`
+when the caller needs to consume `PackageRecord.Index`.
+
+```csharp
+IReadOnlyList<PackageRecord> summaries =
+    await manager.ListCachedSummariesAsync("hl7.fhir");
+```
+
+The default interface implementation clones records from `ListCachedAsync`,
+which keeps third-party implementations source-compatible but may still
+hydrate indexes internally. Implementations should override the summary
+operation to provide lightweight enumeration.
 
 #### `RemoveAsync`
 
@@ -200,7 +255,10 @@ Console.WriteLine($"{resolved?.Reference.Version} → {resolved?.TarballUri}");
 
 #### `PublishAsync`
 
-Publishes a `.tgz` tarball to the specified registry endpoint.
+Publishes a `.tgz` tarball once to the exact supplied endpoint. Publication
+does not reuse or fall back through the manager's redundant read chain:
+`RegistryEndpoint.Type`, authorization, custom headers, and URL all come from
+this call.
 
 ```csharp
 var result = await manager.PublishAsync("./my-package.tgz", new RegistryEndpoint
@@ -210,6 +268,13 @@ var result = await manager.PublishAsync("./my-package.tgz", new RegistryEndpoint
     AuthHeaderValue = "Bearer my-token",
 });
 ```
+
+`RegistryType.FhirNpm` sends the validated archive as the raw gzip request body.
+`RegistryType.Npm` validates a standard `package/package.json` layout and exact
+name/version, rejects private or invalid-semver packages, and sends a standard
+NPM packument with `latest`, SHA-1, SHA-512 integrity, and a streamed base64
+attachment. Publish input is bounded by `InstallLimits`, consumed from its
+current position, and left open.
 
 ### Constructors (FhirPackageManager)
 
@@ -231,6 +296,96 @@ new FhirPackageManager(
 `FhirPackageManager` implements `IDisposable` to release the internal `HttpClient`
 when used outside of DI.
 
+## Hardened Manager Sources
+
+`FhirPackageManager` implements `IHardenedFhirPackageManager`. The four URI and
+stream methods shown above are also binary-compatible default methods on
+`IFhirPackageManager`: they dispatch to the capability when available and
+otherwise throw `PackageInstallException` with
+`UnsupportedManagerCapability` before reading the source.
+
+- Expected-identity methods validate the manifest against
+  `expectedReference`. Exact versions and the mutable `current`,
+  `current$branch`, and local `dev` aliases are supported; selectors such as
+  `latest`, wildcards, and ranges are rejected.
+- Import methods discover the canonical identity only after bounded archive and
+  manifest validation.
+- Caller streams are consumed from their current position and remain open.
+- URI sources must be absolute HTTP/HTTPS URIs. The configured `HttpClient`
+  uses `ResponseHeadersRead`; `HttpTimeout` covers header acquisition and body
+  staging across every redirect. Redirect limits are configured by
+  `MaxRedirects`.
+- Network allow-list, proxy, DNS, and credential policy are application
+  responsibilities.
+- All four modes use the same limits, checksum validation, archive validation,
+  cache repair, transactional commit, dependency, progress, and cancellation
+  pipeline as directive installation.
+
+```csharp
+await using FileStream source = File.OpenRead("package.tgz");
+PackageRecord installed = await manager.InstallAsync(
+    new PackageReference("example.package", "1.0.0"),
+    source,
+    new PackageSourceInstallOptions
+    {
+        ExpectedSha256 = "..."
+    },
+    cancellationToken);
+
+PackageRecord discovered = await manager.ImportAsync(
+    new Uri("https://packages.example.test/package.tgz"),
+    options: null,
+    cancellationToken);
+```
+
+## Resource Capability — IFhirPackageResourceManager
+
+`FhirPackageManager` implements an additive resource capability. The same
+operations are extension methods on `IFhirPackageManager`, preserving
+compatibility for existing implementations; an implementation without the
+capability throws `NotSupportedException`.
+
+```csharp
+public interface IFhirPackageResourceManager
+{
+    Task<PackageIndex?> IndexPackageAsync(
+        PackageReference reference,
+        IndexingOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<ResourceInfo>> FindResourcesAsync(
+        ResourceSearchCriteria criteria,
+        CancellationToken cancellationToken = default);
+
+    Task<ResourceInfo?> FindByCanonicalUrlAsync(
+        string canonicalUrl,
+        string? packageScope = null,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<ResourceInfo>> FindByResourceTypeAsync(
+        string resourceType,
+        string? packageScope = null,
+        CancellationToken cancellationToken = default);
+
+    Task<JsonNode?> ReadResourceAsync(
+        ResourceInfo resource,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Search methods lazily load or generate indexes for relevant cached packages.
+`IndexPackageAsync` returns `null` when the package is not cached and honors
+`ForceReindex`. Generated indexes are persisted atomically before registration.
+Explicit and lazy failures propagate; eager post-install failures only produce
+a warning.
+
+`ReadResourceAsync` requires the package identity and contained path from
+`ResourceInfo`, rejects unsafe portable paths, returns `null` for a missing
+file, and propagates malformed JSON. Parsed `JsonNode` values are cached by
+canonical package identity and normalized path when `ResourceCacheSize` is
+positive and the package cache provides generation-aware reads. Other custom
+cache implementations are read on every call.
+
 ---
 
 ## Options
@@ -243,8 +398,10 @@ Top-level configuration for the SDK. See the
 ```csharp
 public class FhirPackageManagerOptions
 {
+    public PackageInstallLimits InstallLimits { get; set; }
+    public CorruptCacheBehavior CorruptCacheBehavior { get; set; }  // default: Repair
     public string? CachePath { get; set; }                          // default: null → PACKAGE_CACHE_FOLDER env var → ~/.fhir/packages
-    public List<RegistryEndpoint> Registries { get; set; }          // default: []
+    public List<RegistryEndpoint> Registries { get; init; }         // default: []
     public bool IncludeCiBuilds { get; set; }                       // default: true
     public bool IncludeHl7WebsiteFallback { get; set; }             // default: true
     public TimeSpan HttpTimeout { get; set; }                       // default: 30s
@@ -253,9 +410,13 @@ public class FhirPackageManagerOptions
     public int MaxParallelRegistryQueries { get; set; }             // default: 3
     public int ResourceCacheSize { get; set; }                      // default: 200
     public SafeMode ResourceCacheSafeMode { get; set; }             // default: SafeMode.Off
-    public Dictionary<string, string> VersionFixups { get; set; }   // default: {"hl7.fhir.r4.core@4.0.0": "4.0.1"}
+    public Dictionary<string, string> VersionFixups { get; init; }  // defaults include R4 4.0.0→4.0.1 and R4B snapshot1→4.3.0
 }
 ```
+
+Options are validated and snapshotted when a manager is constructed. Mutating
+the original options or its collections afterward does not reconfigure that
+manager. See [Version Resolution Policy](versioning-policy.md).
 
 ### InstallOptions
 
@@ -264,6 +425,7 @@ Controls behavior of `InstallAsync` and `InstallManyAsync`.
 ```csharp
 public class InstallOptions
 {
+    public PackageInstallLimits? InstallLimits { get; set; }
     public bool IncludeDependencies { get; set; }           // default: false
     public bool OverwriteExisting { get; set; }             // default: false
     public FhirRelease? PreferredFhirRelease { get; set; }  // default: null
@@ -272,6 +434,31 @@ public class InstallOptions
 }
 ```
 
+### PackageSourceInstallOptions
+
+Extends `InstallOptions` for URI and stream sources.
+
+```csharp
+public class PackageSourceInstallOptions : InstallOptions
+{
+    public CorruptCacheBehavior? CorruptCacheBehavior { get; set; }
+    public string? ExpectedSha256 { get; set; }
+    public string? ExpectedSha1 { get; set; }
+}
+```
+
+The nullable corruption policy overrides the manager-level repair/strict
+setting for that URI or stream operation. Hardened custom caches receive the
+resolved value through public `InstallCacheOptions` before source consumption.
+
+`PackageInstallLimits` has finite defaults: 100 MiB compressed, 1 GiB expanded,
+128 MiB per entry, 50,000 entries, normalized path length 1,024, and depth 32.
+Per-call values may only tighten manager limits. Unspecified manager values can
+be configured with `FHIRPKG_MAX_COMPRESSED_BYTES`,
+`FHIRPKG_MAX_EXPANDED_BYTES`, `FHIRPKG_MAX_ENTRY_BYTES`,
+`FHIRPKG_MAX_ARCHIVE_ENTRIES`, `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH`, and
+`FHIRPKG_MAX_ARCHIVE_DEPTH`.
+
 ### RestoreOptions
 
 Extends `InstallOptions` with dependency-resolution settings.
@@ -279,11 +466,18 @@ Extends `InstallOptions` with dependency-resolution settings.
 ```csharp
 public class RestoreOptions : InstallOptions
 {
+    public string? LockFilePath { get; set; }                         // default: <project>/fhirpkg.lock.json
     public ConflictResolutionStrategy ConflictStrategy { get; set; } // default: HighestWins
     public bool WriteLockFile { get; set; }                          // default: true
     public int MaxDepth { get; set; }                                // default: 20
 }
 ```
+
+Relative `LockFilePath` values are resolved against the project directory;
+absolute values are unchanged. `WriteLockFile = false` prevents replacement
+but does not disable reading a current lock. `OverwriteExisting` controls cache
+replacement only and does not invalidate an otherwise current lock. The
+filename `.fhirpkg-restore.lock` is reserved for restore coordination.
 
 ### VersionResolveOptions
 
@@ -362,11 +556,15 @@ public record PackageRecord
     public required string DirectoryPath { get; init; }    // full path to package root
     public required string ContentPath { get; init; }      // path to package/ subfolder
     public required PackageManifest Manifest { get; init; }
-    public PackageIndex? Index { get; init; }
+    public PackageIndex? Index { get; init; }               // null when omitted by summary listing
     public DateTimeOffset? InstalledAt { get; init; }
     public long? SizeBytes { get; init; }
 }
 ```
+
+`Index == null` can mean that no valid persisted index exists or that a
+summary API intentionally omitted it. Use the hydrated listing APIs when the
+distinction matters.
 
 ### PackageManifest
 
@@ -389,6 +587,7 @@ public record PackageManifest
     public IReadOnlyDictionary<string, string>? DevDependencies { get; init; }
     public IReadOnlyList<string>? Keywords { get; init; }
     public NpmDistribution? Distribution { get; init; }
+    public NpmRepository? Repository { get; init; }
     public IReadOnlyDictionary<string, string>? DistTags { get; init; }
 
     // FHIR-specific fields
@@ -409,6 +608,12 @@ public record PackageManifest
 }
 ```
 
+`Repository` uses the `NpmRepository` record:
+
+```csharp
+public record NpmRepository(string? Type, string? Url, string? Directory);
+```
+
 ### PackageListing & PackageVersionInfo
 
 Returned by `GetPackageListingAsync`. Contains all published versions and
@@ -421,7 +626,11 @@ public record PackageListing
     public string? Description { get; init; }
     public IReadOnlyDictionary<string, string>? DistTags { get; init; }
     public required IReadOnlyDictionary<string, PackageVersionInfo> Versions { get; init; }
-    public string? LatestVersion { get; }   // computed: dist-tags["latest"] or last key
+    public RegistryEndpoint? SourceRegistry { get; init; }                  // JSON-ignored
+    public bool IsComplete { get; init; }                                   // default: true; JSON-ignored
+    public IReadOnlyList<RegistryAttemptFailure> QueryFailures { get; init; } // default: []; JSON-ignored
+    public IReadOnlyList<PackageVersionInfo> VersionCandidates { get; init; } // source-specific; JSON-ignored
+    public string? LatestVersion { get; }   // computed: dist-tags["latest"] or highest semantic version
 }
 
 public record PackageVersionInfo
@@ -430,6 +639,7 @@ public record PackageVersionInfo
     public required string Version { get; init; }
     public string? Description { get; init; }
     public string? FhirVersion { get; init; }
+    public IReadOnlyList<string>? FhirVersions { get; init; }
     public string? Canonical { get; init; }
     public string? Kind { get; init; }
     public string? PublicationDate { get; init; }
@@ -438,8 +648,31 @@ public record PackageVersionInfo
     public string? Url { get; init; }
     public NpmDistribution? Distribution { get; init; }
     public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
+    public RegistryEndpoint? SourceRegistry { get; init; } // JSON-ignored
+    public bool IsSourceLatest { get; init; }               // JSON-ignored
+}
+
+public record NpmDistribution(string? ShaSum, string? TarballUrl)
+{
+    public string? Integrity { get; init; }
 }
 ```
+
+Registry JSON may provide `fhirVersion` as a scalar or array, or use the plural
+`fhirVersions` field. `FhirVersion` exposes the first value for compatibility;
+`FhirVersions` exposes the complete normalized set.
+
+Composite listings preserve every source copy in `VersionCandidates`. The
+representative `Versions` dictionary follows configured source priority, while
+resolution selects one complete source candidate atomically. If
+the highest-priority compatible candidate omits dependency metadata, the first
+later compatible candidate that supplies it is selected as a whole, including
+its tarball, checksum, integrity value, and provenance. If
+`IsComplete` is false, exact hits may still be used, but exact misses and global
+latest/wildcard/range selections throw `RegistryOperationException`.
+Returned `SourceRegistry` values are credential-free provenance snapshots: they
+retain only the registry origin and protocol type, never configured
+authorization, custom headers, user information, paths, queries, or fragments.
 
 ### CatalogEntry
 
@@ -470,8 +703,12 @@ public record ResolvedDirective
     public required PackageReference Reference { get; init; }
     public required Uri TarballUri { get; init; }
     public string? ShaSum { get; init; }
+    public string? Sha256Sum { get; init; }
+    public string? Integrity { get; init; }
     public RegistryEndpoint? SourceRegistry { get; init; }
     public DateTime? PublicationDate { get; init; }
+    public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
+    public IReadOnlyList<string>? FhirVersions { get; init; }
 }
 ```
 
@@ -485,7 +722,40 @@ public record PackageInstallResult
     public required string Directive { get; init; }
     public PackageRecord? Package { get; init; }
     public PackageInstallStatus Status { get; init; }
+    public PackageInstallDisposition? Disposition { get; init; }
+    public string? PreviousManifestDate { get; init; }
+    public string? ManifestDate { get; init; }
     public string? ErrorMessage { get; init; }
+    public PackageInstallErrorCode? ErrorCode { get; init; }
+    public PackageInstallStage? ErrorStage { get; init; }
+    public IReadOnlyList<PackageInstallResult> DependencyFailures { get; init; }
+}
+```
+
+`Disposition` refines successful mutable-CI directives only. `Installed`,
+`Updated`, `AlreadyCurrent`, and `Refreshed` all retain
+`Status == PackageInstallStatus.Installed`; existing status-based callers
+therefore keep the same compatibility behavior. Non-CI installs, failures, and
+mutable-CI download/commit paths whose cache cannot report an authoritative
+effect leave `Disposition`, `PreviousManifestDate`, and `ManifestDate` null.
+Manager-owned already-current short circuits can still report their recognized
+outcome without a cache commit.
+
+The date fields are raw nullable `package.json` `date` strings. For an update,
+`PreviousManifestDate` identifies the replaced cache entry and `ManifestDate`
+identifies the resulting package. Dates are presentation data and are not used
+to decide whether the cache changed.
+
+For dependency-stage failures, `Status` is `Failed`, `Package` is the root
+package already committed to the cache, and `DependencyFailures` enumerates
+failed active child directives.
+
+```csharp
+public sealed class DependencyInstallationException : PackageInstallException
+{
+    public PackageRecord RootPackage { get; }
+    public IReadOnlyList<PackageInstallResult> DependencyFailures { get; }
+    public IReadOnlyList<DependencyResolutionFailure> DependencyResolutionFailures { get; }
 }
 ```
 
@@ -499,25 +769,91 @@ public record PackageClosure
     public required DateTime Timestamp { get; init; }
     public required IReadOnlyDictionary<string, PackageReference> Resolved { get; init; }
     public required IReadOnlyDictionary<string, string> Missing { get; init; }
-    public bool IsComplete { get; }  // true when Missing is empty
+    public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; }
+    public IReadOnlyList<PackageReference> InstallOrder { get; init; }
+    public IReadOnlyList<PackageReference> ReplayOrder { get; init; }
+    public IReadOnlyList<PackageReference> BootstrapInstallOrder { get; init; }
+    public bool InstallOrderIsComplete { get; init; }
+    public bool IsComplete { get; }  // true when Missing and Failures are empty
+}
+```
+
+`Resolved` always carries selected exact manifest identities. `InstallOrder`
+may preserve a mutable CI alias as the cache/install reference.
+`ReplayOrder` is the complete dependency-first plan, including cached nodes,
+used to persist a lock that can replay mutable aliases without losing their
+exact expected identities.
+`BootstrapInstallOrder` identifies CI aliases whose exact identity or
+authoritative dependency metadata is only available after installation; the
+manager installs those aliases and re-resolves before installing the final
+active order. An empty
+`InstallOrder` is authoritative when `InstallOrderIsComplete` is `true`.
+
+`Missing` is retained as a backward-compatible package-to-message projection.
+Use `Failures` for stable failure categories and structured context.
+
+```csharp
+public sealed record DependencyResolutionFailure
+{
+    public required DependencyResolutionFailureCode Code { get; init; }
+    public required string PackageId { get; init; }
+    public required string Message { get; init; }
+    public string? VersionSpecifier { get; init; }
+    public string? SelectedVersion { get; init; }
+    public string? ParentPackageId { get; init; }
+    public string? ParentVersion { get; init; }
+    public int? Depth { get; init; }
+    public int? MaxDepth { get; init; }
+    public IReadOnlyList<string> RequestedVersions { get; init; }
+    public IReadOnlyList<RegistryAttemptFailure> RegistryFailures { get; init; }
 }
 ```
 
 ### PackageLockFile
 
-Lock file for deterministic restores.
+Schema-versioned input and output for deterministic restores.
 
 ```csharp
 public record PackageLockFile
 {
-    public required DateTime Updated { get; init; }
-    public required IReadOnlyDictionary<string, string> Dependencies { get; init; }
-    public IReadOnlyDictionary<string, string>? Missing { get; init; }
+   public const int CurrentSchemaVersion = 2;
 
-    public static PackageLockFile Load(string path);
-    public void Save(string path);
+   public int SchemaVersion { get; init; }
+   public required DateTime Updated { get; init; }
+   public string? RootPackage { get; init; }
+   public IReadOnlyList<string>? Roots { get; init; }
+   public PackageLockPolicy? Policy { get; init; }
+   public required IReadOnlyDictionary<string, string> Dependencies { get; init; }
+   public IReadOnlyList<string>? InstallOrder { get; init; }
+   public IReadOnlyDictionary<string, string>? Missing { get; init; }
+   public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; }
+
+   public static PackageLockFile Load(string path);
+   public static Task<PackageLockFile> LoadAsync(
+       string path,
+       CancellationToken cancellationToken = default);
+   public void Save(string path);
+   public Task SaveAsync(
+       string path,
+       CancellationToken cancellationToken = default);
+}
+
+public sealed record PackageLockPolicy
+{
+   public required ConflictResolutionStrategy ConflictStrategy { get; init; }
+   public required bool AllowPreRelease { get; init; }
+   public FhirRelease? PreferredFhirRelease { get; init; }
+   public required int MaxDepth { get; init; }
+   public required string VersionFixupHash { get; init; }
 }
 ```
+
+Schema-v1 files remain readable but are always stale because they cannot prove
+root or policy identity. Unknown future schemas throw `NotSupportedException`.
+Saving serializes fully before a durable same-directory atomic replacement;
+cancellation or pre-commit failure preserves the prior bytes. Manager restore
+also serializes writers for a requested lock path across processes and
+revalidates the project manifest immediately before replacement.
 
 ### PackageSearchCriteria
 
@@ -587,7 +923,8 @@ public record ResourceIndexEntry
 
 ### ResourceInfo & ResourceSearchCriteria
 
-Used by `IPackageIndexer` for resource lookup.
+Used by `IPackageIndexer` and `IFhirPackageResourceManager` for resource
+lookup.
 
 ```csharp
 public record ResourceInfo
@@ -641,13 +978,23 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     public bool IsPreRelease { get; }
     public FhirPreReleaseType PreReleaseType { get; }
 
-    public static FhirSemVer? Parse(string version);
+    // Throws ArgumentException/FormatException on invalid input; never returns null.
+    public static FhirSemVer Parse(string versionString);
+    public static bool TryParse(string? versionString, out FhirSemVer? result);
 
-    // Returns the highest version matching this wildcard pattern
-    public FhirSemVer? MaxSatisfying(IEnumerable<FhirSemVer> versions);
+    public bool Satisfies(string versionSpecifier);
+    public bool Satisfies(FhirSemVer other);
 
-    // Returns the highest version satisfying this range
-    public FhirSemVer? SatisfyingRange(IEnumerable<FhirSemVer> versions);
+    // Highest version in 'versions' that satisfies 'specifier' (static; null if none).
+    public static FhirSemVer? MaxSatisfying(
+        IEnumerable<FhirSemVer> versions, string specifier, bool includePreRelease = false);
+
+    // ALL versions in 'versions' that satisfy the range expression (static).
+    public static IEnumerable<FhirSemVer> SatisfyingRange(
+        IEnumerable<FhirSemVer> versions, string rangeExpression);
+
+    public int CompareTo(FhirSemVer? other);
+    // Also defines ==, !=, <, >, <=, >= operators (via IComparable/IEquatable).
 }
 ```
 
@@ -729,10 +1076,21 @@ Ordered from highest to lowest precedence.
 
 | Value | Description |
 |-------|-------------|
-| `Installed` | Successfully downloaded and cached |
+| `Installed` | Successful compatibility status, including every mutable-CI disposition |
 | `AlreadyCached` | Already present in cache (skipped) |
 | `Failed` | Installation failed (see `ErrorMessage`) |
 | `NotFound` | Package could not be found in any registry |
+
+### PackageInstallDisposition
+
+Nullable refinement for successful `current` and `current$branch` installs.
+
+| Value | Description |
+|-------|-------------|
+| `Installed` | The mutable alias was committed into a previously missing cache target |
+| `Updated` | Existing cached content was replaced, regardless of manifest-date equality |
+| `AlreadyCurrent` | The source/cache check confirmed that no replacement was needed |
+| `Refreshed` | An explicit overwrite downloaded the alias but confirmed unchanged content |
 
 ### RegistryType
 
@@ -752,7 +1110,19 @@ versions.
 |-------|-------------|
 | `HighestWins` | Keep the highest version (default) |
 | `FirstWins` | Keep the first version encountered |
-| `Error` | Fail with an error on conflict |
+| `Error` | Record a typed conflict failure and keep the first version for partial traversal |
+
+### DependencyResolutionFailureCode
+
+| Value | Description |
+|-------|-------------|
+| `PackageNotFound` | A requested version could not be resolved |
+| `VersionConflict` | Active parent edges selected different exact versions under the `Error` strategy |
+| `DepthLimitExceeded` | An active edge exceeded the root-relative maximum depth |
+| `MetadataUnavailable` | Dependency metadata could not be proven complete |
+| `RegistryUnavailable` | Registry failures prevented authoritative version resolution |
+| `UnstableResolution` | A version-dependent graph repeated a prior state |
+| `InvalidDirective` | A dependency edge contained an invalid package identity or version specifier |
 
 ### PackageProgressPhase
 
@@ -764,6 +1134,11 @@ versions.
 | `Indexing` | Indexing resources |
 | `Complete` | Installation complete |
 | `Failed` | Installation failed |
+| `Acquiring` | Acquiring content into bounded local staging |
+| `Validating` | Validating archive shape, layout, manifest, and identity |
+| `WaitingForLock` | Waiting to acquire the package mutation lock |
+| `Repairing` | Repairing an invalid existing cache entry |
+| `Committing` | Committing validated content to the cache |
 
 ### SafeMode
 
@@ -786,6 +1161,73 @@ Controls how `MemoryResourceCache` returns cached objects.
 | `CoreXml` | Core XML schemas (R5+) |
 | `Elements` | Element definitions (R5+) |
 
+### CorruptCacheBehavior
+
+Controls how installation handles an existing cache entry that is invalid.
+
+| Value | Description |
+|-------|-------------|
+| `Repair` | Quarantine and replace the invalid entry after validation succeeds (default) |
+| `Strict` | Reject installation with a typed corruption error |
+| `Throw` | Alias for `Strict` |
+
+### PackageInstallErrorCode
+
+Stable failure categories carried by `PackageInstallException.ErrorCode` and
+`PackageInstallResult.ErrorCode`.
+
+| Value | Description |
+|-------|-------------|
+| `InvalidPolicy` | The effective installation policy is invalid |
+| `ResolutionFailed` | The package directive could not be resolved |
+| `DownloadFailed` | The package source could not be acquired |
+| `CompressedSizeLimitExceeded` | The compressed package size exceeded policy |
+| `ExpandedSizeLimitExceeded` | The expanded package size exceeded policy |
+| `EntrySizeLimitExceeded` | One archive entry exceeded policy |
+| `ArchiveEntryCountLimitExceeded` | The archive entry count exceeded policy |
+| `ArchivePathLengthLimitExceeded` | A normalized archive path exceeded policy |
+| `ArchiveDepthLimitExceeded` | An archive path nesting depth exceeded policy |
+| `ChecksumMismatch` | A package checksum did not match its expected value |
+| `InvalidArchive` | The package archive is structurally invalid |
+| `InvalidPackageIdentity` | The requested or discovered package identity is invalid |
+| `CorruptCache` | An existing cache target is corrupt |
+| `CoordinationFailed` | Package operation coordination failed |
+| `CommitFailed` | The validated package could not be committed to the cache |
+| `UnsupportedManagerCapability` | The manager does not support the requested capability |
+| `UnsupportedCacheCapability` | The configured cache does not implement the hardened capability |
+| `DependencyInstallationFailed` | One or more requested dependencies could not be installed |
+
+### PackageInstallStage
+
+Identifies the installation stage at which a failure occurred (carried by
+`PackageInstallException.Stage` and `PackageInstallResult.ErrorStage`).
+
+| Value | Description |
+|-------|-------------|
+| `PolicyValidation` | Manager and per-call policy validation |
+| `Resolution` | Directive resolution |
+| `Acquisition` | Package source acquisition |
+| `ChecksumValidation` | Checksum verification |
+| `ArchiveValidation` | Archive shape and content validation |
+| `IdentityValidation` | Manifest identity validation |
+| `CacheInspection` | Existing cache inspection |
+| `Coordination` | Cross-instance or cross-process coordination |
+| `Commit` | Cache promotion and metadata commit |
+| `DependencyInstallation` | Dependency installation |
+
+### RegistryFailureCategory
+
+Safe, public category for a failed registry attempt
+(`RegistryAttemptFailure.Category`).
+
+| Value | Description |
+|-------|-------------|
+| `Network` | The registry could not be reached |
+| `Timeout` | The registry operation exceeded its deadline |
+| `HttpResponse` | The registry returned an unsuccessful HTTP response |
+| `InvalidResponse` | The registry returned data that could not be processed |
+| `Unexpected` | The registry attempt failed for another reason |
+
 ---
 
 ## Cache
@@ -795,13 +1237,15 @@ Controls how `MemoryResourceCache` returns cached objects.
 Interface for local package storage operations.
 
 ```csharp
-public interface IPackageCache
+public interface IPackageCache : IDisposable
 {
     string CacheDirectory { get; }
 
     Task<bool> IsInstalledAsync(PackageReference reference, CancellationToken ct = default);
     Task<PackageRecord?> GetPackageAsync(PackageReference reference, CancellationToken ct = default);
     Task<IReadOnlyList<PackageRecord>> ListPackagesAsync(
+        string? packageIdFilter = null, string? versionFilter = null, CancellationToken ct = default);
+    Task<IReadOnlyList<PackageRecord>> ListPackageSummariesAsync(
         string? packageIdFilter = null, string? versionFilter = null, CancellationToken ct = default);
     Task<PackageRecord> InstallAsync(
         PackageReference reference, Stream tarballStream,
@@ -819,14 +1263,79 @@ public interface IPackageCache
 }
 ```
 
+`ListPackageSummariesAsync` returns the same package-level record shape with
+`Index == null`. Use it for inventory or display work:
+
+```csharp
+IReadOnlyList<PackageRecord> summaries =
+    await cache.ListPackageSummariesAsync("hl7.fhir.r4");
+```
+
+Use `ListPackagesAsync` when resource indexes are required. The default
+interface fallback clones hydrated records for compatibility and can therefore
+remain expensive until a cache implementation overrides the summary method.
+`DiskPackageCache` provides an optimized override that reads manifests and
+cache metadata without loading or validating `.index.json`.
+
+`CacheMetadataEntry.ContentGeneration` exposes the opaque identifier of the
+currently committed content generation. The cache owns this value:
+`UpdateMetadataAsync` preserves the current generation even when passed an
+older metadata snapshot.
+
 #### InstallCacheOptions
 
 ```csharp
 public class InstallCacheOptions
 {
-    public bool OverwriteExisting { get; set; }   // default: false
+    public bool OverwriteExisting { get; set; }    // default: false
     public bool VerifyChecksum { get; set; }       // default: true
+    public PackageInstallLimits? Limits { get; set; }
+    public long? ReportedContentLength { get; set; }
+    public string? ExpectedSha256Sum { get; set; }
     public string? ExpectedShaSum { get; set; }
+    public DateTimeOffset? SourcePublicationDate { get; set; }
+    public string? ArchiveSha256 { get; set; }
+    public CorruptCacheBehavior CorruptCacheBehavior { get; set; }
+    public bool SkipIfArchiveUnchanged { get; set; }
+    public IProgress<PackageProgress>? Progress { get; set; }
+}
+```
+
+### IHardenedPackageCache
+
+`IHardenedPackageCache : IPackageCache` advertises bounded acquisition,
+validated identities, transactional replacement, recovery, and SDK process
+coordination. It adds path-neutral inspection and manifest-discovery import:
+
+```csharp
+Task<HardenedPackageCacheInspection> InspectAsync(
+    PackageReference reference,
+    CancellationToken cancellationToken = default);
+
+Task<PackageRecord> ImportAsync(
+    Stream tarballStream,
+    InstallCacheOptions? options = null,
+    CancellationToken cancellationToken = default);
+```
+
+The manager rejects an injected `IPackageCache` that does not implement this
+capability with `UnsupportedCacheCapability` before source access.
+
+`InspectAsync` returns a path-neutral `HardenedPackageCacheInspection`:
+
+```csharp
+public sealed record HardenedPackageCacheInspection
+{
+    public required HardenedPackageCacheState State { get; init; }
+    public bool IsRepairable { get; init; } = true;   // may transactionally repair corruption
+    public string? CorruptionReason { get; init; }    // non-sensitive; set when State is Corrupt
+}
+
+public enum HardenedPackageCacheState
+{
+    Missing = 0,   // no cache target exists for the identity
+    Valid   = 1,   // the cache target is valid and matches its identity
+    Corrupt = 2,   // the cache target exists but is invalid
 }
 ```
 
@@ -857,10 +1366,27 @@ var cache = new DiskPackageCache("/my/cache");
 
 Key behaviors:
 
-- **Atomic installation** — extracts to a temporary directory, then atomically
-  moves into place.
-- **Thread-safe** — uses a `SemaphoreSlim` for write operations.
-- **Metadata** — tracked in `packages.ini` (download time, package size).
+- **Validated reads** — a hit requires a real package directory, real regular
+  `package/package.json`, readable manifest, and matching exact/alias identity.
+- **Corruption policy** — `Repair` stages and validates a replacement before
+  quarantining corrupt content; `Strict` throws typed `CorruptCache` before
+  replacement source access. Read signatures that cannot diagnose return
+  false/null or omit corrupt entries.
+- **Transactional installation/removal** — cache-local staging, journals,
+  same-volume renames, atomic metadata replacement, rollback, and deterministic
+  recovery protect valid and corrupt generations.
+- **Process coordination** — keyed in-process semaphores and persistent OS lock
+  files under `.fhirpkg/locks`; unrelated identities stage concurrently and a
+  short global lock serializes promotion and metadata.
+- **Summary enumeration** — `ListPackageSummariesAsync` returns
+  package-level metadata with `Index == null` without loading or validating
+  persisted resource indexes.
+- **Hidden state** — `.fhirpkg/staging`, `.fhirpkg/transactions`,
+  `.fhirpkg/backup`, `.fhirpkg/quarantine`, and `.fhirpkg/locks` are SDK-owned.
+- **Raw path caveat** — SDK reads wait through replacement. A caller retaining
+  a previously returned `ContentPath` and accessing it outside the SDK may
+  briefly observe the target absent between replacement renames, never mixed
+  generations.
 
 ### MemoryResourceCache
 
@@ -914,6 +1440,37 @@ public interface IRegistryClient
 }
 ```
 
+Registry GET requests follow redirects manually so authorization and custom
+headers are reevaluated for every destination. `HttpTimeout` is one total
+deadline spanning headers, redirects, and response-body reads; expiry throws
+`RegistryResponseTimeoutException`. Registry clients do not automatically
+follow publish redirects. `PublishAsync` consumes or advances the supplied
+stream but never owns or disposes it.
+
+Composite reads return `null` only when every successful source authoritatively
+reports absence. If failures prevent any positive result, they throw:
+
+```csharp
+public sealed class RegistryOperationException : HttpRequestException
+{
+    public string Operation { get; }
+    public string PackageId { get; }
+    public IReadOnlyList<RegistryAttemptFailure> Failures { get; }
+}
+
+public sealed class RegistryAttemptFailure
+{
+    public string EndpointOrigin { get; } // origin only; no path/query/user info
+    public RegistryFailureCategory Category { get; }
+    public string Message { get; }        // category-derived, sanitized
+}
+```
+
+Raw inner exceptions, response bodies, endpoint credentials, and custom header
+values are logged internally but are not retained in public aggregate state.
+Nested `RedundantRegistryClient` instances are flattened in priority order so
+`MaxParallelRegistryQueries` remains a single cap across the full client tree.
+
 ### RegistryEndpoint
 
 Configuration for a single registry.
@@ -925,9 +1482,38 @@ public record RegistryEndpoint
     public required RegistryType Type { get; init; }
     public string? AuthHeaderValue { get; init; }
     public IReadOnlyList<(string Name, string Value)>? CustomHeaders { get; init; }
+    public IReadOnlyList<string> TrustedHeaderOrigins { get; init; }
     public string? UserAgent { get; init; }
 }
 ```
+
+Authorization and custom headers are sent only to the endpoint's exact origin
+(scheme, IDN-normalized host, and effective port) or an origin explicitly
+listed in `TrustedHeaderOrigins`. Paths, subdomains, and wildcards do not
+broaden trust.
+
+```csharp
+RegistryEndpoint registry = new()
+{
+    Url = "https://registry.example.com/",
+    Type = RegistryType.FhirNpm,
+    AuthHeaderValue = "Bearer ...",
+    TrustedHeaderOrigins =
+    [
+        "https://packages-cdn.example.com/"
+    ]
+};
+```
+
+Low-level registry constructors that accept an arbitrary `HttpClient` are
+unverified transports. Authenticated or custom-header requests fail before
+network access unless the client is created through
+`RegistryClientFactory.CreateClientForEndpoint` with a
+`RegistryHttpTransport.CreateRedirectControlled(...)` capability. The supplied
+client's handler must have automatic redirects disabled. Registry transports
+must not use `HttpClient.DefaultRequestHeaders`; configure all request headers
+through `RegistryEndpoint`. POST and PUT helpers always require a
+redirect-controlled transport, even when no credentials are configured.
 
 **Well-known endpoints:**
 
@@ -950,10 +1536,10 @@ public record RegistryEndpoint
 
 | Client | Registry Type | Description |
 |--------|--------------|-------------|
-| `FhirNpmRegistryClient` | `FhirNpm` | Primary/secondary FHIR registries |
+| `FhirNpmRegistryClient` | `FhirNpm` | FHIR registries; raw-gzip publication |
 | `FhirCiBuildClient` | `FhirCiBuild` | CI builds from build.fhir.org |
 | `Hl7WebsiteClient` | `FhirHttp` | HL7 website fallback (core packages only) |
-| `NpmRegistryClient` | `Npm` | Standard NPM registries |
+| `NpmRegistryClient` | `Npm` | Standard NPM registries; packument publication |
 | `RedundantRegistryClient` | *(composite)* | Chains multiple clients with automatic fallback |
 
 ---
@@ -1012,9 +1598,14 @@ public class DependencyResolveOptions
 
 Key behaviors:
 
-- **Circular dependency detection** — tracks resolution set; skips
-  already-visited packages.
-- **Depth limiting** — enforces `MaxDepth` to prevent runaway recursion.
+- **Active graph replacement** — winner changes prune losing-only descendants
+  and stale failures while preserving shared descendants.
+- **Cycle handling** — shared DAG paths remain active; repeated whole-graph
+  states produce a typed failure rather than looping.
+- **Depth limiting** — direct dependencies are depth zero; truncation is a
+  typed failure and negative limits are rejected.
+- **Metadata provenance** — selected registry candidates are exhausted before
+  cache fallback, and partial listings keep the closure incomplete.
 - **Known version fixups** — automatically corrects known problematic versions
   (e.g., `hl7.fhir.r4.core@4.0.0` → `4.0.1`).
 
@@ -1050,9 +1641,14 @@ public class IndexingOptions
 }
 ```
 
-The indexer reads existing `.index.json` files when available. If absent (or
-`ForceReindex` is true), it scans all `.json` files in the package and builds a
-new index.
+The low-level indexer reads existing `.index.json` files when available. If
+absent (or `ForceReindex` is true), it scans all `.json` files in the package
+and builds a new index. It does not own cache persistence.
+
+For managed package workflows, prefer `IFhirPackageResourceManager`. It
+validates and persists indexes through `DiskPackageCache`, registers them only
+after durable replacement, performs lazy indexing before queries, and
+invalidates package-specific state on cache mutation.
 
 StructureDefinition resources are additionally classified by **flavor**:
 `Profile`, `Extension`, `Logical`, `Type`, `Resource`.
@@ -1077,8 +1673,9 @@ services.AddFhirPackageManagement(options =>
 });
 ```
 
-After registration, inject `IFhirPackageManager` (or any sub-component) into your
-services:
+After registration, inject `IFhirPackageManager`,
+`IFhirPackageResourceManager`, or any sub-component into your services. The two
+manager interfaces resolve to the same singleton:
 
 ```csharp
 public class MyService(IFhirPackageManager packages)
@@ -1102,7 +1699,7 @@ names.
 ```csharp
 public static class FhirReleaseMapping
 {
-    public static string[] KnownCoreTypes { get; }  // ["core", "expansions", "examples", ...]
+    public static readonly string[] KnownCoreTypes;  // ["core", "expansions", "examples", "search", "corexml", "elements"]
 
     public static FhirRelease? FromVersionString(string version);
     public static string? ToVersionString(FhirRelease release);
@@ -1114,14 +1711,18 @@ public static class FhirReleaseMapping
 
 ### CheckSum
 
-SHA-1 checksum computation and verification.
+SHA-1 (default, for NPM registry compatibility) and SHA-256 checksum computation
+and verification.
 
 ```csharp
 public static class CheckSum
 {
     public static string ComputeSha1(Stream stream);
     public static string ComputeSha1(byte[] data);
-    public static bool Verify(Stream stream, string? expectedHash);
+    public static string ComputeSha256(Stream stream);
+    public static string ComputeSha256(byte[] data);
+    public static bool Verify(Stream stream, string? expectedHash, bool resetPosition = true);
+    public static bool VerifySha256(Stream stream, string? expectedHash, bool resetPosition = true);
 }
 ```
 

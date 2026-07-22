@@ -68,6 +68,49 @@ public class MemoryResourceCacheTests
     }
 
     [Fact]
+    public void Remove_RemovesOnlyRequestedEntry()
+    {
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 10);
+        cache.Set("key1", new TestResource { Value = "a" });
+        cache.Set("key2", new TestResource { Value = "b" });
+
+        cache.Remove("key1").ShouldBeTrue();
+        cache.Remove("key1").ShouldBeFalse();
+
+        cache.Count.ShouldBe(1);
+        cache.Get<TestResource>("key1").ShouldBeNull();
+        cache.Get<TestResource>("key2").ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void RemoveByPrefix_RemovesMatchingEntriesAndPreservesLru()
+    {
+        MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 3);
+        cache.Set(
+            "example.package#1.0.0\0first.json",
+            new TestResource { Value = "first" });
+        cache.Set(
+            "example.package#1.0.0\0second.json",
+            new TestResource { Value = "second" });
+        cache.Set(
+            "other.package#1.0.0\0third.json",
+            new TestResource { Value = "third" });
+
+        int removed = cache.RemoveByPrefix(
+            "example.package#1.0.0\0");
+        cache.Set("new", new TestResource { Value = "new" });
+
+        removed.ShouldBe(2);
+        cache.Get<TestResource>(
+            "example.package#1.0.0\0first.json").ShouldBeNull();
+        cache.Get<TestResource>(
+            "example.package#1.0.0\0second.json").ShouldBeNull();
+        cache.Get<TestResource>(
+            "other.package#1.0.0\0third.json").ShouldNotBeNull();
+        cache.Get<TestResource>("new").ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Count_ReflectsEntries()
     {
         MemoryResourceCache cache = new MemoryResourceCache(maxEntries: 10);
@@ -145,6 +188,12 @@ public class MemoryResourceCacheTests
                 string key = $"key{i % 20}";
                 cache.Set(key, new TestResource { Value = $"value{i}" });
                 cache.Get<TestResource>(key);
+
+                if (i % 5 == 0)
+                {
+                    cache.Remove(key);
+                    cache.RemoveByPrefix($"key{i % 3}");
+                }
 
                 if (i % 7 == 0)
                 {

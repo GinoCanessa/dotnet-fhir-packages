@@ -29,4 +29,10 @@
     <ProjectReference Include="..\FhirPkg\FhirPkg.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="FhirPkg.IntegrationTests" />
+  </ItemGroup>
+
+  <Import Project="..\common.targets" />
+
 </Project>

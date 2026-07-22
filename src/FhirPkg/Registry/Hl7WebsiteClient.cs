@@ -2,6 +2,7 @@
 
 using System.Net;
 using FhirPkg.Models;
+using FhirPkg.Resolution;
 using Microsoft.Extensions.Logging;
 
 namespace FhirPkg.Registry;
@@ -66,6 +67,14 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
     {
     }
 
+    internal Hl7WebsiteClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<Hl7WebsiteClient> logger)
+        : base(transport, endpoint, logger)
+    {
+    }
+
     // ── IRegistryClient properties ──────────────────────────────────────
 
     /// <inheritdoc />
@@ -96,13 +105,18 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
 
     /// <inheritdoc />
     /// <remarks>
-    /// The HL7 website does not support package listings. Returns <see langword="null"/>.
+    /// Returns the canonical core package version exposed by the HL7 release website.
     /// </remarks>
     public override Task<PackageListing?> GetPackageListingAsync(
         string packageId, CancellationToken cancellationToken = default)
     {
-        Logger.LogDebug("GetPackageListingAsync is not supported for the HL7 website; returning null");
-        return Task.FromResult<PackageListing?>(null);
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
+
+        FhirRelease? release = InferReleaseFromPackageName(packageId);
+        PackageListing? listing = release is FhirRelease knownRelease
+            ? CreatePackageListing(packageId, knownRelease)
+            : null;
+        return Task.FromResult(listing);
     }
 
     /// <inheritdoc />
@@ -121,8 +135,9 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
         Logger.LogInformation(
             "Resolving {PackageId} via HL7 website fallback", directive.PackageId);
 
-        // Determine the FHIR release: explicit option takes priority over inference.
-        FhirRelease? release = options?.FhirRelease ?? InferReleaseFromPackageName(directive.PackageId);
+        FhirRelease? release =
+            InferReleaseFromPackageName(directive.PackageId)
+            ?? options?.FhirRelease;
 
         if (release is null)
         {
@@ -132,14 +147,23 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
             return Task.FromResult<ResolvedDirective?>(null);
         }
 
-        if (!ReleasePathMap.TryGetValue(release.Value, out string? releasePath))
+        PackageListing? listing = CreatePackageListing(
+            directive.PackageId,
+            release.Value);
+        if (listing is null)
         {
-            Logger.LogWarning(
-                "No URL path mapping found for FHIR release {Release}", release.Value);
             return Task.FromResult<ResolvedDirective?>(null);
         }
 
-        string tarballUrl = $"{BaseUrl}/{releasePath}/{Uri.EscapeDataString(directive.PackageId)}.tgz";
+        PackageVersionSelection? selection =
+            PackageVersionSelector.Select(directive, listing, options);
+        if (selection is null)
+        {
+            return Task.FromResult<ResolvedDirective?>(null);
+        }
+
+        string tarballUrl =
+            selection.VersionInfo.Distribution!.TarballUrl!;
 
         Logger.LogInformation(
             "Resolved {PackageId} via HL7 website → {TarballUrl}",
@@ -147,9 +171,10 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
 
         ResolvedDirective result = new ResolvedDirective
         {
-            Reference = directive.ToReference(),
+            Reference = new PackageReference(directive.PackageId, selection.Key),
             TarballUri = new Uri(tarballUrl),
-            SourceRegistry = Endpoint,
+            SourceRegistry = Endpoint.ToProvenance(),
+            SourceClient = this,
         };
 
         return Task.FromResult<ResolvedDirective?>(result);
@@ -221,5 +246,55 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
         }
 
         return null;
+    }
+
+    private PackageListing? CreatePackageListing(
+        string packageId,
+        FhirRelease release)
+    {
+        string? canonicalVersion = FhirReleaseMapping.ToVersionString(release);
+        if (canonicalVersion is null
+            || !ReleasePathMap.TryGetValue(release, out string? releasePath))
+        {
+            return null;
+        }
+
+        string tarballUrl =
+            $"{BaseUrl}/{releasePath}/{Uri.EscapeDataString(packageId)}.tgz";
+        PackageVersionInfo versionInfo = new()
+        {
+            Name = packageId,
+            Version = canonicalVersion,
+            FhirVersion = canonicalVersion,
+            FhirVersions = [canonicalVersion],
+            Distribution = new NpmDistribution(null, tarballUrl),
+        };
+        return new PackageListing
+        {
+            PackageId = packageId,
+            DistTags = new Dictionary<string, string>
+            {
+                ["latest"] = canonicalVersion,
+            },
+            Versions = new Dictionary<string, PackageVersionInfo>
+            {
+                [canonicalVersion] = versionInfo with
+                {
+                    SourceRegistry = Endpoint.ToProvenance(),
+                    SourceClient = this,
+                    IsSourceLatest = true,
+                },
+            },
+            SourceRegistry = Endpoint.ToProvenance(),
+            VersionCandidates =
+            [
+                versionInfo with
+                {
+                    SourceRegistry = Endpoint.ToProvenance(),
+                    SourceClient = this,
+                    IsSourceLatest = true,
+                }
+            ],
+        };
     }
 }

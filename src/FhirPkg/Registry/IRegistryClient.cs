@@ -35,6 +35,9 @@ public interface IRegistryClient
     /// <param name="criteria">The search criteria including name, canonical, and FHIR version filters.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A list of catalog entries matching the criteria, or an empty list if none found.</returns>
+    /// <exception cref="RegistryOperationException">
+    /// No registry produced a result and at least one registry attempt failed.
+    /// </exception>
     Task<IReadOnlyList<CatalogEntry>> SearchAsync(
         PackageSearchCriteria criteria,
         CancellationToken cancellationToken = default);
@@ -44,7 +47,14 @@ public interface IRegistryClient
     /// </summary>
     /// <param name="packageId">The package identifier (e.g., <c>hl7.fhir.r4.core</c>).</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>The package listing, or <see langword="null"/> if the package does not exist.</returns>
+    /// <returns>
+    /// The package listing, or <see langword="null"/> when every successful source
+    /// authoritatively reports absence. Composite listings may be incomplete and
+    /// expose sanitized failures through <see cref="PackageListing.QueryFailures"/>.
+    /// </returns>
+    /// <exception cref="RegistryOperationException">
+    /// No registry produced a listing and at least one registry attempt failed.
+    /// </exception>
     Task<PackageListing?> GetPackageListingAsync(
         string packageId,
         CancellationToken cancellationToken = default);
@@ -55,7 +65,13 @@ public interface IRegistryClient
     /// <param name="directive">The parsed package directive containing the package ID and version specifier.</param>
     /// <param name="options">Optional settings controlling pre-release inclusion and FHIR release filtering.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
-    /// <returns>A resolved directive with exact version and tarball URI, or <see langword="null"/> if resolution fails.</returns>
+    /// <returns>
+    /// A resolved directive with exact version and source-coherent metadata, or
+    /// <see langword="null"/> when all successful sources authoritatively report absence.
+    /// </returns>
+    /// <exception cref="RegistryOperationException">
+    /// Resolution is non-authoritative because registry attempts failed.
+    /// </exception>
     Task<ResolvedDirective?> ResolveAsync(
         PackageDirective directive,
         VersionResolveOptions? options = null,
@@ -70,6 +86,9 @@ public interface IRegistryClient
     /// A download result containing the tarball stream, or <see langword="null"/> if the package is not found.
     /// The caller must dispose the result when finished.
     /// </returns>
+    /// <exception cref="RegistryOperationException">
+    /// No registry produced a download and at least one registry attempt failed.
+    /// </exception>
     Task<PackageDownloadResult?> DownloadAsync(
         ResolvedDirective resolved,
         CancellationToken cancellationToken = default);
@@ -78,7 +97,10 @@ public interface IRegistryClient
     /// Publishes a package tarball to the registry.
     /// </summary>
     /// <param name="reference">The package reference (name and version) to publish.</param>
-    /// <param name="tarballStream">The stream containing the package tarball (<c>.tgz</c>).</param>
+    /// <param name="tarballStream">
+    /// The stream containing the package tarball (<c>.tgz</c>). The operation may
+    /// consume or advance the stream, but never owns or disposes it.
+    /// </param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>A result indicating whether the publish operation succeeded.</returns>
     Task<PublishResult> PublishAsync(

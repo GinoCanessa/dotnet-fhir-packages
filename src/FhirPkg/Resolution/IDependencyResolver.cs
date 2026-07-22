@@ -23,8 +23,9 @@ public interface IDependencyResolver
     /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>
-    /// A <see cref="PackageClosure"/> containing all resolved packages and any
-    /// packages that could not be resolved.
+    /// A <see cref="PackageClosure"/> containing the active resolved graph and
+    /// structured failures for missing versions, conflicts, depth truncation,
+    /// incomplete metadata, registry failures, or an unstable graph.
     /// </returns>
     Task<PackageClosure> ResolveAsync(
         PackageManifest rootManifest,
@@ -33,8 +34,9 @@ public interface IDependencyResolver
 
     /// <summary>
     /// Restores a package closure from a previously generated lock file.
-    /// Verifies that each locked dependency is present in the cache, and if not,
-    /// downloads and installs it from the registry.
+    /// Verifies that each locked dependency is available from the cache or its
+    /// replay source. The returned install order identifies packages that the
+    /// caller must install.
     /// </summary>
     /// <param name="lockFile">The lock file containing exact version pinning for all dependencies.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
