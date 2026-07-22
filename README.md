@@ -3,37 +3,37 @@
 A C# SDK and CLI tool for discovering, resolving, downloading, caching, and
 managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
 
-[![Publish dotnet library](https://img.shields.io/nuget/v/fhir-pkg-lib.svg)](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml)
-[![Publish dotnet library](https://img.shields.io/nuget/v/fhir-pkg-cli.svg)](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
-## Features
-
-- **Multi-registry resolution** — queries the primary FHIR registry
-  (`packages.fhir.org`), secondary registry, CI builds (`build.fhir.org`), HL7
-  website, NPM registries, and custom/private registries with automatic fallback.
-- **Local disk cache** — stores packages in the standard `~/.fhir/packages`
-  layout with validated reads, transactional replacement, crash recovery, and
-  same-identity coordination across SDK processes.
-- **Hardened package sources** — safely installs expected-identity or
-  manifest-discovered packages from caller-owned streams and absolute
-  HTTP/HTTPS URIs under finite compressed/archive limits.
-- **Dependency resolution** — resolves full transitive dependency closures with
-  conflict strategies, lock-file support, and circular-dependency detection.
-- **FHIR-aware versioning** — understands pre-release hierarchies, wildcards,
-  ranges, CI builds, and branch-specific builds.
-- **Resource indexing** — indexes FHIR resources inside packages with fast lookup
-  by resource type, canonical URL, or StructureDefinition flavor.
-- **Publish** — publish package tarballs to a registry.
-- **Async & DI-ready** — fully async with `CancellationToken` support and
-  first-class `IServiceCollection` integration.
 
 ## Packages
 
-| Package | Description |
-|---------|-------------|
-| **fhir-pkg-lib** | SDK library — add to your .NET projects |
-| **fhir-pkg-cli** | CLI tool — installs the `fhir-pkg` command |
+| Package | Description | Status | 
+|---------|-------------|--------|
+| **fhir-pkg-lib** | SDK library - add to your .NET projects | [![Publish dotnet library](https://img.shields.io/nuget/v/fhir-pkg-lib.svg)](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml) |
+| **fhir-pkg-cli** | CLI tool - installs the `fhir-pkg` command | [![Publish dotnet library](https://img.shields.io/nuget/v/fhir-pkg-cli.svg)](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml) |
+
+
+
+## Features
+
+- **Multi-registry resolution** - queries the primary FHIR registry
+  (`packages.fhir.org`), secondary registry, CI builds (`build.fhir.org`), HL7
+  website, NPM registries, and custom/private registries with automatic fallback.
+- **Local disk cache** - stores packages in the standard `~/.fhir/packages`
+  layout with validated reads, transactional replacement, crash recovery, and
+  same-identity coordination across SDK processes.
+- **Hardened package sources** - safely installs expected-identity or
+  manifest-discovered packages from caller-owned streams and absolute
+  HTTP/HTTPS URIs under finite compressed/archive limits.
+- **Dependency resolution** - resolves full transitive dependency closures with
+  conflict strategies, lock-file support, and circular-dependency detection.
+- **FHIR-aware versioning** - understands pre-release hierarchies, wildcards,
+  ranges, CI builds, and branch-specific builds.
+- **Resource indexing** - indexes FHIR resources inside packages with fast lookup
+  by resource type, canonical URL, or StructureDefinition flavor.
+- **Publish** - publish package tarballs to a registry.
+- **Async & DI-ready** - fully async with `CancellationToken` support and
+  first-class `IServiceCollection` integration.
 
 ## Quick Start
 
