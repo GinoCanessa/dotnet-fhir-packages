@@ -207,21 +207,26 @@ public sealed class PackageLockFileTests : IDisposable
         {
             Updated = original.Updated.AddMinutes(1),
         };
+        Task releaseReaderTask = ReleaseReaderAsync();
 
         Task saveTask = replacement.SaveAsync(
             path,
             TestContext.Current.CancellationToken);
-        await Task.Delay(
-            50,
-            TestContext.Current.CancellationToken);
-        await reader.DisposeAsync();
-        await saveTask;
+        await Task.WhenAll(releaseReaderTask, saveTask);
 
         PackageLockFile actual =
             await PackageLockFile.LoadAsync(
                 path,
                 TestContext.Current.CancellationToken);
         actual.Updated.ShouldBe(replacement.Updated);
+
+        async Task ReleaseReaderAsync()
+        {
+            await Task.Delay(
+                50,
+                TestContext.Current.CancellationToken);
+            await reader.DisposeAsync();
+        }
     }
 
     private static PackageLockFile CreateLockFile() =>
@@ -296,9 +301,10 @@ public sealed class PackageLockFileTests : IDisposable
             _cancelAfterWrite?.Cancel();
         }
 
-        public void AtomicReplaceFile(
+        public async ValueTask AtomicReplaceFileAsync(
             string sourcePath,
-            string destinationPath)
+            string destinationPath,
+            CancellationToken cancellationToken)
         {
             if (_throwBeforeCommit)
             {
@@ -306,9 +312,11 @@ public sealed class PackageLockFileTests : IDisposable
                     "Injected pre-commit failure.");
             }
 
-            _inner.AtomicReplaceFile(
-                sourcePath,
-                destinationPath);
+            await _inner.AtomicReplaceFileAsync(
+                    sourcePath,
+                    destinationPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
         public void SynchronizeDirectory(

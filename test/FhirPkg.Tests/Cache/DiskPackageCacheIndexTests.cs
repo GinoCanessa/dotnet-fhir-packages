@@ -697,14 +697,17 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
                 .ConfigureAwait(false);
         }
 
-        public void AtomicReplaceFile(
+        public async ValueTask AtomicReplaceFileAsync(
             string sourcePath,
-            string destinationPath)
+            string destinationPath,
+            CancellationToken cancellationToken)
         {
             AtomicDestinations.Add(destinationPath);
-            _inner.AtomicReplaceFile(
-                sourcePath,
-                destinationPath);
+            await _inner.AtomicReplaceFileAsync(
+                    sourcePath,
+                    destinationPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
         public void SynchronizeDirectory(string directoryPath) =>

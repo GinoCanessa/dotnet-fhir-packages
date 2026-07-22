@@ -115,12 +115,14 @@ internal sealed class SystemPackageCacheFileOperations :
         stream.Flush(flushToDisk: true);
     }
 
-    public void AtomicReplaceFile(
+    public ValueTask AtomicReplaceFileAsync(
         string sourcePath,
-        string destinationPath) =>
-        PackageCacheNativeFileSystem.ReplaceFileDurably(
+        string destinationPath,
+        CancellationToken cancellationToken) =>
+        PackageCacheNativeFileSystem.ReplaceFileDurablyAsync(
             sourcePath,
-            destinationPath);
+            destinationPath,
+            cancellationToken);
 
     public void SynchronizeDirectory(string directoryPath) =>
         PackageCacheNativeFileSystem.SynchronizeDirectory(directoryPath);
@@ -257,48 +259,89 @@ internal static class PackageCacheNativeFileSystem
     private const int AtEmptyPath = 0x1000;
     private const uint StatxType = 0x00000001;
 
-    internal static void ReplaceFileDurably(
+    internal static ValueTask ReplaceFileDurablyAsync(
         string sourcePath,
-        string destinationPath)
+        string destinationPath,
+        CancellationToken cancellationToken)
     {
         if (OperatingSystem.IsWindows())
         {
-            int error = 0;
-            for (int attempt = 0;
-                 attempt < WindowsReplaceRetryCount;
-                 attempt++)
-            {
-                if (MoveFileEx(
-                    ToWindowsExtendedPath(sourcePath),
-                    ToWindowsExtendedPath(destinationPath),
-                    MoveFileReplaceExisting | MoveFileWriteThrough))
-                {
-                    return;
-                }
-
-                error = Marshal.GetLastPInvokeError();
-                if (!IsTransientWindowsReplaceError(error))
-                {
-                    throw NativeIOException(
-                        "The durable file replacement failed.",
-                        error);
-                }
-
-                if (attempt < WindowsReplaceRetryCount - 1)
-                {
-                    Thread.Sleep(
-                        WindowsReplaceRetryDelayMilliseconds);
-                }
-            }
-
-            throw NativeIOException(
-                "The durable file replacement failed.",
-                error);
+            return ReplaceWindowsFileDurablyAsync(
+                ToWindowsExtendedPath(sourcePath),
+                ToWindowsExtendedPath(destinationPath),
+                static (
+                    string existingFileName,
+                    string newFileName,
+                    uint flags) =>
+                    MoveFileEx(
+                        existingFileName,
+                        newFileName,
+                        flags),
+                Marshal.GetLastPInvokeError,
+                static (
+                    TimeSpan delay,
+                    CancellationToken currentCancellationToken) =>
+                    new ValueTask(
+                        Task.Delay(
+                            delay,
+                            currentCancellationToken)),
+                cancellationToken);
         }
 
         EnsureSupportedUnix();
         if (Rename(sourcePath, destinationPath) != 0)
             throw NativeIOException("The atomic file replacement failed.");
+
+        return ValueTask.CompletedTask;
+    }
+
+    internal static async ValueTask ReplaceWindowsFileDurablyAsync(
+        string sourcePath,
+        string destinationPath,
+        Func<string, string, uint, bool> moveFileEx,
+        Func<int> getLastError,
+        Func<TimeSpan, CancellationToken, ValueTask> delayAsync,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(moveFileEx);
+        ArgumentNullException.ThrowIfNull(getLastError);
+        ArgumentNullException.ThrowIfNull(delayAsync);
+
+        TimeSpan retryDelay = TimeSpan.FromMilliseconds(
+            WindowsReplaceRetryDelayMilliseconds);
+        int error = 0;
+        for (int attempt = 0;
+             attempt < WindowsReplaceRetryCount;
+             attempt++)
+        {
+            if (moveFileEx(
+                sourcePath,
+                destinationPath,
+                MoveFileReplaceExisting | MoveFileWriteThrough))
+            {
+                return;
+            }
+
+            error = getLastError();
+            if (!IsTransientWindowsReplaceError(error))
+            {
+                throw NativeIOException(
+                    "The durable file replacement failed.",
+                    error);
+            }
+
+            if (attempt < WindowsReplaceRetryCount - 1)
+            {
+                await delayAsync(
+                        retryDelay,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        throw NativeIOException(
+            "The durable file replacement failed.",
+            error);
     }
 
     internal static void MovePathDurably(

@@ -15,9 +15,10 @@ internal interface IDurableFileOperations
         ReadOnlyMemory<byte> content,
         CancellationToken cancellationToken);
 
-    void AtomicReplaceFile(
+    ValueTask AtomicReplaceFileAsync(
         string sourcePath,
-        string destinationPath);
+        string destinationPath,
+        CancellationToken cancellationToken);
 
     void SynchronizeDirectory(string directoryPath);
 }
@@ -59,9 +60,11 @@ internal static class DurableFileWriter
                 cancellationToken.ThrowIfCancellationRequested();
             }
 
-            fileOperations.AtomicReplaceFile(
-                tempPath,
-                fullDestinationPath);
+            await fileOperations.AtomicReplaceFileAsync(
+                    tempPath,
+                    fullDestinationPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
             fileOperations.SynchronizeDirectory(directoryPath);
         }
         finally
