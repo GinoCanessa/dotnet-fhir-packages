@@ -14,6 +14,11 @@ public class ReleaseWorkflowContractTests
         string releaseWorkflow = ReadContract("nuget-generator.yaml");
         string qualificationProject =
             ReadContract("FhirPkg.Qualification.csproj");
+        string releaseInputs =
+            ReadScriptContract("Test-ReleaseInputs.ps1");
+        string versionAvailability =
+            ReadScriptContract(
+                "Test-ReleaseVersionAvailability.ps1");
 
         buildWorkflow.ShouldContain("workflow_call:");
         buildWorkflow.ShouldContain("commit_sha:");
@@ -79,6 +84,10 @@ public class ReleaseWorkflowContractTests
             "github.event.action == 'published'");
         releaseWorkflow.ShouldContain(
             "needs.validate.outputs.validation_only == 'false'");
+        releaseWorkflow.ShouldContain(
+            "group: nuget-release-${{ github.event.release.tag_name || inputs.tag }}");
+        releaseWorkflow.ShouldContain(
+            "cancel-in-progress: false");
         CountOccurrences(
             releaseWorkflow,
             "environment: nuget.org").ShouldBe(1);
@@ -86,10 +95,47 @@ public class ReleaseWorkflowContractTests
             "vars.NUGET_PUBLISH_ENVIRONMENT_READY");
         CountOccurrences(
             releaseWorkflow,
-            "secrets.GINOC_NUGET").ShouldBe(2);
-        releaseWorkflow.ShouldContain("--no-symbols");
+            "secrets.GINOC_NUGET").ShouldBe(4);
+        CountOccurrences(
+            releaseWorkflow,
+            "dotnet nuget push").ShouldBe(4);
+        CountOccurrences(
+            releaseWorkflow,
+            "--no-symbols").ShouldBe(2);
+        CountOccurrences(
+            releaseWorkflow,
+            "Test-PublishedReleasePackage.ps1").ShouldBe(2);
+        CountOccurrences(
+            releaseWorkflow,
+            "steps.candidate.outputs.cli_symbols_path").ShouldBe(1);
+        CountOccurrences(
+            releaseWorkflow,
+            "steps.candidate.outputs.sdk_symbols_path").ShouldBe(1);
         releaseWorkflow.ShouldContain(
-            "Test-PublishedReleasePackage.ps1");
+            "Test-ReleasePublicationState.ps1");
+        releaseWorkflow.ShouldContain(
+            "timeout-minutes: 90");
+
+        int preflightIndex = releaseWorkflow.IndexOf(
+            "Test-ReleasePublicationState.ps1",
+            StringComparison.Ordinal);
+        int firstPushIndex = releaseWorkflow.IndexOf(
+            "dotnet nuget push",
+            StringComparison.Ordinal);
+        int cliPrimaryIndex = releaseWorkflow.IndexOf(
+            "steps.candidate.outputs.cli_package_path",
+            StringComparison.Ordinal);
+        int sdkPrimaryIndex = releaseWorkflow.IndexOf(
+            "steps.candidate.outputs.sdk_package_path",
+            StringComparison.Ordinal);
+        preflightIndex.ShouldBeGreaterThanOrEqualTo(0);
+        preflightIndex.ShouldBeLessThan(firstPushIndex);
+        cliPrimaryIndex.ShouldBeLessThan(sdkPrimaryIndex);
+
+        releaseInputs.ShouldContain(
+            "Test-ReleaseVersionAvailability.ps1");
+        versionAvailability.ShouldContain("fhir-pkg-cli");
+        versionAvailability.ShouldContain("fhir-pkg-lib");
 
         qualificationProject.ShouldContain(
             "<TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>");
@@ -100,6 +146,14 @@ public class ReleaseWorkflowContractTests
             Path.Combine(
                 AppContext.BaseDirectory,
                 "ReleaseContracts",
+                fileName));
+
+    private static string ReadScriptContract(string fileName) =>
+        File.ReadAllText(
+            Path.Combine(
+                AppContext.BaseDirectory,
+                "ReleaseContracts",
+                "Scripts",
                 fileName));
 
     private static int CountOccurrences(

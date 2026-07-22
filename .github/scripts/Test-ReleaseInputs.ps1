@@ -8,6 +8,12 @@ param(
 
     [string] $GitHubRef = $env:GITHUB_REF,
 
+    [string] $SdkIndexUri =
+        'https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/index.json',
+
+    [string] $CliIndexUri =
+        'https://api.nuget.org/v3-flatcontainer/fhir-pkg-cli/index.json',
+
     [switch] $AllowPublishedVersion
 )
 
@@ -23,12 +29,6 @@ if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$')
 if ($parsedVersion.ToString(3) -cne $Version)
 {
     throw "Version '$Version' is not in canonical numeric form."
-}
-
-[version] $minimumVersion = [version] '2026.622.1701'
-if ($parsedVersion -le $minimumVersion)
-{
-    throw "Version '$Version' must be newer than '$minimumVersion'."
 }
 
 foreach ($component in @(
@@ -103,13 +103,12 @@ if ($LASTEXITCODE -ne 0)
 
 if (!$AllowPublishedVersion)
 {
-    [object] $publishedVersions = Invoke-RestMethod `
-        -Uri 'https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/index.json'
-
-    if (@($publishedVersions.versions) -contains $Version)
-    {
-        throw "fhir-pkg-lib '$Version' is already published."
-    }
+    & (Join-Path `
+        $PSScriptRoot `
+        'Test-ReleaseVersionAvailability.ps1') `
+        -Version $Version `
+        -SdkIndexUri $SdkIndexUri `
+        -CliIndexUri $CliIndexUri
 }
 
 if (![string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT))

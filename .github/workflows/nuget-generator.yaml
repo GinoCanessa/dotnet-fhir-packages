@@ -22,6 +22,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: nuget-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
   validate:
     name: validate-release
@@ -566,7 +570,7 @@ jobs:
       }}
     runs-on: ubuntu-latest
     environment: nuget.org
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -616,7 +620,7 @@ jobs:
           name: fhir-pkg-${{ needs.validate.outputs.version }}-candidate
           path: ${{ runner.temp }}/release-candidate
 
-      - name: Re-hash qualified release candidate
+      - name: Revalidate qualified release candidate
         id: candidate
         shell: pwsh
         env:
@@ -634,7 +638,49 @@ jobs:
             -ExpectedSdkPackageSha256 $env:SDK_PACKAGE_SHA256 `
             -ExpectedCliPackageSha256 $env:CLI_PACKAGE_SHA256
 
-      - name: Push primary package to NuGet.org
+      - name: Reconcile existing NuGet publication state
+        id: publication_state
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          ./.github/scripts/Test-ReleasePublicationState.ps1 `
+            -CandidateDirectory '${{ runner.temp }}/release-candidate' `
+            -Version $env:RELEASE_VERSION `
+            -RepositoryCommit $env:RELEASE_COMMIT
+
+      - name: Push CLI primary package to NuGet.org
+        if: steps.publication_state.outputs.cli_state == 'missing'
+        env:
+          NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
+        run: >-
+          dotnet nuget push
+          "${{ steps.candidate.outputs.cli_package_path }}"
+          --api-key "$NUGET_API_KEY"
+          --source https://api.nuget.org/v3/index.json
+          --no-symbols
+          --skip-duplicate
+
+      - name: Verify published CLI primary matches candidate
+        if: steps.publication_state.outputs.cli_state == 'missing'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          $versionPath = $env:RELEASE_VERSION.ToLowerInvariant()
+          $publishedUri =
+            "https://api.nuget.org/v3-flatcontainer/fhir-pkg-cli/$versionPath/fhir-pkg-cli.$versionPath.nupkg"
+          ./.github/scripts/Test-PublishedReleasePackage.ps1 `
+            -PackageId fhir-pkg-cli `
+            -CandidatePackagePath '${{ steps.candidate.outputs.cli_package_path }}' `
+            -PublishedPackageUri $publishedUri `
+            -Version $env:RELEASE_VERSION `
+            -RepositoryCommit $env:RELEASE_COMMIT
+
+      - name: Push SDK primary package to NuGet.org
+        if: steps.publication_state.outputs.sdk_state == 'missing'
         env:
           NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
         run: >-
@@ -645,8 +691,8 @@ jobs:
           --no-symbols
           --skip-duplicate
 
-      - name: Confirm published package matches candidate
-        id: published
+      - name: Verify published SDK primary matches candidate
+        if: steps.publication_state.outputs.sdk_state == 'missing'
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
@@ -662,7 +708,17 @@ jobs:
             -Version $env:RELEASE_VERSION `
             -RepositoryCommit $env:RELEASE_COMMIT
 
-      - name: Push symbols package to NuGet.org
+      - name: Push CLI symbols package to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
+        run: >-
+          dotnet nuget push
+          "${{ steps.candidate.outputs.cli_symbols_path }}"
+          --api-key "$NUGET_API_KEY"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+
+      - name: Push SDK symbols package to NuGet.org
         env:
           NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
         run: >-
