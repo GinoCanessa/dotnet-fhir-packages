@@ -3,6 +3,8 @@
 A C# SDK and CLI tool for discovering, resolving, downloading, caching, and
 managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
 
+[![Publish dotnet library](https://img.shields.io/nuget/v/fhir-pkg-lib.svg)](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml)
+[![Publish dotnet library](https://img.shields.io/nuget/v/fhir-pkg-cli.svg)](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## Features
