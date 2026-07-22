@@ -85,16 +85,34 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "validation_only=$validationOnly"
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Restore release validation tool
+        run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
+
+      - name: Build release validation tool
+        run: >-
+          dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-restore
+
       - name: Validate release inputs, tag, and main ancestry
         id: release
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ steps.inputs.outputs.version }}
-          RELEASE_TAG: ${{ steps.inputs.outputs.tag }}
-        run: |
-          ./.github/scripts/Test-ReleaseInputs.ps1 `
-            -Version $env:RELEASE_VERSION `
-            -Tag $env:RELEASE_TAG
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          validate-inputs
+          --version "${{ steps.inputs.outputs.version }}"
+          --tag "${{ steps.inputs.outputs.tag }}"
+          --github-ref "${{ github.ref }}"
 
   source-ci:
     name: exact-source-ci
@@ -139,8 +157,18 @@ jobs:
             9.0.119
             8.0.423
 
+      - name: Restore release validation tool
+        run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
+
       - name: Restore release graph
         run: dotnet restore src/FhirPkg.Cli/FhirPkg.Cli.csproj
+
+      - name: Build release validation tool
+        run: >-
+          dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-restore
 
       - name: Build release graph once
         shell: pwsh
@@ -282,17 +310,19 @@ jobs:
 
       - name: Verify release candidate
         id: candidate
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-        run: |
-          ./.github/scripts/Test-ReleaseCandidate.ps1 `
-            -CandidateDirectory '${{ runner.temp }}/release-candidate' `
-            -Version $env:RELEASE_VERSION `
-            -Tag $env:RELEASE_TAG `
-            -RepositoryCommit $env:RELEASE_COMMIT
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          validate-candidate
+          --candidate-directory "${{ runner.temp }}/release-candidate"
+          --version "${{ needs.validate.outputs.version }}"
+          --tag "${{ needs.validate.outputs.tag }}"
+          --repository-commit "${{ needs.validate.outputs.commit }}"
 
       - name: Upload immutable release candidate
         id: upload
@@ -338,6 +368,16 @@ jobs:
             9.0.119
             8.0.423
 
+      - name: Restore release validation tool
+        run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
+
+      - name: Build release validation tool
+        run: >-
+          dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-restore
+
       - name: Configure isolated global packages folder
         shell: pwsh
         run: |
@@ -356,21 +396,21 @@ jobs:
 
       - name: Verify downloaded release candidate
         id: candidate
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-          SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
-          CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
-        run: |
-          ./.github/scripts/Test-ReleaseCandidate.ps1 `
-            -CandidateDirectory '${{ runner.temp }}/release-candidate' `
-            -Version $env:RELEASE_VERSION `
-            -Tag $env:RELEASE_TAG `
-            -RepositoryCommit $env:RELEASE_COMMIT `
-            -ExpectedSdkPackageSha256 $env:SDK_PACKAGE_SHA256 `
-            -ExpectedCliPackageSha256 $env:CLI_PACKAGE_SHA256
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          validate-candidate
+          --candidate-directory "${{ runner.temp }}/release-candidate"
+          --version "${{ needs.validate.outputs.version }}"
+          --tag "${{ needs.validate.outputs.tag }}"
+          --repository-commit "${{ needs.validate.outputs.commit }}"
+          --expected-sdk-package-sha256 "${{ needs.pack.outputs.sdk_package_sha256 }}"
+          --expected-cli-package-sha256 "${{ needs.pack.outputs.cli_package_sha256 }}"
 
       - name: Create isolated qualification package source
         id: nuget
@@ -599,20 +639,34 @@ jobs:
             throw "The protected nuget.org environment is not configured."
           }
 
-      - name: Revalidate release tag and main ancestry
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-        run: |
-          ./.github/scripts/Test-ReleaseInputs.ps1 `
-            -Version $env:RELEASE_VERSION `
-            -Tag $env:RELEASE_TAG `
-            -AllowPublishedVersion
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.302
+
+      - name: Restore release validation tool
+        run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
+
+      - name: Build release validation tool
+        run: >-
+          dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-restore
+
+      - name: Revalidate release tag and main ancestry
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          validate-inputs
+          --version "${{ needs.validate.outputs.version }}"
+          --tag "${{ needs.validate.outputs.tag }}"
+          --github-ref "${{ github.ref }}"
+          --allow-published-version
 
       - name: Download qualified release candidate
         uses: actions/download-artifact@v4
@@ -622,33 +676,36 @@ jobs:
 
       - name: Revalidate qualified release candidate
         id: candidate
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-          SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
-          CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
-        run: |
-          ./.github/scripts/Test-ReleaseCandidate.ps1 `
-            -CandidateDirectory '${{ runner.temp }}/release-candidate' `
-            -Version $env:RELEASE_VERSION `
-            -Tag $env:RELEASE_TAG `
-            -RepositoryCommit $env:RELEASE_COMMIT `
-            -ExpectedSdkPackageSha256 $env:SDK_PACKAGE_SHA256 `
-            -ExpectedCliPackageSha256 $env:CLI_PACKAGE_SHA256
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          validate-candidate
+          --candidate-directory "${{ runner.temp }}/release-candidate"
+          --version "${{ needs.validate.outputs.version }}"
+          --tag "${{ needs.validate.outputs.tag }}"
+          --repository-commit "${{ needs.validate.outputs.commit }}"
+          --expected-sdk-package-sha256 "${{ needs.pack.outputs.sdk_package_sha256 }}"
+          --expected-cli-package-sha256 "${{ needs.pack.outputs.cli_package_sha256 }}"
 
       - name: Reconcile existing NuGet publication state
         id: publication_state
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-        run: |
-          ./.github/scripts/Test-ReleasePublicationState.ps1 `
-            -CandidateDirectory '${{ runner.temp }}/release-candidate' `
-            -Version $env:RELEASE_VERSION `
-            -RepositoryCommit $env:RELEASE_COMMIT
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          inspect-publication
+          --candidate-directory "${{ runner.temp }}/release-candidate"
+          --version "${{ needs.validate.outputs.version }}"
+          --repository-commit "${{ needs.validate.outputs.commit }}"
 
       - name: Push CLI primary package to NuGet.org
         if: steps.publication_state.outputs.cli_state == 'missing'
@@ -664,20 +721,20 @@ jobs:
 
       - name: Verify published CLI primary matches candidate
         if: steps.publication_state.outputs.cli_state == 'missing'
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-        run: |
-          $versionPath = $env:RELEASE_VERSION.ToLowerInvariant()
-          $publishedUri =
-            "https://api.nuget.org/v3-flatcontainer/fhir-pkg-cli/$versionPath/fhir-pkg-cli.$versionPath.nupkg"
-          ./.github/scripts/Test-PublishedReleasePackage.ps1 `
-            -PackageId fhir-pkg-cli `
-            -CandidatePackagePath '${{ steps.candidate.outputs.cli_package_path }}' `
-            -PublishedPackageUri $publishedUri `
-            -Version $env:RELEASE_VERSION `
-            -RepositoryCommit $env:RELEASE_COMMIT
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          validate-published-package
+          --package-id fhir-pkg-cli
+          --candidate-package-path "${{ steps.candidate.outputs.cli_package_path }}"
+          --published-package-uri "https://api.nuget.org/v3-flatcontainer/fhir-pkg-cli/${{ needs.validate.outputs.version }}/fhir-pkg-cli.${{ needs.validate.outputs.version }}.nupkg"
+          --version "${{ needs.validate.outputs.version }}"
+          --repository-commit "${{ needs.validate.outputs.commit }}"
 
       - name: Push SDK primary package to NuGet.org
         if: steps.publication_state.outputs.sdk_state == 'missing'
@@ -693,20 +750,20 @@ jobs:
 
       - name: Verify published SDK primary matches candidate
         if: steps.publication_state.outputs.sdk_state == 'missing'
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-        run: |
-          $versionPath = $env:RELEASE_VERSION.ToLowerInvariant()
-          $publishedUri =
-            "https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/$versionPath/fhir-pkg-lib.$versionPath.nupkg"
-          ./.github/scripts/Test-PublishedReleasePackage.ps1 `
-            -PackageId fhir-pkg-lib `
-            -CandidatePackagePath '${{ steps.candidate.outputs.sdk_package_path }}' `
-            -PublishedPackageUri $publishedUri `
-            -Version $env:RELEASE_VERSION `
-            -RepositoryCommit $env:RELEASE_COMMIT
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          validate-published-package
+          --package-id fhir-pkg-lib
+          --candidate-package-path "${{ steps.candidate.outputs.sdk_package_path }}"
+          --published-package-uri "https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/${{ needs.validate.outputs.version }}/fhir-pkg-lib.${{ needs.validate.outputs.version }}.nupkg"
+          --version "${{ needs.validate.outputs.version }}"
+          --repository-commit "${{ needs.validate.outputs.commit }}"
 
       - name: Push CLI symbols package to NuGet.org
         env:

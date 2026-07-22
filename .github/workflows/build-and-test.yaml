@@ -11,6 +11,7 @@ on:
       - 'global.json'
       - '.github/scripts/**'
       - '.github/workflows/**'
+      - 'tools/**'
   pull_request:
     branches: [main]
     paths:
@@ -21,6 +22,7 @@ on:
       - 'global.json'
       - '.github/scripts/**'
       - '.github/workflows/**'
+      - 'tools/**'
   workflow_call:
     inputs:
       commit_sha:

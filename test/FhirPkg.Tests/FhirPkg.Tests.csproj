@@ -45,10 +45,6 @@
       Include="..\..\test\FhirPkg.Qualification\FhirPkg.Qualification.csproj"
       Link="ReleaseContracts\FhirPkg.Qualification.csproj"
       CopyToOutputDirectory="PreserveNewest" />
-    <None
-      Include="..\..\.github\scripts\*.ps1"
-      Link="ReleaseContracts\Scripts\%(Filename)%(Extension)"
-      CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
