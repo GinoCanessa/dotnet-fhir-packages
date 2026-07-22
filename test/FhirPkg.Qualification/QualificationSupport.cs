@@ -405,6 +405,8 @@ internal sealed record QualificationBuildSnapshot(
 internal static class QualificationBuildInfo
 {
     private const string PackageId = "fhir-pkg-lib";
+    // APP_CONTEXT_DEPS_FILES uses the .NET host's platform-independent delimiter.
+    private const char DependencyContextFileSeparator = ';';
 
     internal static QualificationBuildSnapshot Inspect()
     {
@@ -577,33 +579,44 @@ internal static class QualificationBuildInfo
         };
     }
 
-    private static IEnumerable<string> GetDependencyContextFiles()
+    private static IEnumerable<string> GetDependencyContextFiles() =>
+        GetDependencyContextFiles(
+            AppContext.GetData(
+                "APP_CONTEXT_DEPS_FILES") as string,
+            Assembly.GetEntryAssembly()?.Location);
+
+    internal static IEnumerable<string> GetDependencyContextFiles(
+        string? configured,
+        string? entryLocation)
     {
-        string? configured = AppContext.GetData(
-            "APP_CONTEXT_DEPS_FILES") as string;
+        HashSet<string> yieldedPaths =
+            new(StringComparer.Ordinal);
         if (!string.IsNullOrWhiteSpace(configured))
         {
             foreach (string path in configured.Split(
-                Path.PathSeparator,
-                StringSplitOptions.RemoveEmptyEntries))
+                DependencyContextFileSeparator,
+                StringSplitOptions.RemoveEmptyEntries
+                    | StringSplitOptions.TrimEntries))
             {
-                if (File.Exists(path))
+                if (File.Exists(path)
+                    && yieldedPaths.Add(path))
+                {
                     yield return path;
+                }
             }
-
-            yield break;
         }
 
-        string? entryLocation =
-            Assembly.GetEntryAssembly()?.Location;
         if (string.IsNullOrWhiteSpace(entryLocation))
             yield break;
 
         string fallback = Path.ChangeExtension(
             entryLocation,
             ".deps.json");
-        if (File.Exists(fallback))
+        if (File.Exists(fallback)
+            && yieldedPaths.Add(fallback))
+        {
             yield return fallback;
+        }
     }
 
     private static string? NormalizeInformationalVersion(

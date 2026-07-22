@@ -28,6 +28,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="FhirPkg.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="qualification-corpus.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Schemas\qualification-corpus.schema.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Schemas\qualification-report.schema.json" CopyToOutputDirectory="PreserveNewest" />
