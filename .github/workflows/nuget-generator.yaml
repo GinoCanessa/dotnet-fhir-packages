@@ -107,7 +107,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
-      package_sha256: ${{ steps.candidate.outputs.sha256 }}
+      sdk_package_sha256: ${{ steps.candidate.outputs.sdk_sha256 }}
+      cli_package_sha256: ${{ steps.candidate.outputs.cli_sha256 }}
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
 
     steps:
@@ -134,10 +135,26 @@ jobs:
             9.0.119
             8.0.423
 
-      - name: Restore library
-        run: dotnet restore src/FhirPkg/FhirPkg.csproj
+      - name: Restore release graph
+        run: dotnet restore src/FhirPkg.Cli/FhirPkg.Cli.csproj
 
-      - name: Pack release candidate once
+      - name: Build release graph once
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          dotnet build src/FhirPkg.Cli/FhirPkg.Cli.csproj `
+            --configuration Release `
+            --no-restore `
+            "-p:VersionPrefix=$env:RELEASE_VERSION" `
+            "-p:Version=$env:RELEASE_VERSION" `
+            "-p:PackageVersion=$env:RELEASE_VERSION" `
+            "-p:AssemblyVersion=0.$env:RELEASE_VERSION" `
+            "-p:FileVersion=0.$env:RELEASE_VERSION" `
+            "-p:RepositoryCommit=$env:RELEASE_COMMIT"
+
+      - name: Pack synchronized release candidate once
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
@@ -150,16 +167,33 @@ jobs:
             -Force `
             -Path $candidateDirectory |
             Out-Null
+          $properties = @(
+            "-p:VersionPrefix=$env:RELEASE_VERSION",
+            "-p:Version=$env:RELEASE_VERSION",
+            "-p:PackageVersion=$env:RELEASE_VERSION",
+            "-p:AssemblyVersion=0.$env:RELEASE_VERSION",
+            "-p:FileVersion=0.$env:RELEASE_VERSION",
+            "-p:RepositoryCommit=$env:RELEASE_COMMIT"
+          )
           dotnet pack src/FhirPkg/FhirPkg.csproj `
             --configuration Release `
-            --no-restore `
+            --no-build `
             --output $candidateDirectory `
-            "-p:VersionPrefix=$env:RELEASE_VERSION" `
-            "-p:Version=$env:RELEASE_VERSION" `
-            "-p:PackageVersion=$env:RELEASE_VERSION" `
-            "-p:AssemblyVersion=0.$env:RELEASE_VERSION" `
-            "-p:FileVersion=0.$env:RELEASE_VERSION" `
-            "-p:RepositoryCommit=$env:RELEASE_COMMIT"
+            @properties
+          if ($LASTEXITCODE -ne 0)
+          {
+            throw 'SDK package creation failed.'
+          }
+
+          dotnet pack src/FhirPkg.Cli/FhirPkg.Cli.csproj `
+            --configuration Release `
+            --no-build `
+            --output $candidateDirectory `
+            @properties
+          if ($LASTEXITCODE -ne 0)
+          {
+            throw 'CLI package creation failed.'
+          }
 
       - name: Create SHA-512 manifest and release metadata
         shell: pwsh
@@ -170,46 +204,65 @@ jobs:
         run: |
           $candidateDirectory =
             Join-Path '${{ runner.temp }}' 'release-candidate'
-          $packagePath = Join-Path `
-            $candidateDirectory `
-            "fhir-pkg-lib.$env:RELEASE_VERSION.nupkg"
-          $symbolsPath = Join-Path `
-            $candidateDirectory `
-            "fhir-pkg-lib.$env:RELEASE_VERSION.snupkg"
-          if (!(Test-Path -LiteralPath $packagePath -PathType Leaf))
+          $packageRecords = @()
+          foreach ($packageId in @('fhir-pkg-lib', 'fhir-pkg-cli'))
           {
-            throw "Package '$packagePath' was not created."
+            $packageName =
+              "$packageId.$env:RELEASE_VERSION.nupkg"
+            $symbolsName =
+              "$packageId.$env:RELEASE_VERSION.snupkg"
+            $packagePath =
+              Join-Path $candidateDirectory $packageName
+            $symbolsPath =
+              Join-Path $candidateDirectory $symbolsName
+            if (!(Test-Path -LiteralPath $packagePath -PathType Leaf))
+            {
+              throw "Package '$packagePath' was not created."
+            }
+
+            if (!(Test-Path -LiteralPath $symbolsPath -PathType Leaf))
+            {
+              throw "Symbols package '$symbolsPath' was not created."
+            }
+
+            [string[]] $manifestLines = foreach ($path in @(
+              $packagePath,
+              $symbolsPath))
+            {
+              $hash =
+                (Get-FileHash -Algorithm SHA512 -Path $path).
+                  Hash.
+                  ToLowerInvariant()
+              "$hash  $([System.IO.Path]::GetFileName($path))"
+            }
+            $manifestPath =
+              Join-Path `
+                $candidateDirectory `
+                "$packageId.$env:RELEASE_VERSION.sha512"
+            $manifestLines |
+              Set-Content -Encoding ascii -Path $manifestPath
+
+            $packageRecords += [ordered]@{
+              packageId = $packageId
+              packageFile = $packageName
+              symbolsFile = $symbolsName
+              packageSha256 = (
+                Get-FileHash -Algorithm SHA256 -Path $packagePath
+              ).Hash.ToLowerInvariant()
+              symbolsSha256 = (
+                Get-FileHash -Algorithm SHA256 -Path $symbolsPath
+              ).Hash.ToLowerInvariant()
+              packageSha512 = $manifestLines[0].Split(' ', 2)[0]
+              symbolsSha512 = $manifestLines[1].Split(' ', 2)[0]
+            }
           }
 
-          if (!(Test-Path -LiteralPath $symbolsPath -PathType Leaf))
-          {
-            throw "Symbols package '$symbolsPath' was not created."
-          }
-
-          [string[]] $manifestLines = foreach ($path in @(
-            $packagePath,
-            $symbolsPath))
-          {
-            $hash =
-              (Get-FileHash -Algorithm SHA512 -Path $path).Hash.ToLowerInvariant()
-            "$hash  $([System.IO.Path]::GetFileName($path))"
-          }
-          $manifestPath = Join-Path `
-            $candidateDirectory `
-            "fhir-pkg-lib.$env:RELEASE_VERSION.sha512"
-          $manifestLines |
-            Set-Content -Encoding ascii -Path $manifestPath
-
-          $packageSha256 =
-            (Get-FileHash -Algorithm SHA256 -Path $packagePath).Hash.ToLowerInvariant()
           $metadata = [ordered]@{
             version = $env:RELEASE_VERSION
             tag = $env:RELEASE_TAG
             repositoryCommit = $env:RELEASE_COMMIT
             feed = 'https://api.nuget.org/v3/index.json'
-            preUploadSha256 = $packageSha256
-            packageSha512 = $manifestLines[0].Split(' ', 2)[0]
-            symbolsSha512 = $manifestLines[1].Split(' ', 2)[0]
+            packages = $packageRecords
             sdkVersion = (dotnet --version).Trim()
             sdkCommit = (
               (dotnet --info |
@@ -218,7 +271,7 @@ jobs:
             ).Trim()
           }
           $metadata |
-            ConvertTo-Json |
+            ConvertTo-Json -Depth 4 |
             Set-Content `
               -Encoding utf8 `
               -Path (Join-Path $candidateDirectory 'release-metadata.json')
@@ -228,18 +281,20 @@ jobs:
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
         run: |
           ./.github/scripts/Test-ReleaseCandidate.ps1 `
             -CandidateDirectory '${{ runner.temp }}/release-candidate' `
             -Version $env:RELEASE_VERSION `
+            -Tag $env:RELEASE_TAG `
             -RepositoryCommit $env:RELEASE_COMMIT
 
       - name: Upload immutable release candidate
         id: upload
         uses: actions/upload-artifact@v4
         with:
-          name: fhir-pkg-lib-${{ needs.validate.outputs.version }}-candidate
+          name: fhir-pkg-${{ needs.validate.outputs.version }}-candidate
           path: ${{ runner.temp }}/release-candidate/*
           if-no-files-found: error
           compression-level: 0
@@ -292,7 +347,7 @@ jobs:
       - name: Download immutable release candidate
         uses: actions/download-artifact@v4
         with:
-          name: fhir-pkg-lib-${{ needs.validate.outputs.version }}-candidate
+          name: fhir-pkg-${{ needs.validate.outputs.version }}-candidate
           path: ${{ runner.temp }}/release-candidate
 
       - name: Verify downloaded release candidate
@@ -300,14 +355,18 @@ jobs:
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-          PACKAGE_SHA256: ${{ needs.pack.outputs.package_sha256 }}
+          SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
+          CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
         run: |
           ./.github/scripts/Test-ReleaseCandidate.ps1 `
             -CandidateDirectory '${{ runner.temp }}/release-candidate' `
             -Version $env:RELEASE_VERSION `
+            -Tag $env:RELEASE_TAG `
             -RepositoryCommit $env:RELEASE_COMMIT `
-            -ExpectedPackageSha256 $env:PACKAGE_SHA256
+            -ExpectedSdkPackageSha256 $env:SDK_PACKAGE_SHA256 `
+            -ExpectedCliPackageSha256 $env:CLI_PACKAGE_SHA256
 
       - name: Create isolated qualification package source
         id: nuget
@@ -330,6 +389,7 @@ jobs:
             '  <packageSourceMapping>',
             '    <packageSource key="candidate">',
             '      <package pattern="fhir-pkg-lib" />',
+            '      <package pattern="fhir-pkg-cli" />',
             '    </packageSource>',
             '    <packageSource key="nuget.org">',
             '      <package pattern="Microsoft.*" />',
@@ -362,7 +422,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARGET_FRAMEWORK: ${{ matrix.framework }}
-          PACKAGE_SHA256: ${{ needs.pack.outputs.package_sha256 }}
+          SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
         run: |
           $candidatePackage = Join-Path `
             '${{ runner.temp }}/release-candidate' `
@@ -377,32 +437,50 @@ jobs:
               -CandidatePackagePath $candidatePackage `
               -Version $env:RELEASE_VERSION `
               -Framework $env:TARGET_FRAMEWORK `
-              -ExpectedPackageSha256 $env:PACKAGE_SHA256
+              -ExpectedPackageSha256 $env:SDK_PACKAGE_SHA256
           }
 
-      - name: Record qualification candidate evidence
+      - name: Install exact CLI package for requested framework
+        id: tool
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          TARGET_FRAMEWORK: ${{ matrix.framework }}
+        run: |
+          $toolPath = Join-Path '${{ runner.temp }}' 'qualification-tool'
+          New-Item -ItemType Directory -Force -Path $toolPath |
+            Out-Null
+          dotnet tool install fhir-pkg-cli `
+            --version $env:RELEASE_VERSION `
+            --framework $env:TARGET_FRAMEWORK `
+            --tool-path $toolPath `
+            --configfile '${{ steps.nuget.outputs.config_path }}' `
+            --no-cache
+          if ($LASTEXITCODE -ne 0)
+          {
+            throw 'CLI tool installation failed.'
+          }
+
+          Add-Content `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "tool_path=$toolPath"
+
+      - name: Verify exact CLI restore and smoke test
+        id: tool_qualification
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-          PACKAGE_SHA256: ${{ needs.pack.outputs.package_sha256 }}
-          ARTIFACT_DIGEST: ${{ needs.pack.outputs.artifact_digest }}
           TARGET_FRAMEWORK: ${{ matrix.framework }}
-          MATRIX_OS: ${{ matrix.os }}
+          CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
         run: |
-          $evidence = [ordered]@{
-            version = $env:RELEASE_VERSION
-            repositoryCommit = $env:RELEASE_COMMIT
-            packageSha256 = $env:PACKAGE_SHA256
-            workflowArtifactDigest = $env:ARTIFACT_DIGEST
-            runner = $env:MATRIX_OS
-            framework = $env:TARGET_FRAMEWORK
-          }
-          $evidence |
-            ConvertTo-Json |
-            Set-Content `
-              -Encoding utf8 `
-              -Path '${{ runner.temp }}/qualification-candidate.json'
+          ./.github/scripts/Test-ToolQualification.ps1 `
+            -ToolPath '${{ steps.tool.outputs.tool_path }}' `
+            -CandidateDirectory '${{ runner.temp }}/release-candidate' `
+            -Framework $env:TARGET_FRAMEWORK `
+            -Version $env:RELEASE_VERSION `
+            -RepositoryCommit $env:RELEASE_COMMIT `
+            -ExpectedPackageSha256 $env:CLI_PACKAGE_SHA256
 
       - name: Qualify exact local package
         shell: pwsh
@@ -424,6 +502,46 @@ jobs:
             --cache $cache `
             --output $report `
             --corpus test/FhirPkg.Qualification/qualification-corpus.json
+
+      - name: Record qualification candidate evidence
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
+          CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
+          ARTIFACT_DIGEST: ${{ needs.pack.outputs.artifact_digest }}
+          TARGET_FRAMEWORK: ${{ matrix.framework }}
+          TOOL_INFORMATIONAL_VERSION: ${{ steps.tool_qualification.outputs.informational_version }}
+          MATRIX_OS: ${{ matrix.os }}
+        run: |
+          $report =
+            Get-Content `
+              -Raw `
+              -Path '${{ runner.temp }}/qualification-report.json' |
+              ConvertFrom-Json
+          if (!$report.success)
+          {
+            throw 'The qualification corpus did not succeed.'
+          }
+
+          $evidence = [ordered]@{
+            version = $env:RELEASE_VERSION
+            repositoryCommit = $env:RELEASE_COMMIT
+            sdkPackageSha256 = $env:SDK_PACKAGE_SHA256
+            cliPackageSha256 = $env:CLI_PACKAGE_SHA256
+            workflowArtifactDigest = $env:ARTIFACT_DIGEST
+            runner = $env:MATRIX_OS
+            framework = $env:TARGET_FRAMEWORK
+            toolInformationalVersion =
+              $env:TOOL_INFORMATIONAL_VERSION
+            corpusResult = 'passed'
+          }
+          $evidence |
+            ConvertTo-Json |
+            Set-Content `
+              -Encoding utf8 `
+              -Path '${{ runner.temp }}/qualification-candidate.json'
 
       - name: Upload qualification evidence
         if: ${{ always() }}
@@ -495,7 +613,7 @@ jobs:
       - name: Download qualified release candidate
         uses: actions/download-artifact@v4
         with:
-          name: fhir-pkg-lib-${{ needs.validate.outputs.version }}-candidate
+          name: fhir-pkg-${{ needs.validate.outputs.version }}-candidate
           path: ${{ runner.temp }}/release-candidate
 
       - name: Re-hash qualified release candidate
@@ -503,21 +621,25 @@ jobs:
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-          PACKAGE_SHA256: ${{ needs.pack.outputs.package_sha256 }}
+          SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
+          CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
         run: |
           ./.github/scripts/Test-ReleaseCandidate.ps1 `
             -CandidateDirectory '${{ runner.temp }}/release-candidate' `
             -Version $env:RELEASE_VERSION `
+            -Tag $env:RELEASE_TAG `
             -RepositoryCommit $env:RELEASE_COMMIT `
-            -ExpectedPackageSha256 $env:PACKAGE_SHA256
+            -ExpectedSdkPackageSha256 $env:SDK_PACKAGE_SHA256 `
+            -ExpectedCliPackageSha256 $env:CLI_PACKAGE_SHA256
 
       - name: Push primary package to NuGet.org
         env:
           NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
         run: >-
           dotnet nuget push
-          "${{ steps.candidate.outputs.package_path }}"
+          "${{ steps.candidate.outputs.sdk_package_path }}"
           --api-key "$NUGET_API_KEY"
           --source https://api.nuget.org/v3/index.json
           --no-symbols
@@ -534,7 +656,8 @@ jobs:
           $publishedUri =
             "https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/$versionPath/fhir-pkg-lib.$versionPath.nupkg"
           ./.github/scripts/Test-PublishedReleasePackage.ps1 `
-            -CandidatePackagePath '${{ steps.candidate.outputs.package_path }}' `
+            -PackageId fhir-pkg-lib `
+            -CandidatePackagePath '${{ steps.candidate.outputs.sdk_package_path }}' `
             -PublishedPackageUri $publishedUri `
             -Version $env:RELEASE_VERSION `
             -RepositoryCommit $env:RELEASE_COMMIT
@@ -544,7 +667,7 @@ jobs:
           NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
         run: >-
           dotnet nuget push
-          "${{ steps.candidate.outputs.symbols_path }}"
+          "${{ steps.candidate.outputs.sdk_symbols_path }}"
           --api-key "$NUGET_API_KEY"
           --source https://api.nuget.org/v3/index.json
           --skip-duplicate
