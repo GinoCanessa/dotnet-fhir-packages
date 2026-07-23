@@ -147,9 +147,8 @@ internal static class PackageVersionSelector
         IReadOnlyCollection<PackageVersionSelection> candidates,
         PackageListing listing)
     {
-        PackageVersionSelection? highestSourceLatest = candidates
-            .Where(candidate => candidate.VersionInfo.IsSourceLatest)
-            .MaxBy(candidate => candidate.Version);
+        PackageVersionSelection? highestSourceLatest = SelectHighest(
+            candidates.Where(candidate => candidate.VersionInfo.IsSourceLatest));
         if (highestSourceLatest is not null)
         {
             return highestSourceLatest;
@@ -166,33 +165,37 @@ internal static class PackageVersionSelector
             }
         }
 
-        return candidates.MaxBy(candidate => candidate.Version)!;
+        return SelectHighest(candidates)!;
     }
 
     private static PackageVersionSelection? SelectWildcard(
         IReadOnlyCollection<PackageVersionSelection> candidates,
         string specifier)
     {
-        FhirSemVer? selected = FhirSemVer.MaxSatisfying(
-            candidates.Select(candidate => candidate.Version),
-            specifier,
-            includePreRelease: true);
-        return selected is null
-            ? null
-            : candidates.First(candidate => candidate.Version.Equals(selected));
+        FhirSemVer pattern = FhirSemVer.Parse(specifier);
+        return SelectHighest(
+            candidates.Where(candidate => candidate.Version.Satisfies(pattern)));
     }
 
     private static PackageVersionSelection? SelectRange(
         IReadOnlyCollection<PackageVersionSelection> candidates,
         string rangeExpression)
     {
-        HashSet<FhirSemVer> satisfying = FhirSemVer
-            .SatisfyingRange(
-                candidates.Select(candidate => candidate.Version),
-                rangeExpression)
-            .ToHashSet();
-        return candidates
-            .Where(candidate => satisfying.Contains(candidate.Version))
-            .MaxBy(candidate => candidate.Version);
+        FhirSemVerRange range = FhirSemVerRange.Parse(rangeExpression);
+        return SelectHighest(candidates.Where(candidate =>
+            range.IsSatisfiedBy(candidate.Version)));
+    }
+
+    private static PackageVersionSelection? SelectHighest(
+        IEnumerable<PackageVersionSelection> candidates)
+    {
+        PackageVersionSelection? selected = null;
+        foreach (PackageVersionSelection candidate in candidates)
+        {
+            if (selected is null || candidate.Version > selected.Version)
+                selected = candidate;
+        }
+
+        return selected;
     }
 }

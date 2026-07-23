@@ -238,7 +238,7 @@ internal sealed class FhirSemVerRange
     private static FhirSemVer ParseExactVersion(string value, string fullExpression)
     {
         FhirSemVer version = ParseVersion(value, fullExpression);
-        if (version.IsWildcard)
+        if (version.IsWildcard || !version.HasThreePartCore)
             throw InvalidExpression(fullExpression);
 
         return version;
@@ -470,7 +470,7 @@ internal sealed class FhirSemVerRange
     {
         internal bool IsSatisfiedBy(FhirSemVer version) => Operator switch
         {
-            ConstraintOperator.Equal => version.Equals(Operand),
+            ConstraintOperator.Equal => version.Satisfies(Operand),
             ConstraintOperator.Wildcard => version.Satisfies(Operand),
             ConstraintOperator.LessThan => version < Operand,
             ConstraintOperator.LessThanOrEqual => version <= Operand,

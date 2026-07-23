@@ -554,6 +554,54 @@ public class FhirSemVerTests
     }
 
     [Fact]
+    public void SatisfyingRange_StandaloneExact_PreservesPrecisionAndBuild()
+    {
+        FhirSemVer[] versions =
+        [
+            FhirSemVer.Parse("2.0"),
+            FhirSemVer.Parse("2.0.0"),
+            FhirSemVer.Parse("2.0.0+build"),
+        ];
+
+        FhirSemVer.SatisfyingRange(versions, "2.0")
+            .Select(version => version.ToString())
+            .ShouldBe(["2.0"]);
+        FhirSemVer.SatisfyingRange(versions, "2.0.0")
+            .Select(version => version.ToString())
+            .ShouldBe(["2.0.0"]);
+    }
+
+    [Theory]
+    [InlineData("^2.0")]
+    [InlineData("~2.0")]
+    [InlineData(">=2.0")]
+    [InlineData("=2.0")]
+    [InlineData("2.0 - 3.0")]
+    public void SatisfyingRange_TwoPartRangeOperands_AreRejected(
+        string expression)
+    {
+        FhirSemVer[] versions = [FhirSemVer.Parse("2.0")];
+
+        Should.Throw<FormatException>(
+            () => FhirSemVer.SatisfyingRange(versions, expression).ToList());
+    }
+
+    [Fact]
+    public void SatisfyingRange_PipeAllowsStandaloneTwoPartAlternatives()
+    {
+        FhirSemVer[] versions =
+        [
+            FhirSemVer.Parse("2.0"),
+            FhirSemVer.Parse("2.0.0"),
+            FhirSemVer.Parse("3.0"),
+        ];
+
+        FhirSemVer.SatisfyingRange(versions, "2.0|3.0")
+            .Select(version => version.ToString())
+            .ShouldBe(["2.0", "3.0"]);
+    }
+
+    [Fact]
     public void SatisfyingRange_Caret_IncludesMinorBumps()
     {
         FhirSemVer[] versions = new[]

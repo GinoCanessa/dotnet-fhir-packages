@@ -147,6 +147,74 @@ public class FhirPackageManagerTests
     }
 
     [Theory]
+    [InlineData("2.0", "2.0")]
+    [InlineData("4.x?", "4.1.0")]
+    [InlineData("6.1?", "6.1.0")]
+    [InlineData("4.*.*", "4.1.0")]
+    [InlineData("6.0.x-*", "6.0.0-ballot")]
+    public async Task ResolveAsync_DefinedWildcardGrammar_Succeeds(
+        string specifier,
+        string expectedVersion)
+    {
+        PackageListing listing = CreateWildcardGrammarListing();
+        _registryMock.Setup(registry => registry.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((
+                PackageDirective directive,
+                VersionResolveOptions? options,
+                CancellationToken _) =>
+                CreateResolvedDirective(
+                    PackageVersionSelector.Select(
+                        directive,
+                        listing,
+                        options)));
+        using FhirPackageManager manager = CreateManager();
+
+        ResolvedDirective? result = await manager.ResolveAsync(
+            $"example.package#{specifier}",
+            TestContext.Current.CancellationToken);
+
+        result.ShouldNotBeNull();
+        result.Reference.Version.ShouldBe(expectedVersion);
+    }
+
+    [Fact]
+    public async Task InstallAsync_DisabledPrereleaseWildcard_DoesNotDownload()
+    {
+        PackageListing listing = CreateWildcardGrammarListing();
+        _cacheMock.Setup(cache => cache.IsInstalledAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        _registryMock.Setup(registry => registry.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((
+                PackageDirective directive,
+                VersionResolveOptions? options,
+                CancellationToken _) =>
+                CreateResolvedDirective(
+                    PackageVersionSelector.Select(
+                        directive,
+                        listing,
+                        options)));
+        using FhirPackageManager manager = CreateManager();
+
+        PackageRecord? result = await manager.InstallAsync(
+            "example.package#6.0.x-*",
+            new InstallOptions { AllowPreRelease = false },
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        _registryMock.Verify(registry => registry.DownloadAsync(
+            It.IsAny<ResolvedDirective>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
@@ -5321,6 +5389,48 @@ public class FhirPackageManagerTests
                 Date = manifestDate
             }
         };
+
+    private static PackageListing CreateWildcardGrammarListing()
+    {
+        string[] versions =
+        [
+            "2.0",
+            "2.0.0",
+            "4.0.0",
+            "4.1.0",
+            "6.0.0-ballot",
+            "6.0.0",
+            "6.1.0",
+        ];
+        PackageVersionInfo[] candidates = versions
+            .Select(version => new PackageVersionInfo
+            {
+                Name = "example.package",
+                Version = version,
+            })
+            .ToArray();
+        return new PackageListing
+        {
+            PackageId = "example.package",
+            Versions = candidates.ToDictionary(
+                candidate => candidate.Version,
+                StringComparer.Ordinal),
+            VersionCandidates = candidates,
+        };
+    }
+
+    private static ResolvedDirective? CreateResolvedDirective(
+        PackageVersionSelection? selection) =>
+        selection is null
+            ? null
+            : new ResolvedDirective
+            {
+                Reference = new PackageReference(
+                    "example.package",
+                    selection.Key),
+                TarballUri = new Uri(
+                    $"https://registry.example/{Uri.EscapeDataString(selection.Key)}.tgz"),
+            };
 
     private static PackageRecord CreateAliasPackageRecord(
         string name,

@@ -104,6 +104,8 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         _preReleasePart.Kind == PartKind.Wildcard ||
         _buildPart.Kind == PartKind.Wildcard;
 
+    internal bool HasThreePartCore => _patchPart.Kind != PartKind.Missing;
+
     /// <summary>
     /// Gets a value indicating whether the version or pattern contains a
     /// required pre-release part.

@@ -523,6 +523,48 @@ public class DependencyResolverTests
             It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Theory]
+    [InlineData("2.0", "2.0")]
+    [InlineData("2.*", "2.1")]
+    [InlineData("2.0?", "2.0.1")]
+    [InlineData("2.0.x-*", "2.0.1-ballot")]
+    public async Task ResolveAsync_DefinedWildcardDependency_UsesSharedMatcher(
+        string specifier,
+        string expectedVersion)
+    {
+        Dictionary<string, PackageListing> listings =
+            new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["example.dependency"] = CreateListing(
+                    CreateVersion("example.dependency", "2.0", Dependencies()),
+                    CreateVersion("example.dependency", "2.0.0", Dependencies()),
+                    CreateVersion("example.dependency", "2.0.1", Dependencies()),
+                    CreateVersion(
+                        "example.dependency",
+                        "2.0.1-ballot",
+                        Dependencies()),
+                    CreateVersion("example.dependency", "2.1", Dependencies())),
+            };
+        Mock<IRegistryClient> registry = CreateRegistry(listings);
+        VersionResolver versionResolver = new(
+            registry.Object,
+            NullLogger<VersionResolver>.Instance);
+        DependencyResolver resolver = new(
+            registry.Object,
+            versionResolver,
+            CreateCache().Object,
+            NullLogger.Instance);
+        PackageManifest root = CreateRoot(
+            Dependencies(("example.dependency", specifier)));
+
+        PackageClosure result = await resolver.ResolveAsync(
+            root,
+            new DependencyResolveOptions { AllowPreRelease = true },
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        result.Resolved["example.dependency"].Version.ShouldBe(expectedVersion);
+    }
+
     [Fact]
     public async Task ResolveAsync_NegativeMaxDepth_IsRejected()
     {
