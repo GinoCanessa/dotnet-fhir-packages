@@ -67,13 +67,17 @@ Known core types: `core`, `expansions`, `examples`, `search`, `corexml`, `elemen
 
 | Version Pattern | Type | Resolution Path |
 |----------------|------|-----------------|
-| `X.Y.Z` (exact) | Exact | Published |
-| `X.Y.Z-label` (pre-release) | Exact | Published |
-| `X.Y.x`, `X.*`, `*` | Wildcard | Published (with registry query) |
+| `X.Y`, `X.Y.Z` (exact) | Exact | Published |
+| `X.Y[-label]`, `X.Y.Z[-label]` | Exact | Published |
+| Part-wise `*`, numeric `x`/`X`, or trailing `?` | Wildcard | Published (with registry query) |
 | `latest`, _(empty)_ | Latest | Published |
 | `current` | CI Build | CI |
 | `current${branch}` | CI Build | CI (branch-specific) |
 | `dev` | Local Build | Cache only (fails if not present in local cache) |
+
+`X.Y` is an exact two-part version, not an implicit patch wildcard. Wildcards
+follow the part-count, label, build, and trailing-`?` rules in
+[Versioning](versioning.md#2-part-wise-wildcard-patterns).
 
 ## Step 3: Resolve — Published IG Packages
 
@@ -130,7 +134,9 @@ Response (abbreviated):
 4. **Select the version:**
    - **Exact:** Match against `versions` keys
    - **Latest:** Use `dist-tags.latest`
-   - **Wildcard:** Apply SemVer matching (e.g., `semver.maxSatisfying()`) against all version keys
+   - **Wildcard / range:** Filter the original listing entries with the shared
+     FHIR matcher, then select the highest eligible entry while preserving its
+     exact key and source
 
 ### Download
 

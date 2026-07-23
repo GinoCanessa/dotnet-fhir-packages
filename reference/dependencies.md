@@ -22,12 +22,15 @@ Each key is a package name and each value is a version specifier. The version sp
 
 | Format | Example | Meaning |
 |--------|---------|---------|
-| Exact | `"4.0.1"` | Exactly this version |
+| Exact | `"4.0"` or `"4.0.1"` | Exactly this two-part or three-part version |
 | Range | `"^3.0.1"` | SemVer-compatible range |
-| Wildcard | `"4.0.x"` | Latest patch in 4.0 |
+| Wildcard | `"4.0.x"`, `"4.x?"`, `"6.0.x-*"` | Highest version matching the defined part-wise pattern |
 | Latest | `"latest"` | Most recent published |
 | Current | `"current"` | CI build |
 | Alias | `"npm:hl7.fhir.us.core@4.1.0"` | Aliased package reference |
+
+Two-part versions are exact, and wildcard part counts, labels, builds, and
+trailing `?` follow the shared [versioning rules](versioning.md#2-part-wise-wildcard-patterns).
 
 ## Resolution Algorithm
 

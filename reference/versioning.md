@@ -4,16 +4,17 @@ FHIR packages use a versioning scheme based on [Semantic Versioning](https://sem
 
 ## Version Format
 
-The standard version format is:
+Concrete versions use two or three numeric parts:
 
 ```
-{major}.{minor}.{patch}[-{prerelease}][+{buildmetadata}]
+{major}.{minor}[.{patch}][-{prerelease}][+{buildmetadata}]
 ```
 
 **Examples:**
 
 ```
 4.0.1                # Release
+4.0                  # Exact two-part release
 6.0.0-ballot1        # Pre-release (ballot)
 1.0.0-snapshot2      # Pre-release (snapshot)
 5.0.0-cibuild        # CI build pre-release
@@ -26,35 +27,61 @@ Versions in the FHIR ecosystem fall into five categories, each with different re
 
 ### 1. Exact Versions
 
-Fully qualified version strings that require a precise match.
+Concrete two-part and three-part strings require a precise, shape-preserving
+match.
 
 ```
+4.0
 4.0.1
 6.0.0-ballot1
 1.0.0
 ```
 
+- `4.0` and `4.0.0` are different exact versions.
+- An omitted patch, pre-release, or build part requires that part to be absent.
+- Exact matching includes pre-release/build text even though build metadata is
+  ignored for precedence and concrete equality.
 - **Cache behavior:** Direct lookup by name + version
 - **Registry behavior:** Used to fetch a specific version
 
-### 2. Partial Versions (Wildcards)
+### 2. Part-wise Wildcard Patterns
 
-Versions with missing or wildcard components that resolve to the highest matching exact version.
+FHIR wildcard matching follows the component rules recorded in
+[FHIR-52895](https://jira.hl7.org/browse/FHIR-52895). Each major, minor, patch,
+pre-release, and build part is matched independently.
 
-| Pattern | Meaning | Example |
-|---------|---------|---------|
-| `X.Y.x` | Any patch in X.Y | `4.0.x` → `4.0.1` |
-| `X.x` | Any minor+patch in X | `4.x` → `4.3.0` |
-| `X.Y.*` | Same as `X.Y.x` | `4.0.*` → `4.0.1` |
-| `*` | Any version | `*` → latest |
-| `X.Y` | Treated as `X.Y.x` | `4.0` → `4.0.1` |
-
-**Valid wildcard characters:** `x`, `X`, `*`
+| Pattern | Matches | Does not match |
+|---------|---------|----------------|
+| `2.*` | Stable, build-free two-part versions such as `2.0`, `2.1` | `2.0.0`, `2.0-alpha` |
+| `2.x.x` | Stable, build-free three-part versions in major 2 | `2.0`, `2.0.0-alpha` |
+| `2.0.*` | Stable, build-free three-part versions in `2.0` | `2.0`, `2.0.0+build` |
+| `*.0`, `*.0.0`, `2.*.0` | Versions with the stated part count and literal parts | Shapes or literal parts that differ |
+| `2.0.0-*` | A `2.0.0` pre-release with no build label | `2.0.0`, `2.0.0-alpha+build` |
+| `2.0.0+*` | A stable `2.0.0` with a build label | `2.0.0`, `2.0.0-alpha+build` |
+| `2.0.x-*` | A three-part `2.0` pre-release with no build label | Stable or build-qualified versions |
+| `2.0?` | `2.0` plus any remaining parts | A different major/minor |
+| `2.0.1?` | `2.0.1` plus any pre-release/build remainder | A missing or different patch |
+| `2.x?` | Major 2 with any minor and any remainder | A different major |
+| `*` | Any concrete supported version, subject to pre-release policy | Wildcard pattern objects |
 
 **Rules:**
-- `x`, `X`, and `*` are interchangeable and appear only as the trailing segment; a wildcard segment matches that segment and every segment after it (e.g. `4.x` matches any minor and patch)
+
+- A missing pattern part requires the candidate part to be missing. A wildcard
+  part requires it to be present. A literal part must match exactly.
+- `*` may occupy any supported numeric, pre-release, or build part, including
+  non-trailing forms such as `*.0`, `*.0.0`, and `2.*.0`.
+- `x` and `X` alias `*` only in numeric minor and patch parts. They are literal
+  text in pre-release and build labels.
+- A trailing `?` attaches to the current complete part. Once that part matches,
+  every remaining part is ignored.
 - Wildcard literals **never** appear in the cache; they always resolve to exact versions
-- Registry must be consulted each time a wildcard is resolved (no cache shortcut)
+- Registry selection filters the original version entries directly, preserving
+  build-qualified keys and source priority before choosing the highest match.
+
+`FhirSemVer.MaxSatisfying` may consider pre-releases when a standalone pattern
+explicitly requires a pre-release (for example, `2.0.0-*`). Package resolution
+still applies `AllowPreRelease` first: when it is `false`, every pre-release
+candidate is excluded, including candidates for `-*` patterns.
 
 ### 3. Version Tags
 
@@ -82,8 +109,8 @@ The SDK supports this SemVer range grammar:
 
 | Pattern | Meaning | Example |
 |---------|---------|---------|
-| `X.Y.Z` | Exact version | `3.0.1` |
-| `X.Y.x`, `X.x`, `X.Y`, `*` | Wildcard version | `3.0.x` |
+| `X.Y`, `X.Y.Z` | Exact version | `3.0`, `3.0.1` |
+| Part-wise `*`, numeric `x`/`X`, or trailing `?` | Wildcard version | `3.0.x`, `3.x?`, `3.0.0-*` |
 | `^X.Y.Z` | Compatible with X.Y.Z | `^3.0.1` → `≥3.0.1, <4.0.0` |
 | `~X.Y.Z` | Approximately X.Y.Z | `~3.0.1` → `≥3.0.1, <3.1.0` |
 | `X.Y.Z - A.B.C` | Between (inclusive) | `3.0.1 - 3.0.3` |
@@ -93,9 +120,9 @@ The SDK supports this SemVer range grammar:
 
 Comparator operators may be adjacent to their version or separated from it by
 whitespace. Hyphen ranges require whitespace around the hyphen. Caret, tilde,
-hyphen, and comparator operands must be exact versions; wildcards are supported
-only as standalone alternatives. A pipe-separated alternative can use any one
-of the forms above.
+hyphen, and comparator operands must be concrete three-part versions; standalone
+two-part exact versions and wildcards are supported as alternatives. A
+pipe-separated alternative can use any one of the forms above.
 
 Caret ceilings follow the first non-zero component:
 
@@ -166,7 +193,7 @@ flowchart TD
     B -->|dev| Fd[Local cache only]
     B -->|Range: ^3.0.1| G[Query registry, apply<br/>SemVer range matching]
     B -->|None| E
-    D --> H[Apply semver.maxSatisfying<br/>to filter versions]
+    D --> H[Apply part-wise matching<br/>to original version entries]
     H --> I[Return highest match]
     G --> I
 ```

@@ -74,13 +74,17 @@ package name, version string, and optional NPM scope.
 
 | Version type | Example | Description |
 |--------------|---------|-------------|
-| `Exact` | `4.0.1` | Pinned semantic version |
+| `Exact` | `4.0`, `4.0.1` | Pinned two-part or three-part version |
 | `Latest` | `latest` or omitted | Highest published release |
-| `Wildcard` | `4.0.x`, `4.x`, `*` | Glob-style pattern |
+| `Wildcard` | `4.0.x`, `4.x?`, `6.0.x-*`, `*` | Defined part-wise FHIR pattern |
 | `Range` | `^4.0.0`, `~4.0.0`, `>=4.0.0` | NPM-style semver range |
 | `CiBuild` | `current` | Latest CI build from build.fhir.org |
 | `CiBuildBranch` | `current$main` | CI build for a specific branch |
 | `LocalBuild` | `dev` | Locally-built package |
+
+Two-part values such as `4.0` are exact. See the normative
+[wildcard grammar](../reference/versioning.md#2-part-wise-wildcard-patterns)
+for part-count, label/build, and trailing-`?` behavior.
 
 ### Package Fixups
 
@@ -206,11 +210,12 @@ The **`VersionResolver`** receives the `PackageDirective` and the merged
 1. **Exact** — returns the version verbatim if it exists in the listing.
 2. **Latest** — uses `dist-tags.latest` when that candidate is eligible,
    otherwise returns the highest eligible version.
-3. **Wildcard** — delegates to `FhirSemVer.MaxSatisfying`, which evaluates glob
-   patterns (`4.0.x`) against all published versions and returns the highest
-   match.
-4. **Range** — delegates to `FhirSemVer.SatisfyingRange`, then selects the
-   highest match from ranges such as `^4.0.0`, `~4.0.0`, and `>=4.0.0`.
+3. **Wildcard** — parses the pattern once, filters original source candidates
+   with `FhirSemVer.Satisfies`, and returns the highest match without losing
+   build-qualified keys or source priority.
+4. **Range** — filters the same original candidates with `FhirSemVerRange` and
+   selects the highest match from ranges such as `^4.0.0`, `~4.0.0`, and
+   `>=4.0.0`.
 5. **CI Build / CI Build Branch** — handled directly by the `FhirCiBuildClient`;
    the version resolver returns `null` and the CI client resolves the build.
 
@@ -230,13 +235,14 @@ conflicting copies is never spliced together.
 
 #### Supported Range Grammar
 
-The supported subset is exact versions; wildcards (`4.0.x`, `4.x`, `4.0`,
-`*`); caret and tilde ranges; inclusive hyphen ranges (`1.0.0 - 2.0.0`);
+The supported subset is standalone exact two-part/three-part versions; the
+defined [part-wise wildcard grammar](../reference/versioning.md#2-part-wise-wildcard-patterns);
+caret and tilde ranges; inclusive hyphen ranges (`1.0.0 - 2.0.0`);
 comparators (`<`, `<=`, `>`, `>=`, `=`); whitespace-separated comparator
 intersections (`>=1.0.0 <2.0.0`); and single-pipe alternatives
-(`^1.0.0|~2.3.0`). Comparator operators may be separated from their exact
-operand by whitespace. Caret, tilde, hyphen, and comparator operands must be
-exact versions.
+(`^1.0.0|~2.3.0`). Comparator operators may be separated from their operand by
+whitespace. Caret, tilde, hyphen, and comparator operands must be concrete
+three-part versions.
 
 Caret ceilings use the first non-zero component: `^1.2.3` is below `2.0.0`,
 `^0.2.3` is below `0.3.0`, and `^0.0.3` is below `0.0.4`. Hyphen bounds are

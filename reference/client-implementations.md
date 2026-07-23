@@ -188,10 +188,11 @@ IReadOnlyList<PackageRecord> cached = await manager.ListCachedAsync("hl7.fhir.r4
 
 ### Version Resolution
 
-Version selection happens inside `ResolveAsync`/`InstallAsync` using `FhirSemVer`
-(see [Versioning](versioning.md)). Exact versions, trailing wildcards (`4.0.x`),
-SemVer ranges (`^3.0.1`), alternation (`1.0.0 || 2.0.0`), and the keywords
-`latest`, `current`, and `dev` are all accepted.
+Version selection happens inside `ResolveAsync`/`InstallAsync` using
+`FhirSemVer` (see [Versioning](versioning.md)). Exact two-part/three-part
+versions, the defined part-wise wildcard grammar (`4.x?`, `6.0.x-*`,
+`2.*.0`), SemVer ranges (`^3.0.1`), pipe alternation, and the keywords
+`latest`, `current`, and `dev` are accepted.
 
 ### Pre-configured Registries
 
@@ -304,8 +305,10 @@ var customCache = new DiskCacheClient(
 ```csharp
 // Supported directive formats
 "hl7.fhir.r4.core#4.0.1"       → CoreFull, Exact
+"hl7.fhir.r4.core#4.0"         → CoreFull, Exact
 "hl7.fhir.r4"                   → CorePartial, Latest
-"hl7.fhir.uv.ig.r4@1.x.x"     → GuideWithSuffix, Wildcard
+"hl7.fhir.uv.ig.r4@1.x.x"      → GuideWithSuffix, Wildcard
+"hl7.fhir.uv.ig@6.0.x-*"       → GuideWithoutSuffix, Wildcard
 "hl7.fhir.uv.ig@current$main"  → GuideWithoutSuffix, CiBuild
 "hl7.fhir.us.core@latest"      → GuideWithoutSuffix, Latest
 ```
@@ -324,7 +327,7 @@ var v2 = FhirSemVer.Parse("1.0.0-ballot1");
 // v1 > v2 (release > pre-release)
 
 var v3 = FhirSemVer.Parse("1.0.*");
-v3.Satisfies(v1); // true — wildcard matches
+v1.Satisfies(v3); // true — concrete candidate matches the pattern
 ```
 
 ---
@@ -399,7 +402,7 @@ NpmPackage pkg = pf.pcm.loadPackage(packageId, version);
 | In-memory resource cache (LRU) | ✅ | ✅ | ❌ | ❌ |
 | CI build resolution | ✅ | ✅ | ✅ | ✅ |
 | Branch-specific CI | ✅ | ✅ | ✅ | ❌ |
-| Wildcard versions | ✅ (patch only) | ✅ (full SemVer) | ✅ (full) | ❌ |
+| Wildcard versions | ✅ (patch only) | ✅ (defined FHIR grammar) | ✅ (full) | ❌ |
 | Version ranges | ❌ | ✅ | ❌ | ❌ |
 | NPM alias support | ❌ | ✅ | ✅ | ❌ |
 | NPM scoped packages | ❌ | ✅ | ❌ | ❌ |

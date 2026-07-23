@@ -10,6 +10,11 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+### Fixed
+- Restored the defined FHIR/FHIRsmith wildcard grammar, including exact
+  two-part versions, part-specific numeric/label/build wildcards, and trailing
+  `?` remainder matching.
+
 ## [2026.722.1245]
 
 ### Fixed

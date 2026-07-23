@@ -64,9 +64,12 @@ version specifier:
 
 ```
 hl7.fhir.r4.core#4.0.1          # exact version
+hl7.fhir.us.core#6.1            # exact two-part version
 hl7.fhir.us.core#latest         # latest published
 hl7.fhir.us.core                # implicit latest
 hl7.fhir.us.core#6.1.x          # wildcard
+hl7.fhir.us.core#6.0.x-*        # prerelease-only wildcard
+hl7.fhir.us.core#4.x?           # match major/minor, ignore remainder
 hl7.fhir.us.core#^6.0.0         # range
 hl7.fhir.us.core#current        # latest CI build
 hl7.fhir.us.core#current$main   # CI build for a branch
@@ -85,6 +88,12 @@ hl7.fhir.us.core#current$main   # CI build for a branch
 | `--auth <value>` | — | `string` | — | Authorization header value for the custom registry (e.g., `"Bearer <token>"`). |
 | `--no-ci` | — | `bool` | `false` | Exclude the FHIR CI build registry from resolution. |
 | `--progress` | — | `bool` | `true` | Show a download progress indicator. |
+
+Two-part versions are exact. Wildcard part counts, prerelease/build labels,
+and trailing `?` follow the
+[versioning reference](../reference/versioning.md#2-part-wise-wildcard-patterns).
+`--no-pre-release` excludes every prerelease candidate, including candidates
+explicitly requested by a `-*` pattern.
 
 #### Examples
 
@@ -568,7 +577,10 @@ None (only global options apply).
 fhir-pkg resolve hl7.fhir.us.core#latest
 
 # Resolve a wildcard
-fhir-pkg resolve hl7.fhir.r4.core#4.0.x
+fhir-pkg resolve hl7.fhir.us.core#4.x?
+
+# Resolve a prerelease-only patch wildcard
+fhir-pkg resolve hl7.fhir.us.core#6.0.x-*
 
 # Resolve CI build
 fhir-pkg resolve hl7.fhir.us.core#current

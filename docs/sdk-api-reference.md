@@ -963,8 +963,8 @@ public record PublishResult
 
 ### FhirSemVer
 
-FHIR-aware semantic version with support for pre-release hierarchies, wildcards,
-and ranges.
+FHIR-aware semantic version with exact numeric precision, pre-release
+hierarchies, part-wise wildcard patterns, and range helpers.
 
 ```csharp
 public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
@@ -985,7 +985,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     public bool Satisfies(string versionSpecifier);
     public bool Satisfies(FhirSemVer other);
 
-    // Highest version in 'versions' that satisfies 'specifier' (static; null if none).
+    // Highest version satisfying one exact/wildcard specifier (not range syntax).
     public static FhirSemVer? MaxSatisfying(
         IEnumerable<FhirSemVer> versions, string specifier, bool includePreRelease = false);
 
@@ -1011,12 +1011,21 @@ Examples:
 
 | Format | Example | Type |
 |--------|---------|------|
-| Exact | `4.0.1`, `6.0.0-ballot1` | Exact |
-| Wildcard | `4.0.x`, `4.*`, `*` | Wildcard |
+| Exact | `4.0`, `4.0.1`, `6.0.0-ballot1` | Exact; two-part and three-part precision are distinct |
+| Numeric wildcard | `2.*`, `2.x.x`, `*.0.0`, `2.*.0` | Matches only the stated numeric parts and part count |
+| Label/build wildcard | `2.0.0-*`, `2.0.0+*`, `2.0.x-*` | Requires the wildcarded label/build part |
+| Trailing remainder | `2.0?`, `2.0.1?`, `2.x?` | Matches the current part, then ignores all remaining parts |
+| All versions | `*` | Any concrete supported version, subject to pre-release policy |
 | Range (caret) | `^4.0.0` | Range — compatible (≥4.0.0, <5.0.0) |
 | Range (tilde) | `~4.0.0` | Range — approximately (≥4.0.0, <4.1.0) |
 | Range (between) | `4.0.0 - 5.0.0` | Range — inclusive |
 | Range (or) | `4.0.1 \| 5.0.0` | Range — either |
+
+`*` may occupy any supported part. `x`/`X` alias numeric minor and patch
+wildcards only; they remain literal label text. Omitted parts must be absent
+unless a trailing `?` ignores them. See the
+[versioning reference](../reference/versioning.md#2-part-wise-wildcard-patterns)
+for the authoritative matching table and package-level prerelease policy.
 
 ---
 
@@ -1040,8 +1049,8 @@ Classifies how a version specifier should be resolved.
 
 | Value | Example | Description |
 |-------|---------|-------------|
-| `Exact` | `4.0.1` | Exact semantic version |
-| `Wildcard` | `4.0.x` | Pattern with wildcards |
+| `Exact` | `4.0`, `4.0.1` | Exact two-part or three-part version |
+| `Wildcard` | `4.0.x`, `4.x?`, `6.0.x-*` | Defined part-wise FHIR pattern |
 | `Latest` | `latest`, *(empty)* | Latest published version |
 | `Range` | `^4.0.0` | Semantic version range |
 | `CiBuild` | `current` | Latest CI build (default branch) |
@@ -1549,7 +1558,8 @@ redirect-controlled transport, even when no credentials are configured.
 ### IVersionResolver
 
 Resolves version specifiers (wildcards, ranges, `latest`) to exact versions by
-querying registries.
+querying registries and filtering original candidate entries with the shared
+FHIR matcher.
 
 ```csharp
 public interface IVersionResolver
