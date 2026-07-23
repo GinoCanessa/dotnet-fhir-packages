@@ -10,6 +10,13 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+## [2026.722.1245]
+
+### Fixed
+- Regression causing CLI NuGet package not to be published during deployment.
+
+## [2026.722.1030]
+
 ### Added
 - Hardened, caller-owned package install contract: install from caller-owned
   streams or absolute HTTP/HTTPS URIs with bounded acquisition/extraction
@@ -31,6 +38,8 @@ qualification evidence) lives alongside this file under
 ### Fixed
 - Propagate installation failures and recompute the active resolution graph.
 - Make cache-cleanup selection safe.
+- Pack, qualify, publish, and independently verify `fhir-pkg-lib` and
+  `fhir-pkg-cli` as one synchronized release candidate.
 
 ## [2026.622.1701] - 2026-06-22
 

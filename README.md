@@ -7,11 +7,10 @@ managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
 
 ## Packages
 
-| Package | Description | Status | 
+| Package | Description | Status |
 |---------|-------------|--------|
-| **fhir-pkg-lib** | SDK library - add to your .NET projects | [![Publish dotnet library](https://img.shields.io/nuget/v/fhir-pkg-lib.svg)](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml) |
-| **fhir-pkg-cli** | CLI tool - installs the `fhir-pkg` command | [![Publish dotnet library](https://img.shields.io/nuget/v/fhir-pkg-cli.svg)](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml) |
-
+| **fhir-pkg-lib** | SDK library - add to your .NET projects | [![NuGet fhir-pkg-lib](https://img.shields.io/nuget/v/fhir-pkg-lib.svg)](https://www.nuget.org/packages/fhir-pkg-lib) / [Synchronized release workflow](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml) |
+| **fhir-pkg-cli** | CLI tool - installs the `fhir-pkg` command | [![NuGet fhir-pkg-cli](https://img.shields.io/nuget/v/fhir-pkg-cli.svg)](https://www.nuget.org/packages/fhir-pkg-cli) / [Synchronized release workflow](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/workflows/nuget-generator.yaml) |
 
 
 ## Features

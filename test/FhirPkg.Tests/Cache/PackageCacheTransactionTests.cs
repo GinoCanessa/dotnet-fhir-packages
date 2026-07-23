@@ -725,6 +725,164 @@ public sealed class PackageCacheTransactionTests : IDisposable
     }
 
     [Fact]
+    public async Task WindowsFileReplace_RetriesTransientErrorsAsynchronously()
+    {
+        TaskCompletionSource delayStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseDelay =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int attempts = 0;
+        int delayCalls = 0;
+
+        Task replaceTask = PackageCacheNativeFileSystem
+            .ReplaceWindowsFileDurablyAsync(
+                "source",
+                "destination",
+                (string sourcePath, string destinationPath, uint flags) =>
+                {
+                    sourcePath.ShouldBe("source");
+                    destinationPath.ShouldBe("destination");
+                    flags.ShouldBe(0x00000009u);
+                    attempts++;
+                    return attempts == 2;
+                },
+                () => 32,
+                async (
+                    TimeSpan delay,
+                    CancellationToken cancellationToken) =>
+                {
+                    delayCalls++;
+                    delay.ShouldBe(TimeSpan.FromMilliseconds(10));
+                    delayStarted.TrySetResult();
+                    await releaseDelay.Task.WaitAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                },
+                CancellationToken.None)
+            .AsTask();
+
+        await delayStarted.Task.WaitAsync(
+            TestContext.Current.CancellationToken);
+        attempts.ShouldBe(1);
+        delayCalls.ShouldBe(1);
+        replaceTask.IsCompleted.ShouldBeFalse();
+
+        releaseDelay.TrySetResult();
+        await replaceTask;
+        attempts.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task WindowsFileReplace_NonTransientErrorFailsImmediately()
+    {
+        int attempts = 0;
+        int delayCalls = 0;
+
+        IOException exception = await Should.ThrowAsync<IOException>(
+            () => PackageCacheNativeFileSystem
+                .ReplaceWindowsFileDurablyAsync(
+                    "source",
+                    "destination",
+                    (string sourcePath, string destinationPath, uint flags) =>
+                    {
+                        sourcePath.ShouldBe("source");
+                        destinationPath.ShouldBe("destination");
+                        flags.ShouldBe(0x00000009u);
+                        attempts++;
+                        return false;
+                    },
+                    () => 87,
+                    (TimeSpan delay, CancellationToken cancellationToken) =>
+                    {
+                        delayCalls++;
+                        return ValueTask.CompletedTask;
+                    },
+                    CancellationToken.None)
+                .AsTask());
+
+        attempts.ShouldBe(1);
+        delayCalls.ShouldBe(0);
+        Win32Exception nativeException =
+            exception.InnerException.ShouldBeOfType<Win32Exception>();
+        nativeException.NativeErrorCode.ShouldBe(87);
+    }
+
+    [Fact]
+    public async Task WindowsFileReplace_ExhaustionReportsLastNativeError()
+    {
+        int attempts = 0;
+        int delayCalls = 0;
+
+        IOException exception = await Should.ThrowAsync<IOException>(
+            () => PackageCacheNativeFileSystem
+                .ReplaceWindowsFileDurablyAsync(
+                    "source",
+                    "destination",
+                    (string sourcePath, string destinationPath, uint flags) =>
+                    {
+                        sourcePath.ShouldBe("source");
+                        destinationPath.ShouldBe("destination");
+                        flags.ShouldBe(0x00000009u);
+                        attempts++;
+                        return false;
+                    },
+                    () => attempts == 20 ? 33 : 5,
+                    (TimeSpan delay, CancellationToken cancellationToken) =>
+                    {
+                        delayCalls++;
+                        delay.ShouldBe(TimeSpan.FromMilliseconds(10));
+                        return ValueTask.CompletedTask;
+                    },
+                    CancellationToken.None)
+                .AsTask());
+
+        attempts.ShouldBe(20);
+        delayCalls.ShouldBe(19);
+        Win32Exception nativeException =
+            exception.InnerException.ShouldBeOfType<Win32Exception>();
+        nativeException.NativeErrorCode.ShouldBe(33);
+    }
+
+    [Fact]
+    public async Task WindowsFileReplace_CancellationStopsBeforeCommit()
+    {
+        using CancellationTokenSource source = new();
+        source.Cancel();
+        int attempts = 0;
+        int delayCalls = 0;
+
+        await Should.ThrowAsync<OperationCanceledException>(
+            () => PackageCacheNativeFileSystem
+                .ReplaceWindowsFileDurablyAsync(
+                    "source",
+                    "destination",
+                    (string sourcePath, string destinationPath, uint flags) =>
+                    {
+                        sourcePath.ShouldBe("source");
+                        destinationPath.ShouldBe("destination");
+                        flags.ShouldBe(0x00000009u);
+                        attempts++;
+                        return false;
+                    },
+                    () => 32,
+                    (TimeSpan delay, CancellationToken cancellationToken) =>
+                    {
+                        delayCalls++;
+                        delay.ShouldBe(TimeSpan.FromMilliseconds(10));
+                        cancellationToken.IsCancellationRequested
+                            .ShouldBeTrue();
+                        return new ValueTask(
+                            Task.Delay(
+                                delay,
+                                cancellationToken));
+                    },
+                    source.Token)
+                .AsTask());
+
+        attempts.ShouldBe(1);
+        delayCalls.ShouldBe(1);
+    }
+
+    [Fact]
     public async Task JournalRead_WindowsSharingViolationIsRetried()
     {
         if (!OperatingSystem.IsWindows())
@@ -1589,12 +1747,17 @@ public sealed class PackageCacheTransactionTests : IDisposable
                 .ConfigureAwait(false);
         }
 
-        public void AtomicReplaceFile(
+        public async ValueTask AtomicReplaceFileAsync(
             string sourcePath,
-            string destinationPath)
+            string destinationPath,
+            CancellationToken cancellationToken)
         {
             Before("AtomicReplaceFile");
-            _inner.AtomicReplaceFile(sourcePath, destinationPath);
+            await _inner.AtomicReplaceFileAsync(
+                    sourcePath,
+                    destinationPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
         public void SynchronizeDirectory(string directoryPath)
