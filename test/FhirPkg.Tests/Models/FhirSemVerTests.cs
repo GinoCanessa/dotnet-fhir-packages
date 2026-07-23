@@ -751,6 +751,27 @@ public class FhirSemVerTests
     [InlineData("^2.0.0", "1.0.0", false, false)]
     [InlineData("^2.0.0", "3.0.0", false, true)]
     [InlineData("2.x.x", "3.0.0", false, true)]
+    [InlineData("2.0", "2.0", false, true)]
+    [InlineData("2.0", "1.9.9", false, false)]
+    [InlineData("2.*", "2.0", false, true)]
+    [InlineData("2.*", "1.9.9", false, false)]
+    [InlineData("2.x.x", "2.0", false, false)]
+    [InlineData("2.x.x", "2.0.0", false, true)]
+    [InlineData("2.0?", "2.0", false, true)]
+    [InlineData("2.0?", "1.9.9", false, false)]
+    [InlineData("2.0.1?", "2.0.1--", true, true)]
+    [InlineData("2.0.1?", "2.0.1-alpha", false, false)]
+    [InlineData("2.0.1?", "2.0.1", false, true)]
+    [InlineData("2.0.0-*", "2.0.0", true, true)]
+    [InlineData("2.0.0-*", "2.0.0", false, false)]
+    [InlineData("2.0.0-*", "1.9.9", true, false)]
+    [InlineData("2.0.x-*", "2.0.0-alpha", true, true)]
+    [InlineData("2.0.x-*", "2.0", true, false)]
+    [InlineData("2.0.0+*", "2.0.0", false, true)]
+    [InlineData("2.0.0+*", "1.9.9", false, false)]
+    [InlineData("*.0", "0.0", false, true)]
+    [InlineData("2.*.0", "2.0", false, false)]
+    [InlineData("2.*.0", "2.0.0", false, true)]
     [InlineData(
         ">1.0.0-alpha <1.0.0-rc",
         "2.0.0",
@@ -771,6 +792,52 @@ public class FhirSemVerTests
                 allowPreRelease);
 
         actual.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Range_HasSatisfyingVersionAtOrBelow_MatchesEnumeratedOracle()
+    {
+        string[] patterns =
+        [
+            "*",
+            "2.0",
+            "2.*",
+            "2.x.x",
+            "2.0.*",
+            "2.0.0-*",
+            "2.0.x-*",
+            "2.0.0+*",
+            "2.0?",
+            "2.0.1?",
+            "2.x?",
+            "*.0",
+            "*.0.0",
+            "2.*.0",
+        ];
+        IReadOnlyList<FhirSemVer> universe =
+            CreateCompatibilityOracleUniverse();
+
+        foreach (string pattern in patterns)
+        {
+            FhirSemVerRange range = FhirSemVerRange.Parse(pattern);
+            foreach (bool allowPreRelease in new[] { false, true })
+            {
+                foreach (FhirSemVer ceiling in universe)
+                {
+                    bool expected = universe.Any(candidate =>
+                        candidate <= ceiling &&
+                        (allowPreRelease || !candidate.IsPreRelease) &&
+                        range.IsSatisfiedBy(candidate));
+
+                    range.HasSatisfyingVersionAtOrBelow(
+                            ceiling,
+                            allowPreRelease)
+                        .ShouldBe(
+                            expected,
+                            $"{pattern} at or below {ceiling}, prerelease={allowPreRelease}");
+                }
+            }
+        }
     }
 
     [Fact]
@@ -795,5 +862,36 @@ public class FhirSemVerTests
         FhirSemVer version = FhirSemVer.Parse("*");
 
         version.ToString().ShouldBe("*");
+    }
+
+    private static IReadOnlyList<FhirSemVer>
+        CreateCompatibilityOracleUniverse()
+    {
+        List<FhirSemVer> versions = [];
+        for (int major = 0; major <= 3; major++)
+        {
+            for (int minor = 0; minor <= 2; minor++)
+            {
+                string twoPart = $"{major}.{minor}";
+                versions.Add(FhirSemVer.Parse(twoPart));
+                versions.Add(FhirSemVer.Parse($"{twoPart}-alpha"));
+                versions.Add(FhirSemVer.Parse($"{twoPart}+build"));
+                versions.Add(FhirSemVer.Parse($"{twoPart}-alpha+build"));
+
+                for (int patch = 0; patch <= 2; patch++)
+                {
+                    string threePart = $"{twoPart}.{patch}";
+                    versions.Add(FhirSemVer.Parse(threePart));
+                    versions.Add(FhirSemVer.Parse($"{threePart}--"));
+                    versions.Add(FhirSemVer.Parse($"{threePart}-alpha"));
+                    versions.Add(FhirSemVer.Parse($"{threePart}+-"));
+                    versions.Add(FhirSemVer.Parse($"{threePart}+build"));
+                    versions.Add(FhirSemVer.Parse(
+                        $"{threePart}-alpha+build"));
+                }
+            }
+        }
+
+        return versions;
     }
 }

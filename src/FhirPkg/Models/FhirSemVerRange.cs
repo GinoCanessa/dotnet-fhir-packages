@@ -349,11 +349,8 @@ internal sealed class FhirSemVerRange
 
     private static void AddCandidate(
         List<FhirSemVer> candidates,
-        FhirSemVer candidate)
-    {
-        if (!candidates.Contains(candidate))
-            candidates.Add(candidate);
-    }
+        FhirSemVer candidate) =>
+        candidates.Add(candidate);
 
     private static void AddNumericCandidates(
         List<FhirSemVer> candidates,
@@ -523,6 +520,16 @@ internal sealed class FhirSemVerRange
             foreach (Constraint constraint in _constraints)
             {
                 FhirSemVer operand = constraint.Operand;
+                if (constraint.Operator == ConstraintOperator.Wildcard)
+                {
+                    foreach (FhirSemVer candidate
+                             in operand.GetCompatibilityBoundaryCandidates(
+                                 allowPreRelease))
+                    {
+                        AddCandidate(candidates, candidate);
+                    }
+                }
+
                 if (!operand.IsWildcard
                     && (allowPreRelease
                         || !operand.IsPreRelease))

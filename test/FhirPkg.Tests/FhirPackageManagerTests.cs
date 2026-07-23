@@ -3557,6 +3557,103 @@ public class FhirPackageManagerTests
     }
 
     [Theory]
+    [InlineData("2.0", "2.0", true, ConflictResolutionStrategy.HighestWins, true)]
+    [InlineData("2.*", "2.1", true, ConflictResolutionStrategy.HighestWins, true)]
+    [InlineData("2.0?", "2.0.1", true, ConflictResolutionStrategy.HighestWins, true)]
+    [InlineData("2.0.0-*", "2.0.0-alpha", true, ConflictResolutionStrategy.HighestWins, true)]
+    [InlineData("2.0.0-*", "2.0.0", true, ConflictResolutionStrategy.HighestWins, true)]
+    [InlineData("2.0.0-*", "2.0.0", false, ConflictResolutionStrategy.HighestWins, false)]
+    [InlineData("2.0", "2.0.0", true, ConflictResolutionStrategy.HighestWins, true)]
+    [InlineData("2.0", "2.0.0", true, ConflictResolutionStrategy.FirstWins, false)]
+    [InlineData("2.*", "2.0.0", true, ConflictResolutionStrategy.HighestWins, true)]
+    [InlineData("2.*", "2.0.0", true, ConflictResolutionStrategy.FirstWins, false)]
+    [InlineData("2.x.x", "2.0", true, ConflictResolutionStrategy.HighestWins, false)]
+    [InlineData("2.0.0+*", "2.0.0+build", true, ConflictResolutionStrategy.FirstWins, true)]
+    [InlineData("2.0.0+*", "2.0.0", true, ConflictResolutionStrategy.FirstWins, false)]
+    [InlineData("2.0.0+*", "2.0.0", true, ConflictResolutionStrategy.HighestWins, true)]
+    [InlineData("2.0.x-*", "1.9.9", true, ConflictResolutionStrategy.HighestWins, false)]
+    public async Task RestoreAsync_DefinedWildcardLockCompatibility_FollowsPolicy(
+        string specifier,
+        string lockedVersion,
+        bool allowPreRelease,
+        ConflictResolutionStrategy conflictStrategy,
+        bool shouldUseLock)
+    {
+        string projectPath = Path.Combine(
+            Path.GetTempPath(),
+            $"fhirpkg-restore-wildcard-lock-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectPath);
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(projectPath, "package.json"),
+                $$"""
+                {
+                  "name": "root.package",
+                  "version": "1.0.0",
+                  "dependencies": {
+                    "example.package": "{{specifier}}"
+                  }
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            await CreateSchemaV2Lock(
+                    roots: [$"example.package#{specifier}"],
+                    dependencies:
+                        new Dictionary<string, string>
+                        {
+                            ["example.package"] = lockedVersion,
+                        },
+                    conflictStrategy: conflictStrategy,
+                    allowPreRelease: allowPreRelease)
+                .SaveAsync(
+                    Path.Combine(projectPath, "fhirpkg.lock.json"),
+                    TestContext.Current.CancellationToken);
+            PackageClosure closure = CreateEmptyClosure();
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.RestoreFromLockFileAsync(
+                        It.IsAny<PackageLockFile>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            _dependencyResolverMock.Setup(
+                    resolver => resolver.ResolveAsync(
+                        It.IsAny<PackageManifest>(),
+                        It.IsAny<DependencyResolveOptions?>(),
+                        It.IsAny<CancellationToken>()))
+                .ReturnsAsync(closure);
+            using FhirPackageManager manager = CreateManager();
+
+            await manager.RestoreAsync(
+                projectPath,
+                new RestoreOptions
+                {
+                    AllowPreRelease = allowPreRelease,
+                    ConflictStrategy = conflictStrategy,
+                    WriteLockFile = false,
+                },
+                TestContext.Current.CancellationToken);
+
+            _dependencyResolverMock.Verify(
+                resolver => resolver.RestoreFromLockFileAsync(
+                    It.IsAny<PackageLockFile>(),
+                    It.IsAny<CancellationToken>()),
+                shouldUseLock ? Times.Once() : Times.Never());
+            _dependencyResolverMock.Verify(
+                resolver => resolver.ResolveAsync(
+                    It.IsAny<PackageManifest>(),
+                    It.IsAny<DependencyResolveOptions?>(),
+                    It.IsAny<CancellationToken>()),
+                shouldUseLock ? Times.Never() : Times.Once());
+        }
+        finally
+        {
+            if (Directory.Exists(projectPath))
+                Directory.Delete(projectPath, recursive: true);
+        }
+    }
+
+    [Theory]
     [InlineData(
         ConflictResolutionStrategy.FirstWins,
         true)]

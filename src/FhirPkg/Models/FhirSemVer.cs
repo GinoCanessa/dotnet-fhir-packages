@@ -147,6 +147,67 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
             RemainderBoundary.None,
             false);
 
+    internal IReadOnlyList<FhirSemVer> GetCompatibilityBoundaryCandidates(
+        bool allowPreRelease)
+    {
+        if (_isAllWildcard)
+        {
+            return
+            [
+                new FhirSemVer(
+                    NumericPart.Literal(0),
+                    NumericPart.Literal(0),
+                    NumericPart.Missing,
+                    allowPreRelease
+                        ? LabelPart.Literal("-")
+                        : LabelPart.Missing,
+                    LabelPart.Missing,
+                    RemainderBoundary.None,
+                    false)
+            ];
+        }
+
+        if (!allowPreRelease && IsPreRelease)
+            return [];
+        if (!IsWildcard)
+            return [this];
+
+        NumericPart majorPart = CreateBoundaryPart(_majorPart);
+        NumericPart minorPart = CreateBoundaryPart(_minorPart);
+        NumericPart patchPart = CreateBoundaryPart(_patchPart);
+        LabelPart preReleasePart = CreateBoundaryPart(_preReleasePart);
+        LabelPart buildPart = CreateBoundaryPart(_buildPart);
+
+        if (_remainderBoundary is
+                RemainderBoundary.Minor or RemainderBoundary.Patch &&
+            preReleasePart.Kind == PartKind.Missing &&
+            allowPreRelease)
+        {
+            preReleasePart = LabelPart.Literal("-");
+        }
+
+        FhirSemVer candidate = new(
+            majorPart,
+            minorPart,
+            patchPart,
+            preReleasePart,
+            buildPart,
+            RemainderBoundary.None,
+            false);
+        return candidate.Satisfies(this) ? [candidate] : [];
+    }
+
+    private static NumericPart CreateBoundaryPart(NumericPart part) =>
+        part.Kind == PartKind.Wildcard
+            ? NumericPart.Literal(0)
+            : part;
+
+    private static LabelPart CreateBoundaryPart(LabelPart part) =>
+        part.Kind == PartKind.Wildcard
+            // "-" is the lowest valid identifier under the existing ordering.
+            ? LabelPart.Literal("-")
+            : part;
+
     /// <summary>
     /// Parses a concrete two-part or three-part version, or one standalone
     /// wildcard pattern.
