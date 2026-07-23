@@ -3,137 +3,159 @@
 
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Text;
 
 namespace FhirPkg.Models;
 
 /// <summary>
-/// Represents a FHIR-aware semantic version with support for pre-release tags,
-/// wildcard matching, and range evaluation following SemVer 2.0 rules with
-/// FHIR-specific extensions for pre-release ordering.
+/// Represents a FHIR-aware semantic version or standalone wildcard pattern.
 /// </summary>
 /// <remarks>
 /// <para>
-/// This class supports parsing, comparing, and matching FHIR package versions.
-/// It follows the SemVer 2.0.0 specification with additional FHIR-specific rules
-/// for pre-release tag classification and ordering.
+/// Concrete versions preserve two-part versus three-part precision. Wildcard
+/// matching is component-aware: <c>*</c> can target any supported part,
+/// <c>x</c>/<c>X</c> alias numeric minor and patch wildcards, and a trailing
+/// <c>?</c> matches its current part and ignores all remaining parts.
 /// </para>
 /// <para>
 /// FHIR pre-release ordering (highest to lowest):
 /// Release &gt; Ballot &gt; Draft &gt; Snapshot &gt; CiBuild &gt; Other.
-/// </para>
-/// <para>
-/// Supported version formats:
-/// <list type="bullet">
-///   <item><description>Standard: <c>"4.0.1"</c></description></item>
-///   <item><description>Pre-release: <c>"6.0.0-ballot1"</c></description></item>
-///   <item><description>Build metadata: <c>"1.2.3+20240115"</c> (ignored in comparison)</description></item>
-///   <item><description>Wildcard patch: <c>"4.0.x"</c>, <c>"4.0.*"</c>, <c>"4.0.X"</c></description></item>
-///   <item><description>Wildcard minor: <c>"4.x"</c>, <c>"4.*"</c>, <c>"4.X"</c></description></item>
-///   <item><description>Wildcard all: <c>"*"</c></description></item>
-///   <item><description>Two-segment (treated as wildcard): <c>"4.0"</c> → <c>"4.0.x"</c></description></item>
-/// </list>
+/// Build metadata is ignored for concrete precedence and equality.
 /// </para>
 /// </remarks>
 public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
 {
-    /// <summary>Specifies the level at which a version acts as a wildcard pattern.</summary>
-    private enum WildcardLevel
+    private enum PartKind
     {
-        /// <summary>Not a wildcard; all components are specified.</summary>
-        None = 0,
-
-        /// <summary>Patch is wildcarded (e.g., "4.0.x").</summary>
-        Patch = 1,
-
-        /// <summary>Minor and patch are wildcarded (e.g., "4.x").</summary>
-        Minor = 2,
-
-        /// <summary>All components are wildcarded (e.g., "*").</summary>
-        All = 3,
+        Missing = 0,
+        Literal = 1,
+        Wildcard = 2,
     }
 
-    private readonly WildcardLevel _wildcardLevel;
+    private enum RemainderBoundary
+    {
+        None = 0,
+        Major = 1,
+        Minor = 2,
+        Patch = 3,
+        PreRelease = 4,
+        Build = 5,
+    }
 
-    // ────────────────────────────────────────────────────────────────────
-    //  Properties
-    // ────────────────────────────────────────────────────────────────────
+    private readonly record struct NumericPart(PartKind Kind, int Value)
+    {
+        public static NumericPart Missing => new(PartKind.Missing, 0);
 
-    /// <summary>Gets the major version component.</summary>
-    public int Major { get; }
+        public static NumericPart Literal(int value) => new(PartKind.Literal, value);
 
-    /// <summary>Gets the minor version component.</summary>
-    public int Minor { get; }
+        public static NumericPart Wildcard => new(PartKind.Wildcard, 0);
+    }
 
-    /// <summary>Gets the patch version component.</summary>
-    public int Patch { get; }
+    private readonly record struct LabelPart(PartKind Kind, string? Value)
+    {
+        public static LabelPart Missing => new(PartKind.Missing, null);
+
+        public static LabelPart Literal(string value) => new(PartKind.Literal, value);
+
+        public static LabelPart Wildcard => new(PartKind.Wildcard, "*");
+    }
+
+    private readonly NumericPart _majorPart;
+    private readonly NumericPart _minorPart;
+    private readonly NumericPart _patchPart;
+    private readonly LabelPart _preReleasePart;
+    private readonly LabelPart _buildPart;
+    private readonly RemainderBoundary _remainderBoundary;
+    private readonly bool _isAllWildcard;
+
+    /// <summary>Gets the major version component, or zero when it is wildcarded.</summary>
+    public int Major => _majorPart.Value;
+
+    /// <summary>Gets the minor version component, or zero when it is wildcarded.</summary>
+    public int Minor => _minorPart.Value;
 
     /// <summary>
-    /// Gets the pre-release tag (e.g., <c>"ballot1"</c>), or <c>null</c> for a release version.
+    /// Gets the patch version component, or zero when it is missing or wildcarded.
     /// </summary>
-    public string? PreRelease { get; }
+    public int Patch => _patchPart.Value;
 
     /// <summary>
-    /// Gets the build metadata (e.g., <c>"20240115"</c>), or <c>null</c> if not specified.
-    /// Build metadata is always ignored during comparison and equality checks.
+    /// Gets the pre-release tag, <c>*</c> for a pre-release wildcard, or
+    /// <c>null</c> when the part is absent.
     /// </summary>
-    public string? BuildMetadata { get; }
+    public string? PreRelease => _preReleasePart.Value;
 
     /// <summary>
-    /// Gets a value indicating whether this version contains a wildcard component
-    /// and therefore represents a matching pattern rather than a concrete version.
+    /// Gets the build metadata, <c>*</c> for a build wildcard, or <c>null</c>
+    /// when the part is absent.
     /// </summary>
-    public bool IsWildcard => _wildcardLevel != WildcardLevel.None;
-
-    /// <summary>Gets a value indicating whether this is a pre-release version.</summary>
-    public bool IsPreRelease => PreRelease is not null;
+    public string? BuildMetadata => _buildPart.Value;
 
     /// <summary>
-    /// Gets the classified FHIR pre-release type derived from the <see cref="PreRelease"/> tag.
-    /// Returns <see cref="FhirPreReleaseType.Release"/> when <see cref="PreRelease"/> is <c>null</c>.
+    /// Gets a value indicating whether this instance is a matching pattern
+    /// rather than a concrete version.
+    /// </summary>
+    public bool IsWildcard =>
+        _isAllWildcard ||
+        _remainderBoundary != RemainderBoundary.None ||
+        _majorPart.Kind == PartKind.Wildcard ||
+        _minorPart.Kind == PartKind.Wildcard ||
+        _patchPart.Kind == PartKind.Wildcard ||
+        _preReleasePart.Kind == PartKind.Wildcard ||
+        _buildPart.Kind == PartKind.Wildcard;
+
+    /// <summary>
+    /// Gets a value indicating whether the version or pattern contains a
+    /// required pre-release part.
+    /// </summary>
+    public bool IsPreRelease => _preReleasePart.Kind != PartKind.Missing;
+
+    /// <summary>
+    /// Gets the classified FHIR pre-release type derived from
+    /// <see cref="PreRelease"/>.
     /// </summary>
     public FhirPreReleaseType PreReleaseType { get; }
 
-    // ────────────────────────────────────────────────────────────────────
-    //  Constructor
-    // ────────────────────────────────────────────────────────────────────
-
     private FhirSemVer(
-        int major,
-        int minor,
-        int patch,
-        string? preRelease,
-        string? buildMetadata,
-        WildcardLevel wildcardLevel)
+        NumericPart majorPart,
+        NumericPart minorPart,
+        NumericPart patchPart,
+        LabelPart preReleasePart,
+        LabelPart buildPart,
+        RemainderBoundary remainderBoundary,
+        bool isAllWildcard)
     {
-        Major = major;
-        Minor = minor;
-        Patch = patch;
-        PreRelease = preRelease;
-        BuildMetadata = buildMetadata;
-        _wildcardLevel = wildcardLevel;
-        PreReleaseType = ClassifyPreRelease(preRelease);
+        _majorPart = majorPart;
+        _minorPart = minorPart;
+        _patchPart = patchPart;
+        _preReleasePart = preReleasePart;
+        _buildPart = buildPart;
+        _remainderBoundary = remainderBoundary;
+        _isAllWildcard = isAllWildcard;
+        PreReleaseType = ClassifyPreRelease(PreRelease);
     }
 
     internal static FhirSemVer CreateExact(int major, int minor, int patch) =>
-        new(major, minor, patch, null, null, WildcardLevel.None);
-
-    // ────────────────────────────────────────────────────────────────────
-    //  Parsing
-    // ────────────────────────────────────────────────────────────────────
+        new(
+            NumericPart.Literal(major),
+            NumericPart.Literal(minor),
+            NumericPart.Literal(patch),
+            LabelPart.Missing,
+            LabelPart.Missing,
+            RemainderBoundary.None,
+            false);
 
     /// <summary>
-    /// Parses a version string into a <see cref="FhirSemVer"/> instance.
+    /// Parses a concrete two-part or three-part version, or one standalone
+    /// wildcard pattern.
     /// </summary>
-    /// <param name="versionString">
-    /// A version string such as <c>"4.0.1"</c>, <c>"6.0.0-ballot1"</c>,
-    /// <c>"4.0.x"</c>, or <c>"*"</c>.
-    /// </param>
-    /// <returns>A parsed <see cref="FhirSemVer"/> instance.</returns>
+    /// <param name="versionString">The version expression to parse.</param>
+    /// <returns>The parsed version or pattern.</returns>
     /// <exception cref="ArgumentException">
-    /// <paramref name="versionString"/> is <c>null</c>, empty, or whitespace.
+    /// <paramref name="versionString"/> is null, empty, or whitespace.
     /// </exception>
     /// <exception cref="FormatException">
-    /// <paramref name="versionString"/> is not a valid version format.
+    /// <paramref name="versionString"/> is not a supported expression.
     /// </exception>
     public static FhirSemVer Parse(string versionString)
     {
@@ -146,14 +168,9 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     }
 
     /// <summary>
-    /// Attempts to parse a version string into a <see cref="FhirSemVer"/> instance.
+    /// Attempts to parse a concrete two-part or three-part version, or one
+    /// standalone wildcard pattern.
     /// </summary>
-    /// <param name="versionString">The version string to parse, or <c>null</c>.</param>
-    /// <param name="result">
-    /// When this method returns <c>true</c>, contains the parsed version;
-    /// otherwise, <c>null</c>.
-    /// </param>
-    /// <returns><c>true</c> if parsing succeeded; otherwise, <c>false</c>.</returns>
     public static bool TryParse(
         [NotNullWhen(true)] string? versionString,
         [NotNullWhen(true)] out FhirSemVer? result)
@@ -163,107 +180,141 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         if (string.IsNullOrWhiteSpace(versionString))
             return false;
 
-        ReadOnlySpan<char> input = versionString.AsSpan().Trim();
-
-        // Pure wildcard: "*", "x", "X"
-        if (input is "*" or "x" or "X")
+        string input = versionString.Trim();
+        bool hasRemainderBoundary = input.EndsWith('?');
+        if (hasRemainderBoundary)
         {
-            result = new FhirSemVer(0, 0, 0, null, null, WildcardLevel.All);
+            input = input[..^1];
+            if (input.Length == 0 || input.Contains('?'))
+                return false;
+        }
+        else if (input.Contains('?'))
+        {
+            return false;
+        }
+
+        if (input == "*")
+        {
+            if (hasRemainderBoundary)
+                return false;
+
+            result = new FhirSemVer(
+                NumericPart.Missing,
+                NumericPart.Missing,
+                NumericPart.Missing,
+                LabelPart.Missing,
+                LabelPart.Missing,
+                RemainderBoundary.None,
+                true);
             return true;
         }
 
-        // Separate build metadata (everything after the first '+')
-        string? buildMetadata = null;
+        LabelPart buildPart = LabelPart.Missing;
         int plusIndex = input.IndexOf('+');
         if (plusIndex >= 0)
         {
-            ReadOnlySpan<char> bm = input[(plusIndex + 1)..];
-            if (bm.Length == 0 || !IsValidIdentifier(bm))
+            if (input.IndexOf('+', plusIndex + 1) >= 0)
                 return false;
-            buildMetadata = new string(bm);
+
+            string build = input[(plusIndex + 1)..];
+            if (!TryParseLabelPart(build, out buildPart))
+                return false;
+
             input = input[..plusIndex];
         }
 
-        // Separate pre-release (everything after the first '-' in the remaining string)
-        string? preRelease = null;
+        LabelPart preReleasePart = LabelPart.Missing;
         int dashIndex = input.IndexOf('-');
         if (dashIndex >= 0)
         {
-            ReadOnlySpan<char> pr = input[(dashIndex + 1)..];
-            if (pr.Length == 0 || !IsValidIdentifier(pr))
+            string preRelease = input[(dashIndex + 1)..];
+            if (!TryParseLabelPart(preRelease, out preReleasePart))
                 return false;
-            preRelease = new string(pr);
+
             input = input[..dashIndex];
         }
 
-        // Parse the version core segments using span indexing (avoids Split allocation)
-        int firstDot = input.IndexOf('.');
-        if (firstDot < 0)
+        string[] numericSegments = input.Split('.', StringSplitOptions.None);
+        if (numericSegments.Length is < 2 or > 3)
             return false;
 
-        ReadOnlySpan<char> afterFirst = input[(firstDot + 1)..];
-        int secondDot = afterFirst.IndexOf('.');
-
-        if (secondDot < 0)
+        if (!TryParseNumericPart(numericSegments[0], false, out NumericPart majorPart) ||
+            !TryParseNumericPart(numericSegments[1], true, out NumericPart minorPart))
         {
-            // Two segments: "4.x", "4.*", "4.X", or "4.0"
-            if (!TryParseSegment(input[..firstDot], out int major))
-                return false;
-
-            if (preRelease is not null || buildMetadata is not null)
-                return false;
-
-            if (IsWildcardSegment(afterFirst))
-            {
-                result = new FhirSemVer(major, 0, 0, null, null, WildcardLevel.Minor);
-                return true;
-            }
-
-            if (TryParseSegment(afterFirst, out int minor))
-            {
-                result = new FhirSemVer(major, minor, 0, null, null, WildcardLevel.Patch);
-                return true;
-            }
-
             return false;
         }
-        else
+
+        NumericPart patchPart = NumericPart.Missing;
+        if (numericSegments.Length == 3 &&
+            !TryParseNumericPart(numericSegments[2], true, out patchPart))
         {
-            // Three segments
-            ReadOnlySpan<char> seg0 = input[..firstDot];
-            ReadOnlySpan<char> seg1 = afterFirst[..secondDot];
-            ReadOnlySpan<char> seg2 = afterFirst[(secondDot + 1)..];
-
-            // Reject 4+ segments
-            if (seg2.IndexOf('.') >= 0)
-                return false;
-
-            if (!TryParseSegment(seg0, out int major))
-                return false;
-            if (!TryParseSegment(seg1, out int minor))
-                return false;
-
-            if (IsWildcardSegment(seg2))
-            {
-                if (preRelease is not null || buildMetadata is not null)
-                    return false;
-                result = new FhirSemVer(major, minor, 0, null, null, WildcardLevel.Patch);
-                return true;
-            }
-
-            if (TryParseSegment(seg2, out int patch))
-            {
-                result = new FhirSemVer(major, minor, patch, preRelease, buildMetadata, WildcardLevel.None);
-                return true;
-            }
-
             return false;
         }
+
+        RemainderBoundary remainderBoundary = RemainderBoundary.None;
+        if (hasRemainderBoundary)
+        {
+            remainderBoundary = buildPart.Kind != PartKind.Missing
+                ? RemainderBoundary.Build
+                : preReleasePart.Kind != PartKind.Missing
+                    ? RemainderBoundary.PreRelease
+                    : patchPart.Kind != PartKind.Missing
+                        ? RemainderBoundary.Patch
+                        : RemainderBoundary.Minor;
+        }
+
+        result = new FhirSemVer(
+            majorPart,
+            minorPart,
+            patchPart,
+            preReleasePart,
+            buildPart,
+            remainderBoundary,
+            false);
+        return true;
+    }
+
+    private static bool TryParseNumericPart(
+        string segment,
+        bool allowXAlias,
+        out NumericPart part)
+    {
+        part = NumericPart.Missing;
+
+        if (segment == "*" ||
+            (allowXAlias &&
+             (segment.Equals("x", StringComparison.OrdinalIgnoreCase))))
+        {
+            part = NumericPart.Wildcard;
+            return true;
+        }
+
+        if (!TryParseSegment(segment.AsSpan(), out int value))
+            return false;
+
+        part = NumericPart.Literal(value);
+        return true;
+    }
+
+    private static bool TryParseLabelPart(string value, out LabelPart part)
+    {
+        part = LabelPart.Missing;
+
+        if (value == "*")
+        {
+            part = LabelPart.Wildcard;
+            return true;
+        }
+
+        if (!IsValidIdentifier(value.AsSpan()))
+            return false;
+
+        part = LabelPart.Literal(value);
+        return true;
     }
 
     /// <summary>
-    /// Parses a single non-negative integer version segment, rejecting leading zeros
-    /// per the SemVer 2.0 specification (e.g., <c>"01"</c> is invalid).
+    /// Parses a non-negative numeric part and rejects leading zeroes.
     /// </summary>
     private static bool TryParseSegment(ReadOnlySpan<char> segment, out int value)
     {
@@ -271,22 +322,21 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         if (segment.Length == 0)
             return false;
 
-        // SemVer 2.0: numeric identifiers MUST NOT include leading zeroes.
         if (segment.Length > 1 && segment[0] == '0')
             return false;
 
-        return int.TryParse(segment, NumberStyles.None, CultureInfo.InvariantCulture, out value);
+        return int.TryParse(
+            segment,
+            NumberStyles.None,
+            CultureInfo.InvariantCulture,
+            out value);
     }
 
-    private static bool IsWildcardSegment(ReadOnlySpan<char> segment) =>
-        segment is "x" or "X" or "*";
-
-    /// <summary>
-    /// Validates that a pre-release or build metadata string contains only
-    /// alphanumeric characters, hyphens, and dots (per SemVer 2.0).
-    /// </summary>
     private static bool IsValidIdentifier(ReadOnlySpan<char> value)
     {
+        if (value.Length == 0)
+            return false;
+
         foreach (char ch in value)
         {
             if (!char.IsLetterOrDigit(ch) && ch is not '.' and not '-')
@@ -296,13 +346,6 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         return true;
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    //  Pre-release Classification
-    // ────────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Classifies a pre-release tag into the corresponding <see cref="FhirPreReleaseType"/>.
-    /// </summary>
     private static FhirPreReleaseType ClassifyPreRelease(string? preRelease)
     {
         if (preRelease is null)
@@ -320,43 +363,10 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         return FhirPreReleaseType.Other;
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    //  Comparison
-    // ────────────────────────────────────────────────────────────────────
-
     /// <summary>
-    /// Compares this version to another following SemVer 2.0 rules with
-    /// FHIR-specific pre-release ordering.
+    /// Compares concrete versions using numeric precision, numeric values, and
+    /// FHIR-specific pre-release ordering. Patterns are not orderable.
     /// </summary>
-    /// <remarks>
-    /// <para>Comparison rules:</para>
-    /// <list type="number">
-    ///   <item><description>Major, Minor, and Patch are compared numerically.</description></item>
-    ///   <item><description>
-    ///     A release version (no pre-release tag) is <b>greater</b> than any pre-release
-    ///     of the same Major.Minor.Patch.
-    ///   </description></item>
-    ///   <item><description>
-    ///     Pre-release ordering: Release &gt; Ballot &gt; Draft &gt; Snapshot &gt; CiBuild &gt; Other.
-    ///   </description></item>
-    ///   <item><description>
-    ///     Within the same pre-release type, numeric suffixes are compared
-    ///     (e.g., <c>"ballot2"</c> &gt; <c>"ballot1"</c>).
-    ///   </description></item>
-    ///   <item><description>Build metadata is ignored.</description></item>
-    /// </list>
-    /// </remarks>
-    /// <param name="other">The version to compare to, or <c>null</c>.</param>
-    /// <returns>
-    /// A negative value if this version precedes <paramref name="other"/>;
-    /// zero if they are equal; a positive value if this version follows <paramref name="other"/>.
-    /// A non-<c>null</c> instance is always greater than <c>null</c>.
-    /// </returns>
-    /// <exception cref="InvalidOperationException">
-    /// Either this instance or <paramref name="other"/> is a wildcard version.
-    /// Wildcard versions represent matching patterns and cannot be ordered.
-    /// Use <see cref="Satisfies(FhirSemVer)"/> for wildcard matching instead.
-    /// </exception>
     public int CompareTo(FhirSemVer? other)
     {
         if (other is null)
@@ -369,34 +379,47 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
                 "Use Satisfies() for wildcard matching.");
         }
 
-        // Compare numeric components
-        int result = Major.CompareTo(other.Major);
-        if (result != 0) return result;
+        int result = CompareNumericParts(_majorPart, other._majorPart);
+        if (result != 0)
+            return result;
 
-        result = Minor.CompareTo(other.Minor);
-        if (result != 0) return result;
+        result = CompareNumericParts(_minorPart, other._minorPart);
+        if (result != 0)
+            return result;
 
-        result = Patch.CompareTo(other.Patch);
-        if (result != 0) return result;
+        result = CompareNumericParts(_patchPart, other._patchPart);
+        if (result != 0)
+            return result;
 
-        // Release (no pre-release) is greater than any pre-release
-        if (!IsPreRelease && other.IsPreRelease) return 1;
-        if (IsPreRelease && !other.IsPreRelease) return -1;
-        if (!IsPreRelease) return 0; // Both are releases
+        if (!IsPreRelease && other.IsPreRelease)
+            return 1;
+        if (IsPreRelease && !other.IsPreRelease)
+            return -1;
+        if (!IsPreRelease)
+            return 0;
 
-        // Both are pre-release: compare by FHIR type.
-        // Lower enum value = higher priority, so we reverse the comparison.
         result = other.PreReleaseType.CompareTo(PreReleaseType);
-        if (result != 0) return result;
+        if (result != 0)
+            return result;
 
-        // Same pre-release type: compare numeric suffix, then fall back to string
         return ComparePreReleaseSuffix(PreRelease!, other.PreRelease!);
     }
 
-    /// <summary>
-    /// Compares two pre-release strings by their trailing numeric suffix,
-    /// falling back to ordinal string comparison when suffixes are equal.
-    /// </summary>
+    private static int CompareNumericParts(NumericPart left, NumericPart right)
+    {
+        if (left.Kind == PartKind.Wildcard || right.Kind == PartKind.Wildcard)
+            throw new InvalidOperationException("Wildcard parts cannot be ordered.");
+
+        if (left.Kind == right.Kind)
+        {
+            return left.Kind == PartKind.Literal
+                ? left.Value.CompareTo(right.Value)
+                : 0;
+        }
+
+        return left.Kind == PartKind.Missing ? -1 : 1;
+    }
+
     private static int ComparePreReleaseSuffix(string a, string b)
     {
         int suffixA = ExtractNumericSuffix(a);
@@ -408,184 +431,215 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         return string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>
-    /// Extracts the trailing numeric suffix from a pre-release tag.
-    /// Returns <c>0</c> if no trailing digits are present or on overflow.
-    /// </summary>
     private static int ExtractNumericSuffix(string preRelease)
     {
-        int i = preRelease.Length - 1;
-        while (i >= 0 && char.IsAsciiDigit(preRelease[i]))
-            i--;
+        int index = preRelease.Length - 1;
+        while (index >= 0 && char.IsAsciiDigit(preRelease[index]))
+            index--;
 
-        // No trailing digits
-        if (i == preRelease.Length - 1)
+        if (index == preRelease.Length - 1)
             return 0;
 
-        if (int.TryParse(
-                preRelease.AsSpan(i + 1),
-                NumberStyles.None,
-                CultureInfo.InvariantCulture,
-                out int suffix))
-        {
-            return suffix;
-        }
-
-        return 0;
+        return int.TryParse(
+            preRelease.AsSpan(index + 1),
+            NumberStyles.None,
+            CultureInfo.InvariantCulture,
+            out int suffix)
+            ? suffix
+            : 0;
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    //  Equality
-    // ────────────────────────────────────────────────────────────────────
-
     /// <summary>
-    /// Determines whether this version is equal to another.
-    /// Two versions are equal when their Major, Minor, Patch, PreRelease, and
-    /// wildcard level all match. Build metadata is ignored.
+    /// Determines whether two versions or patterns are equal. Concrete build
+    /// metadata is ignored; pattern build state participates in equality.
     /// </summary>
-    /// <param name="other">The version to compare with, or <c>null</c>.</param>
-    /// <returns><c>true</c> if the versions are equal; otherwise, <c>false</c>.</returns>
     public bool Equals(FhirSemVer? other)
     {
-        if (other is null) return false;
-        if (ReferenceEquals(this, other)) return true;
+        if (other is null)
+            return false;
+        if (ReferenceEquals(this, other))
+            return true;
 
-        return Major == other.Major
-            && Minor == other.Minor
-            && Patch == other.Patch
-            && _wildcardLevel == other._wildcardLevel
-            && string.Equals(PreRelease, other.PreRelease, StringComparison.OrdinalIgnoreCase);
+        if (IsWildcard || other.IsWildcard)
+        {
+            return IsWildcard == other.IsWildcard &&
+                _isAllWildcard == other._isAllWildcard &&
+                NumericPartsEqual(_majorPart, other._majorPart) &&
+                NumericPartsEqual(_minorPart, other._minorPart) &&
+                NumericPartsEqual(_patchPart, other._patchPart) &&
+                LabelPartsEqual(_preReleasePart, other._preReleasePart) &&
+                LabelPartsEqual(_buildPart, other._buildPart) &&
+                _remainderBoundary == other._remainderBoundary;
+        }
+
+        return NumericPartsEqual(_majorPart, other._majorPart) &&
+            NumericPartsEqual(_minorPart, other._minorPart) &&
+            NumericPartsEqual(_patchPart, other._patchPart) &&
+            LabelPartsEqual(_preReleasePart, other._preReleasePart);
     }
 
     /// <inheritdoc />
     public override bool Equals(object? obj) => Equals(obj as FhirSemVer);
 
-    /// <summary>
-    /// Returns a hash code based on Major, Minor, Patch, PreRelease, and wildcard level.
-    /// Build metadata is ignored.
-    /// </summary>
-    public override int GetHashCode() =>
-        HashCode.Combine(Major, Minor, Patch, (int)_wildcardLevel, PreRelease?.ToLowerInvariant());
+    /// <inheritdoc />
+    public override int GetHashCode()
+    {
+        HashCode hash = new();
+        AddNumericPartHash(ref hash, _majorPart);
+        AddNumericPartHash(ref hash, _minorPart);
+        AddNumericPartHash(ref hash, _patchPart);
+        AddLabelPartHash(ref hash, _preReleasePart);
 
-    // ────────────────────────────────────────────────────────────────────
-    //  Operators
-    // ────────────────────────────────────────────────────────────────────
+        if (IsWildcard)
+        {
+            AddLabelPartHash(ref hash, _buildPart);
+            hash.Add(_remainderBoundary);
+            hash.Add(_isAllWildcard);
+        }
 
-    /// <summary>Determines whether two versions are equal.</summary>
+        return hash.ToHashCode();
+    }
+
+    private static bool NumericPartsEqual(NumericPart left, NumericPart right) =>
+        left.Kind == right.Kind &&
+        (left.Kind != PartKind.Literal || left.Value == right.Value);
+
+    private static bool LabelPartsEqual(LabelPart left, LabelPart right) =>
+        left.Kind == right.Kind &&
+        (left.Kind != PartKind.Literal ||
+         string.Equals(left.Value, right.Value, StringComparison.OrdinalIgnoreCase));
+
+    private static void AddNumericPartHash(ref HashCode hash, NumericPart part)
+    {
+        hash.Add(part.Kind);
+        if (part.Kind == PartKind.Literal)
+            hash.Add(part.Value);
+    }
+
+    private static void AddLabelPartHash(ref HashCode hash, LabelPart part)
+    {
+        hash.Add(part.Kind);
+        if (part.Kind == PartKind.Literal)
+            hash.Add(part.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Determines whether two versions or patterns are equal.</summary>
     public static bool operator ==(FhirSemVer? left, FhirSemVer? right) =>
         left is null ? right is null : left.Equals(right);
 
-    /// <summary>Determines whether two versions are not equal.</summary>
+    /// <summary>Determines whether two versions or patterns are not equal.</summary>
     public static bool operator !=(FhirSemVer? left, FhirSemVer? right) =>
         !(left == right);
 
-    /// <summary>Determines whether the left version is less than the right version.</summary>
-    /// <exception cref="InvalidOperationException">Either operand is a wildcard.</exception>
+    /// <summary>Determines whether the left concrete version precedes the right.</summary>
     public static bool operator <(FhirSemVer? left, FhirSemVer? right)
     {
-        if (left is null) return right is not null;
+        if (left is null)
+            return right is not null;
+
         return left.CompareTo(right) < 0;
     }
 
-    /// <summary>Determines whether the left version is greater than the right version.</summary>
-    /// <exception cref="InvalidOperationException">Either operand is a wildcard.</exception>
+    /// <summary>Determines whether the left concrete version follows the right.</summary>
     public static bool operator >(FhirSemVer? left, FhirSemVer? right) =>
         right < left;
 
-    /// <summary>Determines whether the left version is less than or equal to the right version.</summary>
-    /// <exception cref="InvalidOperationException">Either operand is a wildcard.</exception>
+    /// <summary>
+    /// Determines whether the left concrete version precedes or equals the right.
+    /// </summary>
     public static bool operator <=(FhirSemVer? left, FhirSemVer? right)
     {
-        if (left is null) return true;
+        if (left is null)
+            return true;
+
         return left.CompareTo(right) <= 0;
     }
 
-    /// <summary>Determines whether the left version is greater than or equal to the right version.</summary>
-    /// <exception cref="InvalidOperationException">Either operand is a wildcard.</exception>
+    /// <summary>
+    /// Determines whether the left concrete version follows or equals the right.
+    /// </summary>
     public static bool operator >=(FhirSemVer? left, FhirSemVer? right) =>
         right <= left;
 
-    // ────────────────────────────────────────────────────────────────────
-    //  Wildcard / Range Matching
-    // ────────────────────────────────────────────────────────────────────
-
     /// <summary>
-    /// Determines whether this concrete version satisfies the given version specifier string.
+    /// Determines whether this concrete version satisfies one standalone exact
+    /// or wildcard expression.
     /// </summary>
-    /// <param name="versionSpecifier">
-    /// A version string or wildcard pattern such as <c>"4.0.1"</c>, <c>"4.0.x"</c>,
-    /// <c>"4.x"</c>, or <c>"*"</c>.
-    /// </param>
-    /// <returns>
-    /// <c>true</c> if this version satisfies the specifier; otherwise, <c>false</c>.
-    /// Always returns <c>false</c> when this instance itself is a wildcard.
-    /// </returns>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="versionSpecifier"/> is <c>null</c>, empty, or whitespace.
-    /// </exception>
-    /// <exception cref="FormatException">
-    /// <paramref name="versionSpecifier"/> is not a valid version format.
-    /// </exception>
     public bool Satisfies(string versionSpecifier)
     {
-        FhirSemVer spec = Parse(versionSpecifier);
-        return Satisfies(spec);
+        FhirSemVer specifier = Parse(versionSpecifier);
+        return Satisfies(specifier);
     }
 
     /// <summary>
-    /// Determines whether this concrete version satisfies the given version specifier.
+    /// Determines whether this concrete version satisfies the supplied exact
+    /// version or wildcard pattern.
     /// </summary>
-    /// <param name="other">
-    /// A version or wildcard pattern to match against.
-    /// If <paramref name="other"/> is a wildcard, wildcard matching rules apply.
-    /// Otherwise, exact equality is used.
-    /// </param>
-    /// <returns>
-    /// <c>true</c> if this version satisfies the specifier; otherwise, <c>false</c>.
-    /// Always returns <c>false</c> when this instance itself is a wildcard, since
-    /// a wildcard is a pattern, not a concrete version.
-    /// </returns>
-    /// <exception cref="ArgumentNullException"><paramref name="other"/> is <c>null</c>.</exception>
     public bool Satisfies(FhirSemVer other)
     {
         ArgumentNullException.ThrowIfNull(other);
 
-        // A wildcard is a pattern, not a concrete version — it cannot satisfy anything.
         if (IsWildcard)
             return false;
+        if (other._isAllWildcard)
+            return true;
 
-        if (other.IsWildcard)
-        {
-            return other._wildcardLevel switch
-            {
-                WildcardLevel.All => true,
-                WildcardLevel.Minor => Major == other.Major,
-                WildcardLevel.Patch => Major == other.Major && Minor == other.Minor,
-                _ => false,
-            };
-        }
+        if (!NumericPartMatches(other._majorPart, _majorPart))
+            return false;
+        if (other._remainderBoundary == RemainderBoundary.Major)
+            return true;
 
-        return Equals(other);
+        if (!NumericPartMatches(other._minorPart, _minorPart))
+            return false;
+        if (other._remainderBoundary == RemainderBoundary.Minor)
+            return true;
+
+        if (!NumericPartMatches(other._patchPart, _patchPart))
+            return false;
+        if (other._remainderBoundary == RemainderBoundary.Patch)
+            return true;
+
+        if (!LabelPartMatches(other._preReleasePart, _preReleasePart))
+            return false;
+        if (other._remainderBoundary == RemainderBoundary.PreRelease)
+            return true;
+
+        if (!LabelPartMatches(other._buildPart, _buildPart))
+            return false;
+
+        return other._remainderBoundary is
+            RemainderBoundary.None or RemainderBoundary.Build;
     }
 
+    private static bool NumericPartMatches(NumericPart pattern, NumericPart candidate) =>
+        pattern.Kind switch
+        {
+            PartKind.Missing => candidate.Kind == PartKind.Missing,
+            PartKind.Wildcard => candidate.Kind != PartKind.Missing,
+            PartKind.Literal =>
+                candidate.Kind == PartKind.Literal &&
+                pattern.Value == candidate.Value,
+            _ => false,
+        };
+
+    private static bool LabelPartMatches(LabelPart pattern, LabelPart candidate) =>
+        pattern.Kind switch
+        {
+            PartKind.Missing => candidate.Kind == PartKind.Missing,
+            PartKind.Wildcard => candidate.Kind != PartKind.Missing,
+            PartKind.Literal =>
+                candidate.Kind == PartKind.Literal &&
+                string.Equals(
+                    pattern.Value,
+                    candidate.Value,
+                    StringComparison.OrdinalIgnoreCase),
+            _ => false,
+        };
+
     /// <summary>
-    /// Finds the maximum version from a collection that satisfies the given specifier.
+    /// Finds the highest concrete version that satisfies one standalone exact
+    /// or wildcard expression.
     /// </summary>
-    /// <param name="versions">The candidate versions to evaluate.</param>
-    /// <param name="specifier">
-    /// A version string or wildcard pattern (e.g., <c>"4.0.1"</c>, <c>"4.0.x"</c>, <c>"*"</c>).
-    /// </param>
-    /// <param name="includePreRelease">
-    /// When <c>true</c>, pre-release versions are included in the candidates.
-    /// When <c>false</c> (the default), pre-release versions are excluded
-    /// <b>unless</b> the <paramref name="specifier"/> itself contains a pre-release tag.
-    /// </param>
-    /// <returns>
-    /// The highest version that satisfies the specifier, or <c>null</c> if none match.
-    /// </returns>
-    /// <exception cref="ArgumentNullException"><paramref name="versions"/> is <c>null</c>.</exception>
-    /// <exception cref="ArgumentException"><paramref name="specifier"/> is <c>null</c> or empty.</exception>
-    /// <exception cref="FormatException"><paramref name="specifier"/> is not a valid version format.</exception>
     public static FhirSemVer? MaxSatisfying(
         IEnumerable<FhirSemVer> versions,
         string specifier,
@@ -595,60 +649,20 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         ArgumentException.ThrowIfNullOrEmpty(specifier);
 
         FhirSemVer spec = Parse(specifier);
-        bool allowPreRelease = includePreRelease || spec.IsPreRelease;
+        bool allowPreRelease =
+            includePreRelease || spec._preReleasePart.Kind != PartKind.Missing;
 
         return versions
-            .Where(v => !v.IsWildcard)
-            .Where(v => v.Satisfies(spec))
-            .Where(v => allowPreRelease || !v.IsPreRelease)
+            .Where(version => !version.IsWildcard)
+            .Where(version => version.Satisfies(spec))
+            .Where(version => allowPreRelease || !version.IsPreRelease)
             .Max();
     }
 
     /// <summary>
-    /// Returns all versions from a collection that satisfy a range expression.
+    /// Returns all concrete versions from a collection that satisfy a range
+    /// expression.
     /// </summary>
-    /// <remarks>
-    /// <para>Supported range expressions:</para>
-    /// <list type="bullet">
-    ///   <item><description>
-    ///     <b>Caret</b>: <c>"^3.0.1"</c> — matches ≥3.0.1 and &lt;4.0.0
-    ///     (allows minor and patch bumps).
-    ///   </description></item>
-    ///   <item><description>
-    ///     <b>Tilde</b>: <c>"~3.0.1"</c> — matches ≥3.0.1 and &lt;3.1.0
-    ///     (allows patch bumps only).
-    ///   </description></item>
-    ///   <item><description>
-    ///     <b>Comparators</b>: <c>">=1.0.0 &lt;2.0.0"</c> — whitespace-separated
-    ///     comparators form an intersection. Supported operators are <c>&lt;</c>,
-    ///     <c>&lt;=</c>, <c>&gt;</c>, <c>&gt;=</c>, and <c>=</c>.
-    ///   </description></item>
-    ///   <item><description>
-    ///     <b>Hyphen</b>: <c>"1.0.0 - 2.0.0"</c> — matches ≥1.0.0 and ≤2.0.0.
-    ///   </description></item>
-    ///   <item><description>
-    ///     <b>Wildcard</b>: <c>"4.0.x"</c> — matches any patch version
-    ///     with major=4, minor=0.
-    ///   </description></item>
-    ///   <item><description>
-    ///     <b>Exact</b>: <c>"4.0.1"</c> — matches exactly that version.
-    ///   </description></item>
-    ///   <item><description>
-    ///     <b>Pipe (OR)</b>: <c>"1.0.0|3.0.0"</c> — matches either alternative.
-    ///   </description></item>
-    /// </list>
-    /// <para>
-    /// Pipe-separated sub-expressions can individually use any of the above syntaxes
-    /// (e.g., <c>"^1.0.0|~2.3.0"</c>). Matching versions retain the order in which
-    /// they appear in <paramref name="versions"/>.
-    /// </para>
-    /// </remarks>
-    /// <param name="versions">The candidate versions to evaluate.</param>
-    /// <param name="rangeExpression">The range expression to evaluate.</param>
-    /// <returns>All versions satisfying the range expression.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="versions"/> is <c>null</c>.</exception>
-    /// <exception cref="ArgumentException"><paramref name="rangeExpression"/> is <c>null</c> or empty.</exception>
-    /// <exception cref="FormatException">The range expression contains invalid version syntax.</exception>
     public static IEnumerable<FhirSemVer> SatisfyingRange(
         IEnumerable<FhirSemVer> versions,
         string rangeExpression)
@@ -657,34 +671,62 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
         ArgumentException.ThrowIfNullOrEmpty(rangeExpression);
 
         FhirSemVerRange range = FhirSemVerRange.Parse(rangeExpression);
-        IReadOnlyList<FhirSemVer> versionList = versions as IReadOnlyList<FhirSemVer> ?? versions.ToList();
+        IReadOnlyList<FhirSemVer> versionList =
+            versions as IReadOnlyList<FhirSemVer> ?? versions.ToList();
         return versionList.Where(range.IsSatisfiedBy);
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    //  Formatting
-    // ────────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Returns the version as a normalized string.
-    /// </summary>
-    /// <returns>
-    /// The version string — for example, <c>"4.0.1"</c>, <c>"6.0.0-ballot1"</c>,
-    /// <c>"4.0.x"</c>, or <c>"*"</c>.
-    /// </returns>
-    public override string ToString() => _wildcardLevel switch
+    /// <summary>Returns the normalized version or pattern string.</summary>
+    public override string ToString()
     {
-        WildcardLevel.All => "*",
-        WildcardLevel.Minor => $"{Major}.x",
-        WildcardLevel.Patch => $"{Major}.{Minor}.x",
-        _ => FormatExactVersion(),
-    };
+        if (_isAllWildcard)
+            return "*";
 
-    private string FormatExactVersion() => (PreRelease, BuildMetadata) switch
+        StringBuilder builder = new();
+        AppendNumericPart(builder, _majorPart, true);
+        builder.Append('.');
+        AppendNumericPart(builder, _minorPart, false);
+
+        if (_patchPart.Kind != PartKind.Missing)
+        {
+            builder.Append('.');
+            AppendNumericPart(builder, _patchPart, false);
+        }
+
+        if (_preReleasePart.Kind != PartKind.Missing)
+        {
+            builder.Append('-');
+            AppendLabelPart(builder, _preReleasePart);
+        }
+
+        if (_buildPart.Kind != PartKind.Missing)
+        {
+            builder.Append('+');
+            AppendLabelPart(builder, _buildPart);
+        }
+
+        if (_remainderBoundary != RemainderBoundary.None)
+            builder.Append('?');
+
+        return builder.ToString();
+    }
+
+    private static void AppendNumericPart(
+        StringBuilder builder,
+        NumericPart part,
+        bool isMajor)
     {
-        (not null, not null) => $"{Major}.{Minor}.{Patch}-{PreRelease}+{BuildMetadata}",
-        (not null, null) => $"{Major}.{Minor}.{Patch}-{PreRelease}",
-        (null, not null) => $"{Major}.{Minor}.{Patch}+{BuildMetadata}",
-        _ => $"{Major}.{Minor}.{Patch}",
-    };
+        if (part.Kind == PartKind.Wildcard)
+        {
+            builder.Append(isMajor ? '*' : 'x');
+            return;
+        }
+
+        builder.Append(part.Value.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static void AppendLabelPart(StringBuilder builder, LabelPart part)
+    {
+        builder.Append(part.Kind == PartKind.Wildcard ? "*" : part.Value);
+    }
 }

@@ -102,6 +102,27 @@ public class PackageDirectiveTests
         directive.VersionType.ShouldBe(VersionType.Wildcard);
     }
 
+    [Theory]
+    [InlineData("2.*")]
+    [InlineData("2.x.x")]
+    [InlineData("2.0.*")]
+    [InlineData("*.0")]
+    [InlineData("*.0.0")]
+    [InlineData("2.*.0")]
+    [InlineData("2.0.0-*")]
+    [InlineData("2.0.0+*")]
+    [InlineData("2.0.x-*")]
+    [InlineData("2.0?")]
+    [InlineData("2.0.1?")]
+    [InlineData("2.x?")]
+    public void Parse_DefinedWildcardGrammar_ClassifiesCorrectly(string version)
+    {
+        PackageDirective directive =
+            PackageDirective.Parse($"hl7.fhir.r4.core#{version}");
+
+        directive.VersionType.ShouldBe(VersionType.Wildcard);
+    }
+
     [Fact]
     public void Parse_EmptyString_Throws()
     {
@@ -154,11 +175,11 @@ public class PackageDirectiveTests
     }
 
     [Fact]
-    public void Parse_TwoSegmentVersion_ClassifiedAsWildcard()
+    public void Parse_TwoSegmentVersion_ClassifiedAsExact()
     {
         PackageDirective directive = PackageDirective.Parse("hl7.fhir.r4.core#4.0");
 
-        directive.VersionType.ShouldBe(VersionType.Wildcard);
+        directive.VersionType.ShouldBe(VersionType.Exact);
     }
 
     [Fact]

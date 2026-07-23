@@ -66,6 +66,7 @@ public class DirectiveParserTests
 
     [Theory]
     [InlineData("4.0.1", VersionType.Exact)]
+    [InlineData("4.0", VersionType.Exact)]
     [InlineData("1.0.0", VersionType.Exact)]
     [InlineData("6.0.0-ballot1", VersionType.Exact)]
     public void ClassifyVersion_Exact_ClassifiedCorrectly(
@@ -107,6 +108,17 @@ public class DirectiveParserTests
     [InlineData("4.0.x", VersionType.Wildcard)]
     [InlineData("4.0.X", VersionType.Wildcard)]
     [InlineData("4.0.*", VersionType.Wildcard)]
+    [InlineData("2.*", VersionType.Wildcard)]
+    [InlineData("2.x.x", VersionType.Wildcard)]
+    [InlineData("*.0", VersionType.Wildcard)]
+    [InlineData("*.0.0", VersionType.Wildcard)]
+    [InlineData("2.*.0", VersionType.Wildcard)]
+    [InlineData("2.0.0-*", VersionType.Wildcard)]
+    [InlineData("2.0.0+*", VersionType.Wildcard)]
+    [InlineData("2.0.x-*", VersionType.Wildcard)]
+    [InlineData("2.0?", VersionType.Wildcard)]
+    [InlineData("2.0.1?", VersionType.Wildcard)]
+    [InlineData("2.x?", VersionType.Wildcard)]
     public void ClassifyVersion_Wildcard_ClassifiedCorrectly(
         string version, VersionType expected)
     {
