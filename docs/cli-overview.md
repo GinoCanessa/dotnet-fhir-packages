@@ -9,8 +9,9 @@ search, publish, and maintain a local package cache. It is built on the
 
 - **Install** packages by directive (e.g., `hl7.fhir.r4.core#4.0.1`) with
   optional transitive dependency resolution.
-- **Restore** all dependencies declared in a project `package.json` with
-  lock-file support for deterministic builds.
+- **Restore** all dependencies declared in a project `package.json` by resolving
+  the live registry/cache graph on every run. Distinct exact versions of one
+  package coexist when different dependency paths require them.
 - **Search** the FHIR package registries by name, canonical URL, or FHIR version.
 - **List**, **remove**, and **clean** cached packages.
 - **Inspect** package metadata and available versions.
@@ -109,6 +110,10 @@ fhir-pkg list
 # JSON output
 fhir-pkg list --json | jq '.packages[].name'
 ```
+
+Restore output lists every exact identity. In JSON restore output,
+`resolvedPackages` is the complete array, while `resolved` remains the
+conflict-policy-selected, name-keyed lookup for compatibility.
 
 ## Environment Variables
 

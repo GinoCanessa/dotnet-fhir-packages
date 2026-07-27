@@ -70,6 +70,24 @@ internal static class JsonOutput
             Resolved = closure.Resolved.ToDictionary(
                 kvp => kvp.Key,
                 kvp => new { kvp.Value.Name, kvp.Value.Version }),
+            ResolvedPackages =
+                (closure.ResolvedPackages.Count > 0
+                    ? closure.ResolvedPackages
+                    : closure.Resolved.Values)
+                .OrderBy(
+                    reference => reference.Name,
+                    StringComparer.OrdinalIgnoreCase)
+                .ThenBy(
+                    reference => reference.Name,
+                    StringComparer.Ordinal)
+                .ThenBy(
+                    reference => reference.Version,
+                    StringComparer.Ordinal)
+                .Select(reference => new
+                {
+                    reference.Name,
+                    reference.Version,
+                }),
             closure.Missing
         });
     }

@@ -12,7 +12,7 @@ This documentation covers the FHIR package ecosystem: how packages are named, ve
 | [Resolution](resolution.md) | How packages are resolved from directives to tarballs |
 | [Registry API](registry-api.md) | Server endpoints, request/response formats, and examples |
 | [Caching](caching.md) | Local package cache structure, validation, and invalidation |
-| [Dependencies](dependencies.md) | Dependency trees, lock files, and circular dependency handling |
+| [Dependencies](dependencies.md) | Exact-version dependency graphs, preferred projections, and circular dependency handling |
 | [Client Implementations](client-implementations.md) | Reference implementations in TypeScript, C#, and Java |
 | [Security](security.md) | Authentication, integrity verification, and transport security |
 | [Error Handling](errors.md) | Common errors, failure modes, and troubleshooting |
@@ -20,6 +20,11 @@ This documentation covers the FHIR package ecosystem: how packages are named, ve
 ## Quick Overview
 
 FHIR packages follow an NPM-compatible packaging format (`.tgz` tarballs containing a `package/` directory with a `package.json` manifest). They are published to FHIR-specific registries and resolved through a multi-source strategy that considers published releases, CI builds, and local caches.
+
+Project restore is always live. Each dependency edge resolves to an exact
+identity, and multiple versions of one package can coexist when required by
+different paths; conflict policy selects a preferred lookup without pruning the
+complete graph.
 
 ```mermaid
 flowchart LR

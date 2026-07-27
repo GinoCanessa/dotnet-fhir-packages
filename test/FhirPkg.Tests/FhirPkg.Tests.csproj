@@ -28,6 +28,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\FhirPkg\FhirPkg.csproj" />
+    <ProjectReference Include="..\..\tools\FhirPkg.Release\FhirPkg.Release.csproj" />
     <ProjectReference Include="..\FhirPkg.Qualification\FhirPkg.Qualification.csproj" />
   </ItemGroup>
 

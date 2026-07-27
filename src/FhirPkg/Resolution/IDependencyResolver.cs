@@ -6,8 +6,8 @@ using FhirPkg.Models;
 namespace FhirPkg.Resolution;
 
 /// <summary>
-/// Resolves the full transitive dependency closure for a FHIR package manifest
-/// or restores a previously resolved closure from a lock file.
+/// Resolves the live full transitive dependency closure for a FHIR package
+/// manifest using the current registry and cache state.
 /// </summary>
 public interface IDependencyResolver
 {
@@ -30,21 +30,5 @@ public interface IDependencyResolver
     Task<PackageClosure> ResolveAsync(
         PackageManifest rootManifest,
         DependencyResolveOptions? options = null,
-        CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Restores a package closure from a previously generated lock file.
-    /// Verifies that each locked dependency is available from the cache or its
-    /// replay source. The returned install order identifies packages that the
-    /// caller must install.
-    /// </summary>
-    /// <param name="lockFile">The lock file containing exact version pinning for all dependencies.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>
-    /// A <see cref="PackageClosure"/> reflecting the state of the restored dependencies,
-    /// including any that could not be found in the registry.
-    /// </returns>
-    Task<PackageClosure> RestoreFromLockFileAsync(
-        PackageLockFile lockFile,
         CancellationToken cancellationToken = default);
 }

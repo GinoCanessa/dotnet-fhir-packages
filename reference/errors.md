@@ -286,7 +286,10 @@ Root
 
 ### "Incorrect wildcard version format"
 
-The SUSHI implementation requires patch-level wildcards (e.g., `4.0.x`). Minor-level wildcards (`4.x`) are not supported — use `latest` instead, or specify a more precise range.
+For SUSHI interoperability, use a three-part patch wildcard such as `4.0.x`.
+In FhirPkg's [defined FHIR grammar](versioning.md#2-part-wise-wildcard-patterns),
+`4.x` matches two-part versions only; use `4.x.x` for stable three-part
+versions in major 4, or `4.x?` when the remaining parts should be ignored.
 
 ### Package loads but resources are missing
 

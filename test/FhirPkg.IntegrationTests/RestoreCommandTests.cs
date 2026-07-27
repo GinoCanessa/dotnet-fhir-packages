@@ -1,7 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Diagnostics;
-using FhirPkg.Models;
 using Shouldly;
 using Xunit;
 
@@ -49,64 +48,35 @@ public sealed class RestoreCommandTests : IntegrationTestBase
     }
 
     [Fact]
-    public async Task Restore_CustomRelativeLockPath_WritesRequestedFile()
+    public async Task Restore_HelpOmitsRemovedLockOptions()
     {
-        string projectPath = CreateTestProject(
-            """{"name":"root.package","version":"1.0.0","dependencies":{}}""");
-        string expectedPath = Path.Combine(
-            projectPath,
-            "locks",
-            "custom.lock.json");
-        string relativePath = Path.Combine(
-            "locks",
-            "custom.lock.json");
-
-        (int exitCode, string _, string standardError) =
-            await RunCliAsync(
-                $"restore \"{projectPath}\" --lock-file \"{relativePath}\" --quiet");
+        (int exitCode, string standardOutput, string standardError) =
+            await RunCliAsync("restore --help");
 
         exitCode.ShouldBe(
             0,
             standardError);
-        File.Exists(expectedPath).ShouldBeTrue();
-        File.Exists(
-            Path.Combine(
-                projectPath,
-                "fhirpkg.lock.json"))
-            .ShouldBeFalse();
-        PackageLockFile lockFile =
-            await PackageLockFile.LoadAsync(
-                expectedPath,
-                TestContext.Current.CancellationToken);
-        lockFile.SchemaVersion.ShouldBe(
-            PackageLockFile.CurrentSchemaVersion);
+        standardOutput.ShouldNotContain("--lock-file");
+        standardOutput.ShouldNotContain("--no-lock");
     }
 
-    [Fact]
-    public async Task Restore_CustomAbsoluteLockPath_WritesRequestedFile()
+    [Theory]
+    [InlineData("--lock-file=custom.lock.json", "--lock-file")]
+    [InlineData("-l custom.lock.json", "-l")]
+    [InlineData("--no-lock", "--no-lock")]
+    public async Task Restore_RemovedLockOptionsAreRejected(
+        string optionArguments,
+        string errorToken)
     {
         string projectPath = CreateTestProject(
             """{"name":"root.package","version":"1.0.0","dependencies":{}}""");
-        string expectedPath = Path.GetFullPath(
-            Path.Combine(
-                projectPath,
-                "..",
-                "locks",
-                "absolute.lock.json"));
 
         (int exitCode, string _, string standardError) =
             await RunCliAsync(
-                $"restore \"{projectPath}\" --lock-file \"{expectedPath}\" --quiet");
+                $"restore \"{projectPath}\" {optionArguments}");
 
-        exitCode.ShouldBe(
-            0,
-            standardError);
-        File.Exists(expectedPath).ShouldBeTrue();
-        File.Exists(
-            Path.Combine(
-                projectPath,
-                "fhirpkg.lock.json"))
-            .ShouldBeFalse();
+        exitCode.ShouldNotBe(0);
+        standardError.ShouldContain(errorToken);
     }
 
     private async Task<(int ExitCode, string StdOut, string StdErr)>

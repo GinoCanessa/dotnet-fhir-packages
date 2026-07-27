@@ -238,7 +238,7 @@ internal sealed class FhirSemVerRange
     private static FhirSemVer ParseExactVersion(string value, string fullExpression)
     {
         FhirSemVer version = ParseVersion(value, fullExpression);
-        if (version.IsWildcard)
+        if (version.IsWildcard || !version.HasThreePartCore)
             throw InvalidExpression(fullExpression);
 
         return version;
@@ -349,11 +349,8 @@ internal sealed class FhirSemVerRange
 
     private static void AddCandidate(
         List<FhirSemVer> candidates,
-        FhirSemVer candidate)
-    {
-        if (!candidates.Contains(candidate))
-            candidates.Add(candidate);
-    }
+        FhirSemVer candidate) =>
+        candidates.Add(candidate);
 
     private static void AddNumericCandidates(
         List<FhirSemVer> candidates,
@@ -470,7 +467,7 @@ internal sealed class FhirSemVerRange
     {
         internal bool IsSatisfiedBy(FhirSemVer version) => Operator switch
         {
-            ConstraintOperator.Equal => version.Equals(Operand),
+            ConstraintOperator.Equal => version.Satisfies(Operand),
             ConstraintOperator.Wildcard => version.Satisfies(Operand),
             ConstraintOperator.LessThan => version < Operand,
             ConstraintOperator.LessThanOrEqual => version <= Operand,
@@ -523,6 +520,16 @@ internal sealed class FhirSemVerRange
             foreach (Constraint constraint in _constraints)
             {
                 FhirSemVer operand = constraint.Operand;
+                if (constraint.Operator == ConstraintOperator.Wildcard)
+                {
+                    foreach (FhirSemVer candidate
+                             in operand.GetCompatibilityBoundaryCandidates(
+                                 allowPreRelease))
+                    {
+                        AddCandidate(candidates, candidate);
+                    }
+                }
+
                 if (!operand.IsWildcard
                     && (allowPreRelease
                         || !operand.IsPreRelease))

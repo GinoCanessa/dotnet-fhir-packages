@@ -100,6 +100,32 @@ public class PackageListingTests
     }
 
     [Fact]
+    public void LatestVersion_PreservesAndOrdersTwoPartPrecision()
+    {
+        PackageListing listing = new()
+        {
+            PackageId = "test.package",
+            Versions = new Dictionary<string, PackageVersionInfo>
+            {
+                ["2.0"] = new() { Name = "test.package", Version = "2.0" },
+                ["2.0.0-alpha"] = new()
+                {
+                    Name = "test.package",
+                    Version = "2.0.0-alpha",
+                },
+                ["2.0.0"] = new()
+                {
+                    Name = "test.package",
+                    Version = "2.0.0",
+                },
+            },
+        };
+
+        listing.LatestVersion.ShouldBe("2.0.0");
+        listing.Versions.Keys.ShouldContain("2.0");
+    }
+
+    [Fact]
     public void Defaults_AreCompleteWithoutFailuresOrCandidates()
     {
         Dictionary<string, PackageVersionInfo> versions = [];

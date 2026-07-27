@@ -26,6 +26,22 @@ public class PackageCacheKeyTests
     }
 
     [Fact]
+    public void TwoPartExactVersion_HasCanonicalIdentityWhileWildcardIsRejected()
+    {
+        PackageCacheKey exact = PackageCacheKey.Create(
+            new PackageReference("example.package", "2.0"));
+
+        exact.CanonicalReference.Version.ShouldBe("2.0");
+        exact.RelativePath.ShouldBe("example.package#2.0");
+        PackageInstallException exception =
+            Should.Throw<PackageInstallException>(
+                () => PackageCacheKey.Create(
+                    new PackageReference("example.package", "2.*")));
+        exception.ErrorCode.ShouldBe(
+            PackageInstallErrorCode.InvalidPackageIdentity);
+    }
+
+    [Fact]
     public void ScopedReference_UsesScopeAndPackageSegments()
     {
         PackageCacheKey key = PackageCacheKey.Create(

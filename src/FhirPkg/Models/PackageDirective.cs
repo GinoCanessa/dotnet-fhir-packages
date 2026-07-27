@@ -198,7 +198,10 @@ public partial record PackageDirective
     /// <summary>
     /// Classifies a version string into a <see cref="VersionType"/>.
     /// </summary>
-    /// <param name="version">The version string (e.g. "4.0.1", "latest", "current", "4.0.x", "^4.0.0").</param>
+    /// <param name="version">
+    /// The version string (for example, "4.0.1", "4.0", "4.x?",
+    /// "6.0.x-*", "latest", "current", or "^4.0.0").
+    /// </param>
     /// <returns>The classification of the version specifier.</returns>
     public static VersionType ClassifyVersion(string? version)
     {

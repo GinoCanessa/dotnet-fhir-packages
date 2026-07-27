@@ -1084,27 +1084,4 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         return listing.Versions!.ContainsKey(requestedVersion) ? requestedVersion : null;
     }
-
-    /// <summary>Returns the highest version satisfying a wildcard specifier.</summary>
-    protected static string? ResolveWildcard(
-        PackageListing listing, string specifier, VersionResolveOptions? options)
-    {
-        IEnumerable<FhirSemVer> versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
-        bool includePreRelease = options?.AllowPreRelease ?? true;
-
-        return FhirSemVer.MaxSatisfying(versions, specifier, includePreRelease)?.ToString();
-    }
-
-    /// <summary>Returns the highest version satisfying a semver range expression.</summary>
-    protected static string? ResolveRange(
-        PackageListing listing, string rangeExpression, VersionResolveOptions? options)
-    {
-        IEnumerable<FhirSemVer> versions = listing.Versions!.Keys.Select(FhirSemVer.Parse);
-        IEnumerable<FhirSemVer> satisfying = FhirSemVer.SatisfyingRange(versions, rangeExpression);
-
-        if (options?.AllowPreRelease is false)
-            satisfying = satisfying.Where(v => !v.IsPreRelease);
-
-        return satisfying.OrderByDescending(v => v).FirstOrDefault()?.ToString();
-    }
 }

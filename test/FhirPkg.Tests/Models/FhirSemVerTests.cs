@@ -118,13 +118,70 @@ public class FhirSemVerTests
     }
 
     [Fact]
-    public void Parse_TwoSegment_TreatedAsWildcard()
+    public void Parse_TwoPartVersion_IsExactAndPreservesPrecision()
     {
-        FhirSemVer version = FhirSemVer.Parse("4.0");
+        FhirSemVer twoPart = FhirSemVer.Parse("4.0");
+        FhirSemVer threePart = FhirSemVer.Parse("4.0.0");
+
+        twoPart.IsWildcard.ShouldBeFalse();
+        twoPart.ToString().ShouldBe("4.0");
+        twoPart.ShouldNotBe(threePart);
+        twoPart.CompareTo(threePart).ShouldBeLessThan(0);
+    }
+
+    [Theory]
+    [InlineData("2.0-alpha")]
+    [InlineData("2.0+build")]
+    [InlineData("2.0-alpha+build")]
+    public void Parse_TwoPartLabels_AreConcreteAndRoundTrip(string input)
+    {
+        FhirSemVer version = FhirSemVer.Parse(input);
+
+        version.IsWildcard.ShouldBeFalse();
+        version.ToString().ShouldBe(input);
+    }
+
+    [Theory]
+    [InlineData("2.x.x", "2.x.x")]
+    [InlineData("2.X.X", "2.x.x")]
+    [InlineData("2.0.0-x", "2.0.0-x")]
+    [InlineData("2.0.0+x", "2.0.0+x")]
+    public void Parse_WildcardAliases_AreContextSensitive(
+        string input,
+        string expected)
+    {
+        FhirSemVer version = FhirSemVer.Parse(input);
+
+        version.ToString().ShouldBe(expected);
+        version.IsWildcard.ShouldBe(input.Contains(".x", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData("*.0", "*.0")]
+    [InlineData("*.0.0", "*.0.0")]
+    [InlineData("2.*.0", "2.x.0")]
+    public void Parse_NonTrailingStar_IsPartSpecific(
+        string input,
+        string expected)
+    {
+        FhirSemVer version = FhirSemVer.Parse(input);
 
         version.IsWildcard.ShouldBeTrue();
-        version.Major.ShouldBe(4);
-        version.Minor.ShouldBe(0);
+        version.ToString().ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData("2.0?")]
+    [InlineData("2.0.1?")]
+    [InlineData("2.x?")]
+    [InlineData("2.0.0-*?")]
+    [InlineData("2.0.0+*?")]
+    public void Parse_TrailingQuestion_PreservesBoundary(string input)
+    {
+        FhirSemVer version = FhirSemVer.Parse(input);
+
+        version.IsWildcard.ShouldBeTrue();
+        version.ToString().ShouldBe(input);
     }
 
     [Fact]
@@ -151,6 +208,16 @@ public class FhirSemVerTests
     [InlineData("   ")]
     [InlineData("not-a-version")]
     [InlineData("a.b.c")]
+    [InlineData("2")]
+    [InlineData("x")]
+    [InlineData("X")]
+    [InlineData("2.?")]
+    [InlineData("2.0.?")]
+    [InlineData("2.0??")]
+    [InlineData("2.x.x.x")]
+    [InlineData("2.0.x-")]
+    [InlineData("2.0.0+")]
+    [InlineData("2.0?-alpha")]
     public void TryParse_Invalid_ReturnsFalse(string? input)
     {
         bool success = FhirSemVer.TryParse(input, out FhirSemVer? result);
@@ -204,6 +271,17 @@ public class FhirSemVerTests
     }
 
     [Fact]
+    public void CompareTo_CrossPrecisionPreRelease_UsesPartPresence()
+    {
+        FhirSemVer twoPart = FhirSemVer.Parse("2.0");
+        FhirSemVer threePartPreRelease = FhirSemVer.Parse("2.0.0-alpha");
+        FhirSemVer threePartRelease = FhirSemVer.Parse("2.0.0");
+
+        (twoPart < threePartPreRelease).ShouldBeTrue();
+        (threePartPreRelease < threePartRelease).ShouldBeTrue();
+    }
+
+    [Fact]
     public void Equals_SameVersion_True()
     {
         FhirSemVer a = FhirSemVer.Parse("4.0.1");
@@ -221,6 +299,42 @@ public class FhirSemVerTests
 
         a.Equals(b).ShouldBeFalse();
         (a != b).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Equals_ConcreteBuildMetadata_RemainsNeutral()
+    {
+        FhirSemVer first = FhirSemVer.Parse("2.0.0+first");
+        FhirSemVer second = FhirSemVer.Parse("2.0.0+second");
+
+        first.ShouldBe(second);
+        first.GetHashCode().ShouldBe(second.GetHashCode());
+    }
+
+    [Theory]
+    [InlineData("2.0?", "2.0")]
+    [InlineData("2.0?", "2.0.0?")]
+    [InlineData("2.*", "2.x.x")]
+    [InlineData("2.0.0+*", "2.0.0")]
+    [InlineData("2.0.0-*", "2.0.0+*")]
+    public void PatternEquality_IncludesShapeAndQuestionBoundary(
+        string leftInput,
+        string rightInput)
+    {
+        FhirSemVer left = FhirSemVer.Parse(leftInput);
+        FhirSemVer right = FhirSemVer.Parse(rightInput);
+
+        left.ShouldNotBe(right);
+    }
+
+    [Fact]
+    public void PatternEquality_EquivalentAliases_AreEqual()
+    {
+        FhirSemVer lower = FhirSemVer.Parse("2.x.x");
+        FhirSemVer upper = FhirSemVer.Parse("2.X.X");
+
+        lower.ShouldBe(upper);
+        lower.GetHashCode().ShouldBe(upper.GetHashCode());
     }
 
     [Fact]
@@ -304,7 +418,7 @@ public class FhirSemVerTests
     [Fact]
     public void Satisfies_WildcardMinor_MatchesSameMajor()
     {
-        FhirSemVer version = FhirSemVer.Parse("4.3.0");
+        FhirSemVer version = FhirSemVer.Parse("4.3");
 
         version.Satisfies("4.x").ShouldBeTrue();
     }
@@ -315,6 +429,67 @@ public class FhirSemVerTests
         FhirSemVer version = FhirSemVer.Parse("99.99.99");
 
         version.Satisfies("*").ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("2.0", "2.0", true)]
+    [InlineData("2.0", "2.0.0", false)]
+    [InlineData("2.0", "2.0-alpha", false)]
+    [InlineData("2.0.0", "2.0.0", true)]
+    [InlineData("2.0.0", "2.0.0-alpha", false)]
+    [InlineData("2.0.0", "2.0.0+build", false)]
+    [InlineData("2.*", "2.0", true)]
+    [InlineData("2.*", "2.1", true)]
+    [InlineData("2.*", "2.0.0", false)]
+    [InlineData("2.*", "2.0-alpha", false)]
+    [InlineData("2.x.x", "2.0.0", true)]
+    [InlineData("2.x.x", "2.1.5", true)]
+    [InlineData("2.x.x", "2.0", false)]
+    [InlineData("2.x.x", "2.0.0-alpha", false)]
+    [InlineData("2.0.*", "2.0.0", true)]
+    [InlineData("2.0.*", "2.0.9", true)]
+    [InlineData("2.0.*", "2.0", false)]
+    [InlineData("2.0.*", "2.0.0+build", false)]
+    [InlineData("2.0.0-*", "2.0.0-alpha", true)]
+    [InlineData("2.0.0-*", "2.0.0", false)]
+    [InlineData("2.0.0-*", "2.0.0-alpha+build", false)]
+    [InlineData("2.0.0+*", "2.0.0+build", true)]
+    [InlineData("2.0.0+*", "2.0.0", false)]
+    [InlineData("2.0.0+*", "2.0.0-alpha+build", false)]
+    [InlineData("2.0.x-*", "2.0.1-ballot", true)]
+    [InlineData("2.0.x-*", "2.0.1", false)]
+    [InlineData("2.0.x-*", "2.0.1-ballot+build", false)]
+    [InlineData("2.0?", "2.0", true)]
+    [InlineData("2.0?", "2.0.1", true)]
+    [InlineData("2.0?", "2.0.1-alpha+build", true)]
+    [InlineData("2.0?", "2.1", false)]
+    [InlineData("2.0.1?", "2.0.1", true)]
+    [InlineData("2.0.1?", "2.0.1-alpha+build", true)]
+    [InlineData("2.0.1?", "2.0", false)]
+    [InlineData("2.0.1?", "2.0.2", false)]
+    [InlineData("2.x?", "2.0", true)]
+    [InlineData("2.x?", "2.1.3-alpha+build", true)]
+    [InlineData("2.x?", "3.0", false)]
+    [InlineData("*.0", "1.0", true)]
+    [InlineData("*.0", "1.0.0", false)]
+    [InlineData("*.0.0", "1.0.0", true)]
+    [InlineData("*.0.0", "1.1.0", false)]
+    [InlineData("2.*.0", "2.5.0", true)]
+    [InlineData("2.*.0", "2.5.1", false)]
+    [InlineData("2.0.0-x", "2.0.0-x", true)]
+    [InlineData("2.0.0-x", "2.0.0-alpha", false)]
+    [InlineData("2.0.0+x", "2.0.0+x", true)]
+    [InlineData("2.0.0+x", "2.0.0+build", false)]
+    [InlineData("*", "2.0", true)]
+    [InlineData("*", "2.0.0-alpha+build", true)]
+    public void Satisfies_DefinedWildcardGrammar_MatchesByPart(
+        string pattern,
+        string candidate,
+        bool expected)
+    {
+        FhirSemVer version = FhirSemVer.Parse(candidate);
+
+        version.Satisfies(pattern).ShouldBe(expected);
     }
 
     [Fact]
@@ -346,6 +521,84 @@ public class FhirSemVerTests
         FhirSemVer? result = FhirSemVer.MaxSatisfying(versions, "4.0.x");
 
         result.ShouldBeNull();
+    }
+
+    [Fact]
+    public void MaxSatisfying_PatternPrereleaseBehavior_IsExplicit()
+    {
+        FhirSemVer[] versions =
+        [
+            FhirSemVer.Parse("2.0"),
+            FhirSemVer.Parse("2.0.0-alpha"),
+        ];
+
+        FhirSemVer? defaultQuestion =
+            FhirSemVer.MaxSatisfying(versions, "2.0?");
+        FhirSemVer? enabledQuestion =
+            FhirSemVer.MaxSatisfying(versions, "2.0?", true);
+        FhirSemVer? requiredPreRelease =
+            FhirSemVer.MaxSatisfying(versions, "2.0.0-*");
+
+        defaultQuestion!.ToString().ShouldBe("2.0");
+        enabledQuestion!.ToString().ShouldBe("2.0.0-alpha");
+        requiredPreRelease!.ToString().ShouldBe("2.0.0-alpha");
+    }
+
+    [Fact]
+    public void MaxSatisfying_RangeExpression_RemainsInvalid()
+    {
+        FhirSemVer[] versions = [FhirSemVer.Parse("2.0.0")];
+
+        Should.Throw<FormatException>(
+            () => FhirSemVer.MaxSatisfying(versions, "^2.0.0"));
+    }
+
+    [Fact]
+    public void SatisfyingRange_StandaloneExact_PreservesPrecisionAndBuild()
+    {
+        FhirSemVer[] versions =
+        [
+            FhirSemVer.Parse("2.0"),
+            FhirSemVer.Parse("2.0.0"),
+            FhirSemVer.Parse("2.0.0+build"),
+        ];
+
+        FhirSemVer.SatisfyingRange(versions, "2.0")
+            .Select(version => version.ToString())
+            .ShouldBe(["2.0"]);
+        FhirSemVer.SatisfyingRange(versions, "2.0.0")
+            .Select(version => version.ToString())
+            .ShouldBe(["2.0.0"]);
+    }
+
+    [Theory]
+    [InlineData("^2.0")]
+    [InlineData("~2.0")]
+    [InlineData(">=2.0")]
+    [InlineData("=2.0")]
+    [InlineData("2.0 - 3.0")]
+    public void SatisfyingRange_TwoPartRangeOperands_AreRejected(
+        string expression)
+    {
+        FhirSemVer[] versions = [FhirSemVer.Parse("2.0")];
+
+        Should.Throw<FormatException>(
+            () => FhirSemVer.SatisfyingRange(versions, expression).ToList());
+    }
+
+    [Fact]
+    public void SatisfyingRange_PipeAllowsStandaloneTwoPartAlternatives()
+    {
+        FhirSemVer[] versions =
+        [
+            FhirSemVer.Parse("2.0"),
+            FhirSemVer.Parse("2.0.0"),
+            FhirSemVer.Parse("3.0"),
+        ];
+
+        FhirSemVer.SatisfyingRange(versions, "2.0|3.0")
+            .Select(version => version.ToString())
+            .ShouldBe(["2.0", "3.0"]);
     }
 
     [Fact]
@@ -497,7 +750,28 @@ public class FhirSemVerTests
     [Theory]
     [InlineData("^2.0.0", "1.0.0", false, false)]
     [InlineData("^2.0.0", "3.0.0", false, true)]
-    [InlineData("2.x", "3.0.0", false, true)]
+    [InlineData("2.x.x", "3.0.0", false, true)]
+    [InlineData("2.0", "2.0", false, true)]
+    [InlineData("2.0", "1.9.9", false, false)]
+    [InlineData("2.*", "2.0", false, true)]
+    [InlineData("2.*", "1.9.9", false, false)]
+    [InlineData("2.x.x", "2.0", false, false)]
+    [InlineData("2.x.x", "2.0.0", false, true)]
+    [InlineData("2.0?", "2.0", false, true)]
+    [InlineData("2.0?", "1.9.9", false, false)]
+    [InlineData("2.0.1?", "2.0.1--", true, true)]
+    [InlineData("2.0.1?", "2.0.1-alpha", false, false)]
+    [InlineData("2.0.1?", "2.0.1", false, true)]
+    [InlineData("2.0.0-*", "2.0.0", true, true)]
+    [InlineData("2.0.0-*", "2.0.0", false, false)]
+    [InlineData("2.0.0-*", "1.9.9", true, false)]
+    [InlineData("2.0.x-*", "2.0.0-alpha", true, true)]
+    [InlineData("2.0.x-*", "2.0", true, false)]
+    [InlineData("2.0.0+*", "2.0.0", false, true)]
+    [InlineData("2.0.0+*", "1.9.9", false, false)]
+    [InlineData("*.0", "0.0", false, true)]
+    [InlineData("2.*.0", "2.0", false, false)]
+    [InlineData("2.*.0", "2.0.0", false, true)]
     [InlineData(
         ">1.0.0-alpha <1.0.0-rc",
         "2.0.0",
@@ -518,6 +792,52 @@ public class FhirSemVerTests
                 allowPreRelease);
 
         actual.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Range_HasSatisfyingVersionAtOrBelow_MatchesEnumeratedOracle()
+    {
+        string[] patterns =
+        [
+            "*",
+            "2.0",
+            "2.*",
+            "2.x.x",
+            "2.0.*",
+            "2.0.0-*",
+            "2.0.x-*",
+            "2.0.0+*",
+            "2.0?",
+            "2.0.1?",
+            "2.x?",
+            "*.0",
+            "*.0.0",
+            "2.*.0",
+        ];
+        IReadOnlyList<FhirSemVer> universe =
+            CreateCompatibilityOracleUniverse();
+
+        foreach (string pattern in patterns)
+        {
+            FhirSemVerRange range = FhirSemVerRange.Parse(pattern);
+            foreach (bool allowPreRelease in new[] { false, true })
+            {
+                foreach (FhirSemVer ceiling in universe)
+                {
+                    bool expected = universe.Any(candidate =>
+                        candidate <= ceiling &&
+                        (allowPreRelease || !candidate.IsPreRelease) &&
+                        range.IsSatisfiedBy(candidate));
+
+                    range.HasSatisfyingVersionAtOrBelow(
+                            ceiling,
+                            allowPreRelease)
+                        .ShouldBe(
+                            expected,
+                            $"{pattern} at or below {ceiling}, prerelease={allowPreRelease}");
+                }
+            }
+        }
     }
 
     [Fact]
@@ -542,5 +862,36 @@ public class FhirSemVerTests
         FhirSemVer version = FhirSemVer.Parse("*");
 
         version.ToString().ShouldBe("*");
+    }
+
+    private static IReadOnlyList<FhirSemVer>
+        CreateCompatibilityOracleUniverse()
+    {
+        List<FhirSemVer> versions = [];
+        for (int major = 0; major <= 3; major++)
+        {
+            for (int minor = 0; minor <= 2; minor++)
+            {
+                string twoPart = $"{major}.{minor}";
+                versions.Add(FhirSemVer.Parse(twoPart));
+                versions.Add(FhirSemVer.Parse($"{twoPart}-alpha"));
+                versions.Add(FhirSemVer.Parse($"{twoPart}+build"));
+                versions.Add(FhirSemVer.Parse($"{twoPart}-alpha+build"));
+
+                for (int patch = 0; patch <= 2; patch++)
+                {
+                    string threePart = $"{twoPart}.{patch}";
+                    versions.Add(FhirSemVer.Parse(threePart));
+                    versions.Add(FhirSemVer.Parse($"{threePart}--"));
+                    versions.Add(FhirSemVer.Parse($"{threePart}-alpha"));
+                    versions.Add(FhirSemVer.Parse($"{threePart}+-"));
+                    versions.Add(FhirSemVer.Parse($"{threePart}+build"));
+                    versions.Add(FhirSemVer.Parse(
+                        $"{threePart}-alpha+build"));
+                }
+            }
+        }
+
+        return versions;
     }
 }

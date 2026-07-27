@@ -49,6 +49,26 @@ public class PackageIdentityValidatorTests : IDisposable
         result.CacheKey.DisplayReference.ShouldBe(expectation.Reference);
     }
 
+    [Fact]
+    public async Task ValidateExpectedAsync_TwoPartExactIdentity_IsAccepted()
+    {
+        string manifestPath = await WriteManifestAsync(
+            """{"name":"example.package","version":"2.0"}""");
+        PackageIdentityExpectation expectation =
+            PackageIdentityValidator.CreateExpectation(
+                new PackageReference("example.package", "2.0"));
+
+        PackageIdentityValidationResult result =
+            await PackageIdentityValidator.ValidateExpectedAsync(
+                manifestPath,
+                expectation,
+                "example.package#2.0",
+                TestContext.Current.CancellationToken);
+
+        result.ManifestReference.Version.ShouldBe("2.0");
+        result.CacheKey.CanonicalReference.Version.ShouldBe("2.0");
+    }
+
     [Theory]
     [InlineData("other.package", "1.2.3")]
     [InlineData("example.package", "1.2.4")]
@@ -157,7 +177,6 @@ public class PackageIdentityValidatorTests : IDisposable
     [InlineData("current")]
     [InlineData("dev")]
     [InlineData("1.2.x")]
-    [InlineData("1.2")]
     [InlineData("*")]
     [InlineData("^1.2.0")]
     [InlineData(">=1.2.0")]
@@ -186,7 +205,6 @@ public class PackageIdentityValidatorTests : IDisposable
     [Theory]
     [InlineData("latest")]
     [InlineData("1.2.x")]
-    [InlineData("1.2")]
     [InlineData("*")]
     [InlineData("^1.2.0")]
     [InlineData(">=1.2.0")]
@@ -205,7 +223,6 @@ public class PackageIdentityValidatorTests : IDisposable
 
     [Theory]
     [InlineData("latest")]
-    [InlineData("1.2")]
     [InlineData("1.2.x")]
     [InlineData("^1.2.0")]
     [InlineData(">=1.2.0")]

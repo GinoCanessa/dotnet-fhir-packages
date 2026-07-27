@@ -173,8 +173,8 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     /// <inheritdoc />
     /// <remarks>
     /// Resolution follows the same strategy as <see cref="FhirNpmRegistryClient"/>:
-    /// exact lookup, dist-tags for latest, <see cref="FhirSemVer.MaxSatisfying"/> for
-    /// wildcards, and <see cref="FhirSemVer.SatisfyingRange"/> for ranges.
+    /// exact lookup, dist-tags for latest, and shared candidate-preserving
+    /// wildcard/range matching.
     /// </remarks>
     public override async Task<ResolvedDirective?> ResolveAsync(
         PackageDirective directive,

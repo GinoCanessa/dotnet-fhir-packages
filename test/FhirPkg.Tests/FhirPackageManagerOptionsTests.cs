@@ -54,6 +54,43 @@ public class FhirPackageManagerOptionsTests
             .ShouldBe("1.0.1");
     }
 
+    [Fact]
+    public void CreateConfiguration_AcceptsTwoPartExactVersionFixups()
+    {
+        FhirPackageManagerOptions options = new()
+        {
+            VersionFixups = new Dictionary<string, string>
+            {
+                ["example.package@2.0"] = "2.1",
+            },
+        };
+
+        FhirPackageManagerConfiguration configuration =
+            FhirPackageManagerConfiguration.Create(options);
+
+        configuration.FixupPolicy
+            .ApplyVersion("example.package", "2.0")
+            .ShouldBe("2.1");
+    }
+
+    [Theory]
+    [InlineData("2.*", "2.0")]
+    [InlineData("2.0", "2.*")]
+    public void CreateConfiguration_RejectsWildcardVersionFixups(
+        string sourceVersion,
+        string targetVersion)
+    {
+        FhirPackageManagerOptions options = new()
+        {
+            VersionFixups = new Dictionary<string, string>
+            {
+                [$"example.package@{sourceVersion}"] = targetVersion,
+            },
+        };
+
+        AssertInvalid(options);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]

@@ -28,7 +28,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
   - [ResolvedDirective](#resolveddirective)
   - [PackageInstallResult](#packageinstallresult)
   - [PackageClosure](#packageclosure)
-  - [PackageLockFile](#packagelockfile)
+  - [PackageInstallationIdentity](#packageinstallationidentity)
   - [PackageSearchCriteria](#packagesearchcriteria)
   - [PackageProgress](#packageprogress)
   - [PackageIndex & ResourceIndexEntry](#packageindex--resourceindexentry)
@@ -166,17 +166,18 @@ IReadOnlyList<PackageInstallResult> results =
 #### `RestoreAsync`
 
 Reads a `package.json` manifest from `projectPath`, resolves the full transitive
-dependency closure, installs all resolved packages, and optionally writes a lock
-file. A current schema-v2 lock can bypass graph resolution only when its exact
-root directives and complete resolution-policy identity match this request.
+dependency closure from current registry/cache state, and installs every
+reachable exact package identity. Distinct versions of one package and their
+separate transitive subgraphs coexist. The conflict strategy selects the
+preferred name-keyed projection but never removes required exact versions.
 
 ```csharp
-var closure = await manager.RestoreAsync("./my-ig", new RestoreOptions
-{
-    LockFilePath = "./locks/fhirpkg.lock.json",
-    ConflictStrategy = ConflictResolutionStrategy.HighestWins,
-    WriteLockFile = true,
-});
+PackageClosure closure = await manager.RestoreAsync(
+    "./my-ig",
+    new RestoreOptions
+    {
+        ConflictStrategy = ConflictResolutionStrategy.HighestWins,
+    });
 ```
 
 #### `ListCachedAsync`
@@ -466,18 +467,15 @@ Extends `InstallOptions` with dependency-resolution settings.
 ```csharp
 public class RestoreOptions : InstallOptions
 {
-    public string? LockFilePath { get; set; }                         // default: <project>/fhirpkg.lock.json
     public ConflictResolutionStrategy ConflictStrategy { get; set; } // default: HighestWins
-    public bool WriteLockFile { get; set; }                          // default: true
     public int MaxDepth { get; set; }                                // default: 20
 }
 ```
 
-Relative `LockFilePath` values are resolved against the project directory;
-absolute values are unchanged. `WriteLockFile = false` prevents replacement
-but does not disable reading a current lock. `OverwriteExisting` controls cache
-replacement only and does not invalidate an otherwise current lock. The
-filename `.fhirpkg-restore.lock` is reserved for restore coordination.
+Every restore resolves the live graph. `ConflictStrategy` chooses the preferred
+entry exposed through `PackageClosure.Resolved`; it does not remove alternate
+exact versions from `ResolvedPackages` or installation. `OverwriteExisting`
+continues to control replacement of package-cache entries.
 
 ### VersionResolveOptions
 
@@ -768,26 +766,32 @@ public record PackageClosure
 {
     public required DateTime Timestamp { get; init; }
     public required IReadOnlyDictionary<string, PackageReference> Resolved { get; init; }
+    public IReadOnlyList<PackageReference> ResolvedPackages { get; init; } = [];
+    public IReadOnlyList<PackageInstallationIdentity> InstallationIdentities { get; init; } = [];
     public required IReadOnlyDictionary<string, string> Missing { get; init; }
-    public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; }
-    public IReadOnlyList<PackageReference> InstallOrder { get; init; }
-    public IReadOnlyList<PackageReference> ReplayOrder { get; init; }
-    public IReadOnlyList<PackageReference> BootstrapInstallOrder { get; init; }
+    public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; } = [];
+    public IReadOnlyList<PackageReference> InstallOrder { get; init; } = [];
+    public IReadOnlyList<PackageReference> BootstrapInstallOrder { get; init; } = [];
     public bool InstallOrderIsComplete { get; init; }
     public bool IsComplete { get; }  // true when Missing and Failures are empty
 }
 ```
 
-`Resolved` always carries selected exact manifest identities. `InstallOrder`
-may preserve a mutable CI alias as the cache/install reference.
-`ReplayOrder` is the complete dependency-first plan, including cached nodes,
-used to persist a lock that can replay mutable aliases without losing their
-exact expected identities.
+`ResolvedPackages` is the authoritative complete closure: every reachable exact
+name/version identity appears once, including coexisting versions of the same
+package. `Resolved` is the conflict-policy-selected preferred projection keyed
+by package name and is retained for compatibility and convenient lookup.
+
+`InstallationIdentities` maps each reference that may appear in installation or
+bootstrap order to its exact resolved manifest identity. `InstallOrder` may
+preserve a mutable CI alias as the cache/install reference; consumers that
+install those references should use the mapping instead of treating an alias as
+an exact identity.
 `BootstrapInstallOrder` identifies CI aliases whose exact identity or
 authoritative dependency metadata is only available after installation; the
 manager installs those aliases and re-resolves before installing the final
-active order. An empty
-`InstallOrder` is authoritative when `InstallOrderIsComplete` is `true`.
+exact order. An empty `InstallOrder` is authoritative when
+`InstallOrderIsComplete` is `true`.
 
 `Missing` is retained as a backward-compatible package-to-message projection.
 Use `Failures` for stable failure categories and structured context.
@@ -809,51 +813,19 @@ public sealed record DependencyResolutionFailure
 }
 ```
 
-### PackageLockFile
-
-Schema-versioned input and output for deterministic restores.
+### PackageInstallationIdentity
 
 ```csharp
-public record PackageLockFile
+public sealed record PackageInstallationIdentity
 {
-   public const int CurrentSchemaVersion = 2;
-
-   public int SchemaVersion { get; init; }
-   public required DateTime Updated { get; init; }
-   public string? RootPackage { get; init; }
-   public IReadOnlyList<string>? Roots { get; init; }
-   public PackageLockPolicy? Policy { get; init; }
-   public required IReadOnlyDictionary<string, string> Dependencies { get; init; }
-   public IReadOnlyList<string>? InstallOrder { get; init; }
-   public IReadOnlyDictionary<string, string>? Missing { get; init; }
-   public IReadOnlyList<DependencyResolutionFailure> Failures { get; init; }
-
-   public static PackageLockFile Load(string path);
-   public static Task<PackageLockFile> LoadAsync(
-       string path,
-       CancellationToken cancellationToken = default);
-   public void Save(string path);
-   public Task SaveAsync(
-       string path,
-       CancellationToken cancellationToken = default);
-}
-
-public sealed record PackageLockPolicy
-{
-   public required ConflictResolutionStrategy ConflictStrategy { get; init; }
-   public required bool AllowPreRelease { get; init; }
-   public FhirRelease? PreferredFhirRelease { get; init; }
-   public required int MaxDepth { get; init; }
-   public required string VersionFixupHash { get; init; }
+    public required PackageReference InstallationReference { get; init; }
+    public required PackageReference ResolvedReference { get; init; }
 }
 ```
 
-Schema-v1 files remain readable but are always stale because they cannot prove
-root or policy identity. Unknown future schemas throw `NotSupportedException`.
-Saving serializes fully before a durable same-directory atomic replacement;
-cancellation or pre-commit failure preserves the prior bytes. Manager restore
-also serializes writers for a requested lock path across processes and
-revalidates the project manifest immediately before replacement.
+`InstallationReference` is the directive passed to the installer and can retain
+mutable aliases such as `current` or `dev`. `ResolvedReference` is the exact
+name/version identity reported by the resolved package manifest.
 
 ### PackageSearchCriteria
 
@@ -963,8 +935,8 @@ public record PublishResult
 
 ### FhirSemVer
 
-FHIR-aware semantic version with support for pre-release hierarchies, wildcards,
-and ranges.
+FHIR-aware semantic version with exact numeric precision, pre-release
+hierarchies, part-wise wildcard patterns, and range helpers.
 
 ```csharp
 public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
@@ -985,7 +957,7 @@ public sealed class FhirSemVer : IComparable<FhirSemVer>, IEquatable<FhirSemVer>
     public bool Satisfies(string versionSpecifier);
     public bool Satisfies(FhirSemVer other);
 
-    // Highest version in 'versions' that satisfies 'specifier' (static; null if none).
+    // Highest version satisfying one exact/wildcard specifier (not range syntax).
     public static FhirSemVer? MaxSatisfying(
         IEnumerable<FhirSemVer> versions, string specifier, bool includePreRelease = false);
 
@@ -1011,12 +983,21 @@ Examples:
 
 | Format | Example | Type |
 |--------|---------|------|
-| Exact | `4.0.1`, `6.0.0-ballot1` | Exact |
-| Wildcard | `4.0.x`, `4.*`, `*` | Wildcard |
+| Exact | `4.0`, `4.0.1`, `6.0.0-ballot1` | Exact; two-part and three-part precision are distinct |
+| Numeric wildcard | `2.*`, `2.x.x`, `*.0.0`, `2.*.0` | Matches only the stated numeric parts and part count |
+| Label/build wildcard | `2.0.0-*`, `2.0.0+*`, `2.0.x-*` | Requires the wildcarded label/build part |
+| Trailing remainder | `2.0?`, `2.0.1?`, `2.x?` | Matches the current part, then ignores all remaining parts |
+| All versions | `*` | Any concrete supported version, subject to pre-release policy |
 | Range (caret) | `^4.0.0` | Range — compatible (≥4.0.0, <5.0.0) |
 | Range (tilde) | `~4.0.0` | Range — approximately (≥4.0.0, <4.1.0) |
 | Range (between) | `4.0.0 - 5.0.0` | Range — inclusive |
 | Range (or) | `4.0.1 \| 5.0.0` | Range — either |
+
+`*` may occupy any supported part. `x`/`X` alias numeric minor and patch
+wildcards only; they remain literal label text. Omitted parts must be absent
+unless a trailing `?` ignores them. See the
+[versioning reference](../reference/versioning.md#2-part-wise-wildcard-patterns)
+for the authoritative matching table and package-level prerelease policy.
 
 ---
 
@@ -1040,8 +1021,8 @@ Classifies how a version specifier should be resolved.
 
 | Value | Example | Description |
 |-------|---------|-------------|
-| `Exact` | `4.0.1` | Exact semantic version |
-| `Wildcard` | `4.0.x` | Pattern with wildcards |
+| `Exact` | `4.0`, `4.0.1` | Exact two-part or three-part version |
+| `Wildcard` | `4.0.x`, `4.x?`, `6.0.x-*` | Defined part-wise FHIR pattern |
 | `Latest` | `latest`, *(empty)* | Latest published version |
 | `Range` | `^4.0.0` | Semantic version range |
 | `CiBuild` | `current` | Latest CI build (default branch) |
@@ -1108,9 +1089,9 @@ versions.
 
 | Value | Description |
 |-------|-------------|
-| `HighestWins` | Keep the highest version (default) |
-| `FirstWins` | Keep the first version encountered |
-| `Error` | Record a typed conflict failure and keep the first version for partial traversal |
+| `HighestWins` | Prefer the highest version in `Resolved` (default); retain all exact versions |
+| `FirstWins` | Prefer the first version encountered in `Resolved`; retain all exact versions |
+| `Error` | Prefer the first version in `Resolved`, retain all exact versions, and record a typed conflict failure |
 
 ### DependencyResolutionFailureCode
 
@@ -1121,7 +1102,7 @@ versions.
 | `DepthLimitExceeded` | An active edge exceeded the root-relative maximum depth |
 | `MetadataUnavailable` | Dependency metadata could not be proven complete |
 | `RegistryUnavailable` | Registry failures prevented authoritative version resolution |
-| `UnstableResolution` | A version-dependent graph repeated a prior state |
+| `UnstableResolution` | Retained for source compatibility; the built-in exact-node resolver does not emit it |
 | `InvalidDirective` | A dependency edge contained an invalid package identity or version specifier |
 
 ### PackageProgressPhase
@@ -1549,7 +1530,8 @@ redirect-controlled transport, even when no credentials are configured.
 ### IVersionResolver
 
 Resolves version specifiers (wildcards, ranges, `latest`) to exact versions by
-querying registries.
+querying registries and filtering original candidate entries with the shared
+FHIR matcher.
 
 ```csharp
 public interface IVersionResolver
@@ -1577,10 +1559,6 @@ public interface IDependencyResolver
         PackageManifest rootManifest,
         DependencyResolveOptions? options = null,
         CancellationToken cancellationToken = default);
-
-    Task<PackageClosure> RestoreFromLockFileAsync(
-        PackageLockFile lockFile,
-        CancellationToken cancellationToken = default);
 }
 ```
 
@@ -1598,10 +1576,13 @@ public class DependencyResolveOptions
 
 Key behaviors:
 
-- **Active graph replacement** — winner changes prune losing-only descendants
-  and stale failures while preserving shared descendants.
-- **Cycle handling** — shared DAG paths remain active; repeated whole-graph
-  states produce a typed failure rather than looping.
+- **Exact-node traversal** — graph identity is package name plus exact version,
+  so different versions and their child subgraphs coexist while repeated exact
+  identities are deduplicated.
+- **Preferred projection** — conflict policy selects the name-keyed `Resolved`
+  entry independently from the complete `ResolvedPackages` closure.
+- **Cycle handling** — exact-version cycles terminate, while shared DAG paths
+  and alternate versions remain active.
 - **Depth limiting** — direct dependencies are depth zero; truncation is a
   typed failure and negative limits are rejected.
 - **Metadata provenance** — selected registry candidates are exhausted before

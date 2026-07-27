@@ -11,6 +11,38 @@ qualification evidence) lives alongside this file under
 ## Current
 
 ### Added
+- Added the tested `FhirPkg.Release` C# tool for validating release inputs,
+  package and symbol contents, synchronized candidates, publication state, and
+  published package provenance.
+- Restore output now lists every exact resolved package identity, including
+  coexisting versions of the same package, in console and JSON formats.
+
+### Changed
+- Pack, qualify, publish, and independently verify `fhir-pkg-lib` and
+  `fhir-pkg-cli` as one synchronized release candidate, with safe recovery from
+  partial NuGet publication.
+- Migrated release workflow validation from PowerShell scripts to the C#
+  release tool.
+- Updated GitHub workflows to the Node 24-compatible `actions/checkout@v6` and
+  `actions/setup-dotnet@v5`.
+
+### Fixed
+- Fixed the deployment regression that could publish the SDK without the CLI.
+- Made transient Windows cache-replacement retries asynchronous and
+  cancellation-aware.
+- Restored the defined FHIR/FHIRsmith wildcard grammar, including exact
+  two-part versions, part-specific numeric/label/build wildcards, and trailing
+  `?` remainder matching.
+- Preserved and installed every required exact package version and its transitive
+  subgraph during recursive dependency resolution.
+
+### Removed
+- Removed SDK and CLI project restore-lock APIs and options. Restore now always
+  resolves the live manifest, registry, and cache graph.
+
+## [2026.722.1030] - 2026-07-22
+
+### Added
 - Hardened, caller-owned package install contract: install from caller-owned
   streams or absolute HTTP/HTTPS URIs with bounded acquisition/extraction
   limits and archive layout + identity validation.

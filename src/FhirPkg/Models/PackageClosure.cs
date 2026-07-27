@@ -14,9 +14,23 @@ public record PackageClosure
     public required DateTime Timestamp { get; init; }
 
     /// <summary>
-    /// The set of successfully resolved packages, keyed by package identifier.
+    /// The conflict-policy-selected preferred packages, keyed by package
+    /// identifier.
     /// </summary>
     public required IReadOnlyDictionary<string, PackageReference> Resolved { get; init; }
+
+    /// <summary>
+    /// Every successfully resolved exact package identity. Distinct versions
+    /// of the same package are retained as separate entries.
+    /// </summary>
+    public IReadOnlyList<PackageReference> ResolvedPackages { get; init; } = [];
+
+    /// <summary>
+    /// Maps installation references, including mutable aliases, to the exact
+    /// manifest identities represented by those references.
+    /// </summary>
+    public IReadOnlyList<PackageInstallationIdentity> InstallationIdentities { get; init; } =
+        [];
 
     /// <summary>
     /// Packages that could not be resolved, keyed by package identifier with the reason as value.
@@ -38,14 +52,6 @@ public record PackageClosure
     /// <see cref="Resolved"/> retains the selected exact manifest identity.
     /// </summary>
     public IReadOnlyList<PackageReference> InstallOrder { get; init; } = [];
-
-    /// <summary>
-    /// Complete active dependency-first replay order. Unlike
-    /// <see cref="InstallOrder"/>, this includes already-cached nodes and
-    /// preserves mutable installation aliases separately from exact
-    /// <see cref="Resolved"/> identities.
-    /// </summary>
-    public IReadOnlyList<PackageReference> ReplayOrder { get; init; } = [];
 
     /// <summary>
     /// Alias dependencies that must be installed before their exact manifest

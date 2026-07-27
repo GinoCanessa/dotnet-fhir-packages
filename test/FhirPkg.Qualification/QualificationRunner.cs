@@ -755,11 +755,7 @@ internal sealed class QualificationRunner
             .ConfigureAwait(false);
         PackageClosure closure = await manager.RestoreAsync(
                 projectPath,
-                new RestoreOptions
-                {
-                    WriteLockFile = false
-                },
-                cancellationToken)
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         QualificationAssert.Equal(
             0,

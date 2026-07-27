@@ -136,8 +136,8 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
     /// <list type="bullet">
     ///   <item><description><see cref="VersionType.Exact"/>: direct lookup in the versions dictionary.</description></item>
     ///   <item><description><see cref="VersionType.Latest"/>: uses the <c>dist-tags.latest</c> value.</description></item>
-    ///   <item><description><see cref="VersionType.Wildcard"/>: uses <see cref="FhirSemVer.MaxSatisfying"/> against all versions.</description></item>
-    ///   <item><description><see cref="VersionType.Range"/>: uses <see cref="FhirSemVer.SatisfyingRange"/> and picks the highest match.</description></item>
+    ///   <item><description><see cref="VersionType.Wildcard"/>: uses the shared component-aware matcher against original listing candidates.</description></item>
+    ///   <item><description><see cref="VersionType.Range"/>: uses the shared range matcher against original listing candidates.</description></item>
     /// </list>
     /// </remarks>
     public override async Task<ResolvedDirective?> ResolveAsync(

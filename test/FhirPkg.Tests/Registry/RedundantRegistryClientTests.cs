@@ -696,6 +696,57 @@ public class RedundantRegistryClientTests
     }
 
     [Fact]
+    public async Task ResolveAsync_BuildWildcard_PreservesSourceAndKey()
+    {
+        RegistryEndpoint firstEndpoint = CreateEndpoint("first");
+        RegistryEndpoint secondEndpoint = CreateEndpoint("second");
+        PackageVersionInfo firstVersion = CreateVersion(
+            "example.package",
+            "1.0.0+build.1",
+            firstEndpoint,
+            dependencies: new Dictionary<string, string>
+            {
+                ["first.dependency"] = "1.0.0",
+            });
+        PackageVersionInfo secondVersion = CreateVersion(
+            "example.package",
+            "1.0.0+build.2",
+            secondEndpoint,
+            dependencies: new Dictionary<string, string>
+            {
+                ["second.dependency"] = "1.0.0",
+            });
+        Mock<IRegistryClient> first = CreateMockClient(firstEndpoint);
+        Mock<IRegistryClient> second = CreateMockClient(secondEndpoint);
+        first.Setup(client => client.GetPackageListingAsync(
+                "example.package",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CreateListing(
+                "example.package",
+                "1.0.0+build.1",
+                firstVersion));
+        second.Setup(client => client.GetPackageListingAsync(
+                "example.package",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CreateListing(
+                "example.package",
+                "1.0.0+build.2",
+                secondVersion));
+        RedundantRegistryClient sut = new(first.Object, second.Object);
+
+        ResolvedDirective? resolved = await sut.ResolveAsync(
+            PackageDirective.Parse("example.package#1.0.0+*"),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        resolved.ShouldNotBeNull();
+        resolved.Reference.Version.ShouldBe("1.0.0+build.1");
+        resolved.SourceRegistry.ShouldBe(firstEndpoint);
+        resolved.Dependencies!.ContainsKey("first.dependency").ShouldBeTrue();
+        resolved.Dependencies.ContainsKey("second.dependency").ShouldBeFalse();
+        resolved.TarballUri.Host.ShouldBe("first.example");
+    }
+
+    [Fact]
     public async Task ResolveAsync_NestedComposite_MaterializesFromInnerLeafSource()
     {
         RegistryEndpoint firstEndpoint = CreateEndpoint("first");

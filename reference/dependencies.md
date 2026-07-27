@@ -22,12 +22,15 @@ Each key is a package name and each value is a version specifier. The version sp
 
 | Format | Example | Meaning |
 |--------|---------|---------|
-| Exact | `"4.0.1"` | Exactly this version |
+| Exact | `"4.0"` or `"4.0.1"` | Exactly this two-part or three-part version |
 | Range | `"^3.0.1"` | SemVer-compatible range |
-| Wildcard | `"4.0.x"` | Latest patch in 4.0 |
+| Wildcard | `"4.0.x"`, `"4.x?"`, `"6.0.x-*"` | Highest version matching the defined part-wise pattern |
 | Latest | `"latest"` | Most recent published |
 | Current | `"current"` | CI build |
 | Alias | `"npm:hl7.fhir.us.core@4.1.0"` | Aliased package reference |
+
+Two-part versions are exact, and wildcard part counts, labels, builds, and
+trailing `?` follow the shared [versioning rules](versioning.md#2-part-wise-wildcard-patterns).
 
 ## Resolution Algorithm
 
@@ -39,79 +42,56 @@ flowchart TD
     B --> C[Extract dependencies]
     C --> D{More dependencies?}
     D -->|Yes| E[Take next dependency]
-    E --> F{Already resolved?}
-    F -->|Yes| D
-    F -->|No| G[Resolve version<br/>via registry/cache]
+    E --> G[Resolve version<br/>via registry/cache]
     G --> H{Resolution<br/>succeeded?}
-    H -->|Yes| I[Install to cache<br/>if not present]
-    I --> J[Add to closure]
+    H -->|Yes| F{Exact identity<br/>already traversed?}
+    F -->|Yes| D
+    F -->|No| J[Add exact node<br/>to closure]
     J --> K[Read dependency's<br/>package.json]
-    K --> L[Recursively resolve<br/>its dependencies]
+    K --> L[Queue its<br/>dependencies]
     L --> D
     H -->|No| M[Add to missing list]
     M --> D
-    D -->|No| N[Return closure]
+    D -->|No| N[Build dependency-first<br/>install order]
 ```
 
 ### Resolution Steps
 
 1. **Read the root manifest** — Parse `package.json` from the root package
-2. **For each active dependency edge:**
+2. **For each in-range dependency edge:**
    a. Resolve the version through the registry policy
-   b. Select the package version using the configured conflict strategy
-   c. Read the selected version's registry metadata, then fall back to cache
-   d. Replace child edges if the selected version changes
-   e. Recompute reachability so losing-only descendants and failures disappear
+   b. Attach the edge to its exact package name/version node
+   c. Read that exact version's registry metadata, then fall back to cache
+   d. Traverse each exact node once while retaining every incoming route
+   e. Keep distinct versions and their child subgraphs active
 3. **Return the closure** — A complete list of all resolved packages
 
 ### Package Closure
 
-A package closure is the complete set of resolved transitive dependencies:
-
-```json
-{
-  "updated": "2024-01-15T10:00:00Z",
-  "dependencies": {
-    "hl7.fhir.r4.core": "4.0.1",
-    "hl7.fhir.r4.expansions": "4.0.1",
-    "hl7.fhir.uv.extensions.r4": "1.0.0",
-    "hl7.fhir.us.core": "6.1.0"
-  },
-  "missing": {}
-}
-```
+A package closure is the complete set of resolved transitive dependencies.
+Identity is package name plus exact version, so two versions of the same name
+can coexist and each retains its own descendants.
 
 The closure records:
 
-- **Resolved dependencies:** Package name → exact resolved version
+- **Resolved packages:** Every exact name/version identity
+- **Preferred projection:** Package name → the exact version selected by the
+  conflict policy for convenient lookup
+- **Installation identities:** Installation references, including mutable
+  aliases, mapped to exact manifest identities
 - **Structured failures:** Missing versions, conflicts, depth truncation,
-  incomplete metadata, registry failures, and unstable graph states
+  incomplete metadata, and registry failures
 - **Missing dependencies:** A compatibility map projected from structured
   failures
 - **Completeness:** A closure is complete when there are no failures
 
-## Restore Locks
+## Always-Live Restore
 
-`RestoreAsync` persists complete closures in a schema-v2 lock. In addition to
-the flattened exact dependency versions, the lock records:
-
-- the exact direct root directives from the project manifest;
-- the exact project package name and version used for root back-edge checks;
-- conflict strategy, prerelease policy, preferred FHIR release, and max depth;
-- a deterministic identity hash of the active version-fixup policy; and
-- the complete dependency-first replay order, preserving mutable aliases while
-  the dependency map retains exact expected manifest identities; and
-- structured resolution failures, which are empty in every newly written lock.
-
-The lock fast path requires exact root-set, project identity, and policy
-equality. Package names are compared case-insensitively while version text
-remains ordinal and case-sensitive. Root order is also significant for
-`FirstWins`. Every dependency value must be a concrete semantic-version pin and
-each effective root must be represented. Removing or reordering an applicable
-root, changing project identity or any policy input, or loading a
-legacy/incomplete lock forces graph resolution. A complete highest-wins result
-contains only the active winner and its reachable descendants; superseded nodes
-and their failures are not installed or locked.
+`RestoreAsync` reads the current project manifest and resolves the graph against
+current registry/cache state on every invocation. It installs every reachable
+exact identity in deterministic dependency-first order. Conflict policy changes
+the preferred name-keyed projection, not which required versions are traversed
+or installed.
 
 ## Circular Dependency Prevention
 
@@ -124,8 +104,9 @@ Resolving: A → B → C → A  (circular!)
                          ↑ Already in closure — skip
 ```
 
-Version-dependent cycles that cannot reach a stable active graph are returned
-as typed unstable-resolution failures.
+Cycle detection is exact-version aware. Different versions of one package do
+not suppress one another, and a finite exact-version cycle orders each identity
+once.
 
 ## Depth Semantics
 
@@ -155,11 +136,12 @@ Root
 | SUSHI | Loads both — each package gets its resolved version |
 | Java Publisher | Logs a warning about version mismatch |
 
-**This SDK** resolves conflicts with the `ConflictStrategy` option (default
-`HighestWins`; also `FirstWins` and `Error`). Under `HighestWins` the highest
-pinned version across active edges wins; `FirstWins` keeps the first-encountered
-version (root order is significant); `Error` reports a `VersionConflict` failure
-when active edges pin different exact versions.
+**This SDK** keeps every required exact version and its subgraph.
+`ConflictStrategy` controls only the preferred name-keyed projection:
+`HighestWins` prefers the greatest semantic version, `FirstWins` prefers the
+earliest traversal path (root order is significant), and `Error` uses that same
+first preference while reporting a `VersionConflict` failure. The error does
+not prune either exact version or its descendants.
 
 ## Known Package Fixups
 
@@ -210,7 +192,6 @@ flowchart LR
         F2 --> F3[Server then cache fallback]
         F3 --> F4[CacheInstall]
         F4 --> F5[Recursive restore]
-        F5 --> F6[Write lock file]
     end
 
     subgraph CodeGen["CodeGen (C#)"]
@@ -233,7 +214,7 @@ flowchart LR
 | Feature | SUSHI | Firely | CodeGen | Java Publisher |
 |---------|-------|--------|---------|---------------|
 | Dependency resolution | Manual per-load | Full recursive restore | Single-package focus | Recursive with fixups |
-| Lock file | No | `fhirpkg.lock.json` | No | No |
+| Project restore lock | No | Yes | No | No |
 | Version conflicts | Load both | Highest wins | Per-directive | Log warning |
 | Parallel queries | Sequential with fallback | Sequential | Parallel across registries | Sequential |
 | CI dep handling | Branch-aware via qas.json | Not built-in | Branch-aware via qas.json | Via canonical URL |

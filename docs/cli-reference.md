@@ -64,9 +64,12 @@ version specifier:
 
 ```
 hl7.fhir.r4.core#4.0.1          # exact version
+hl7.fhir.us.core#6.1            # exact two-part version
 hl7.fhir.us.core#latest         # latest published
 hl7.fhir.us.core                # implicit latest
 hl7.fhir.us.core#6.1.x          # wildcard
+hl7.fhir.us.core#6.0.x-*        # prerelease-only wildcard
+hl7.fhir.us.core#4.x?           # match major/minor, ignore remainder
 hl7.fhir.us.core#^6.0.0         # range
 hl7.fhir.us.core#current        # latest CI build
 hl7.fhir.us.core#current$main   # CI build for a branch
@@ -85,6 +88,12 @@ hl7.fhir.us.core#current$main   # CI build for a branch
 | `--auth <value>` | — | `string` | — | Authorization header value for the custom registry (e.g., `"Bearer <token>"`). |
 | `--no-ci` | — | `bool` | `false` | Exclude the FHIR CI build registry from resolution. |
 | `--progress` | — | `bool` | `true` | Show a download progress indicator. |
+
+Two-part versions are exact. Wildcard part counts, prerelease/build labels,
+and trailing `?` follow the
+[versioning reference](../reference/versioning.md#2-part-wise-wildcard-patterns).
+`--no-pre-release` excludes every prerelease candidate, including candidates
+explicitly requested by a `-*` pattern.
 
 #### Examples
 
@@ -204,9 +213,7 @@ fhir-pkg restore [project-path] [options]
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--lock-file <path>` | `-l` | `string` | `<project-path>/fhirpkg.lock.json` | Lock file to read and write. Relative paths are resolved against `project-path`; absolute paths are unchanged. The filename `.fhirpkg-restore.lock` is reserved for coordination. |
-| `--no-lock` | — | `bool` | `false` | Do not write or update the lock file. A current existing lock can still be read. |
-| `--conflict-strategy <strategy>` | — | `enum` | `HighestWins` | How to handle version conflicts. Values: `HighestWins`, `FirstWins`, `Error`. |
+| `--conflict-strategy <strategy>` | — | `enum` | `HighestWins` | Selects the preferred version in the name-keyed `resolved` projection. Values: `HighestWins`, `FirstWins`, `Error`. Every required exact version remains in the closure. |
 | `--max-depth <n>` | — | `int` | `20` | Maximum root-relative depth for transitive dependency resolution. Must be non-negative; direct dependencies are depth `0`. |
 | `--fhir-version <release>` | `-f` | `string` | — | Preferred FHIR release (`R4`, `R4B`, `R5`, `R6`). |
 
@@ -219,53 +226,51 @@ fhir-pkg restore
 # Restore a specific project
 fhir-pkg restore ./my-ig-project
 
-# Restore with a lock file
-fhir-pkg restore ./my-ig-project --lock-file ./locks/fhirpkg.lock.json
-
-# Fail on version conflicts instead of auto-resolving
+# Report version conflicts while retaining every exact version
 fhir-pkg restore --conflict-strategy Error
 ```
 
-A schema-v2 lock is used as a fast path only when its project package identity
-and root directives exactly match the manifest and its conflict, prerelease,
-FHIR-release, depth, and version-fixup policies match the current request.
-Package names are matched case-insensitively; version text is matched exactly.
-Root order must also match for `FirstWins`. Legacy schema-v1, incomplete, stale,
-or missing locks are re-resolved. Unknown future schemas are rejected without
-changing the file. Locked dependency values must be concrete semantic-version
-pins, each effective root must be represented, and an empty root set requires
-an empty dependency map.
+Restore is always live: every invocation reads the current project manifest,
+resolves dependency edges against current registry/cache state, and installs
+every reachable exact package identity. If two paths require different exact
+versions of one package, both versions and both transitive subgraphs remain in
+the result. `HighestWins` and `FirstWins` select only the preferred entry in the
+name-keyed projection. `Error` uses the first entry for that projection and
+also records a conflict failure; it does not prune either version.
 
-Only a complete resolution is written. Lock replacement is a durable,
-same-directory atomic operation, so cancellation or a pre-commit failure leaves
-the previous lock unchanged. `--overwrite` is not a restore option: cache
-replacement and lock freshness are independent SDK concerns.
+> **Compatibility:** Pre-existing `fhirpkg.lock.json` files are ignored and
+> left untouched.
 
 #### Output
 
-**Console mode** — shows resolved packages in a table and lists any missing
-dependencies:
+**Console mode** — shows every exact resolved package identity in a table and
+lists any missing dependencies:
 
 ```
-Resolved 12 packages:
-  Name                              Version    FHIR
-  hl7.fhir.r4.core                  4.0.1      R4
-  hl7.fhir.us.core                  6.1.0      R4
-  ...
+Restore results:
 
-✓ Restore complete — 12 package(s) resolved.
+  Package                           Version
+  shared.package                    3.1.1
+  shared.package                    6.1.0
+
+✓ Restore complete — 2 package(s) resolved.
 ```
 
-**JSON mode** — structured closure:
+**JSON mode** — `resolvedPackages` contains every exact identity without name
+collisions. `resolved` is the preferred name-keyed projection selected by the
+conflict strategy:
 
 ```json
 {
   "timestamp": "2026-03-09T17:00:00Z",
   "isComplete": true,
   "resolved": {
-    "hl7.fhir.r4.core": { "name": "hl7.fhir.r4.core", "version": "4.0.1" },
-    "hl7.fhir.us.core": { "name": "hl7.fhir.us.core", "version": "6.1.0" }
+    "shared.package": { "name": "shared.package", "version": "6.1.0" }
   },
+  "resolvedPackages": [
+    { "name": "shared.package", "version": "3.1.1" },
+    { "name": "shared.package", "version": "6.1.0" }
+  ],
   "missing": {}
 }
 ```
@@ -568,7 +573,10 @@ None (only global options apply).
 fhir-pkg resolve hl7.fhir.us.core#latest
 
 # Resolve a wildcard
-fhir-pkg resolve hl7.fhir.r4.core#4.0.x
+fhir-pkg resolve hl7.fhir.us.core#4.x?
+
+# Resolve a prerelease-only patch wildcard
+fhir-pkg resolve hl7.fhir.us.core#6.0.x-*
 
 # Resolve CI build
 fhir-pkg resolve hl7.fhir.us.core#current

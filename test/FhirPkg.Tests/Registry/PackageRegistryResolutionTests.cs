@@ -67,6 +67,62 @@ public class PackageRegistryResolutionTests
                     "integrity": "sha512-beta",
                     "tarball": "https://downloads.example/2.0.0-beta.tgz"
                   }
+                },
+                "2.0": {
+                  "name": "example.package",
+                  "version": "2.0",
+                  "fhirVersion": "4.0.1",
+                  "dist": {
+                    "tarball": "https://downloads.example/2.0.tgz"
+                  }
+                },
+                "2.0.0+build": {
+                  "name": "example.package",
+                  "version": "2.0.0+build",
+                  "fhirVersion": "4.0.1",
+                  "dist": {
+                    "tarball": "https://downloads.example/2.0.0-build.tgz"
+                  }
+                },
+                "4.0.0": {
+                  "name": "example.package",
+                  "version": "4.0.0",
+                  "fhirVersion": "4.0.1",
+                  "dist": {
+                    "tarball": "https://downloads.example/4.0.0.tgz"
+                  }
+                },
+                "4.1.0": {
+                  "name": "example.package",
+                  "version": "4.1.0",
+                  "fhirVersion": "4.0.1",
+                  "dist": {
+                    "tarball": "https://downloads.example/4.1.0.tgz"
+                  }
+                },
+                "6.0.0-ballot": {
+                  "name": "example.package",
+                  "version": "6.0.0-ballot",
+                  "fhirVersion": "4.0.1",
+                  "dist": {
+                    "tarball": "https://downloads.example/6.0.0-ballot.tgz"
+                  }
+                },
+                "6.0.0": {
+                  "name": "example.package",
+                  "version": "6.0.0",
+                  "fhirVersion": "4.0.1",
+                  "dist": {
+                    "tarball": "https://downloads.example/6.0.0.tgz"
+                  }
+                },
+                "6.1.0": {
+                  "name": "example.package",
+                  "version": "6.1.0",
+                  "fhirVersion": "4.0.1",
+                  "dist": {
+                    "tarball": "https://downloads.example/6.1.0.tgz"
+                  }
                 }
               }
             }
@@ -88,14 +144,33 @@ public class PackageRegistryResolutionTests
 
         listing.ShouldNotBeNull();
         listing.SourceRegistry.ShouldBe(client.Endpoint);
-        listing.VersionCandidates.Count.ShouldBe(2);
+        listing.VersionCandidates.Count.ShouldBe(9);
         listing.VersionCandidates.Single(candidate => candidate.Version == "2.0.0-beta")
             .IsSourceLatest.ShouldBeTrue();
         listing.VersionCandidates.Single(candidate => candidate.Version == "1.0.0")
             .Distribution!.Integrity.ShouldBe("sha512-strong");
         resolved.ShouldNotBeNull();
-        resolved.Reference.Version.ShouldBe("1.0.0");
-        resolved.Integrity.ShouldBe("sha512-strong");
+        resolved.Reference.Version.ShouldBe("6.1.0");
+
+        (string Specifier, string Expected)[] cases =
+        [
+            ("2.0", "2.0"),
+            ("2.0.0+*", "2.0.0+build"),
+            ("4.x?", "4.1.0"),
+            ("6.1?", "6.1.0"),
+            ("4.*.*", "4.1.0"),
+            ("6.0.x-*", "6.0.0-ballot"),
+        ];
+        foreach ((string specifier, string expected) in cases)
+        {
+            ResolvedDirective? wildcard = await client.ResolveAsync(
+                PackageDirective.Parse($"example.package#{specifier}"),
+                new VersionResolveOptions { AllowPreRelease = true },
+                TestContext.Current.CancellationToken);
+
+            wildcard.ShouldNotBeNull();
+            wildcard.Reference.Version.ShouldBe(expected);
+        }
     }
 
     private sealed class JsonHandler(string json) : HttpMessageHandler

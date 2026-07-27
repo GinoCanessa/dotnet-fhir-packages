@@ -18,8 +18,8 @@ namespace FhirPkg.Resolution;
 /// <list type="bullet">
 ///   <item><description><see cref="VersionType.Exact"/>: Direct lookup in the registry's version map.</description></item>
 ///   <item><description><see cref="VersionType.Latest"/>: Uses the dist-tags "latest" from the package listing.</description></item>
-///   <item><description><see cref="VersionType.Wildcard"/>: Parses all available versions and calls <see cref="FhirSemVer.MaxSatisfying"/>.</description></item>
-///   <item><description><see cref="VersionType.Range"/>: Parses all available versions and calls <see cref="FhirSemVer.SatisfyingRange"/>.</description></item>
+///   <item><description><see cref="VersionType.Wildcard"/>: Filters original listing candidates with the shared component-aware matcher.</description></item>
+///   <item><description><see cref="VersionType.Range"/>: Filters original listing candidates with the shared range matcher.</description></item>
 ///   <item><description><see cref="VersionType.CiBuild"/> / <see cref="VersionType.CiBuildBranch"/>: Returns <c>null</c> (delegated to the CI build client by the orchestrator).</description></item>
 /// </list>
 /// </para>
