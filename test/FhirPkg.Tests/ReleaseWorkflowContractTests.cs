@@ -222,12 +222,50 @@ public class ReleaseWorkflowContractTests
             "..\\..\\.github\\scripts\\*.ps1");
     }
 
+    [Theory]
+    [InlineData("LF", "\n")]
+    [InlineData("CRLF", "\r\n")]
+    [InlineData("CR", "\r")]
+    public void ContractSectionParsing_IsIndependentOfSourceLineEndings(
+        string caseName,
+        string lineEnding)
+    {
+        string[] lines =
+        [
+            "jobs:",
+            "  validate:",
+            "    runs-on: ubuntu-latest",
+            "  source-ci:",
+            "    uses: ./.github/workflows/build-and-test.yaml",
+        ];
+        string contract = string.Join(lineEnding, lines) + lineEnding;
+        string normalizedContract = NormalizeContractText(contract);
+        string expectedContract = string.Join("\n", lines) + "\n";
+
+        normalizedContract.ShouldBe(
+            expectedContract,
+            $"Failed for {caseName} line endings.");
+
+        string validateSection = GetSection(
+            normalizedContract,
+            "  validate:\n",
+            "  source-ci:\n");
+
+        validateSection.ShouldBe(
+            "  validate:\n    runs-on: ubuntu-latest\n",
+            $"Failed for {caseName} line endings.");
+    }
+
     private static string ReadContract(string fileName) =>
-        File.ReadAllText(
-            Path.Combine(
-                AppContext.BaseDirectory,
-                "ReleaseContracts",
-                fileName));
+        NormalizeContractText(
+            File.ReadAllText(
+                Path.Combine(
+                    AppContext.BaseDirectory,
+                    "ReleaseContracts",
+                    fileName)));
+
+    private static string NormalizeContractText(string value) =>
+        value.ReplaceLineEndings("\n");
 
     private static string ReadTestProject() =>
         File.ReadAllText(
