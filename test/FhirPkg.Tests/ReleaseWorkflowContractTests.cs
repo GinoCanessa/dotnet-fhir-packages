@@ -161,13 +161,13 @@ public class ReleaseWorkflowContractTests
             validateSection,
             "dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(1);
         validateSection.IndexOf(
-            "uses: actions/setup-dotnet@v4",
+            "uses: actions/setup-dotnet@v5",
             StringComparison.Ordinal).ShouldBeGreaterThanOrEqualTo(0);
         validateSection.IndexOf(
             "validate-inputs",
             StringComparison.Ordinal).ShouldBeGreaterThan(
                 validateSection.IndexOf(
-                    "uses: actions/setup-dotnet@v4",
+                    "uses: actions/setup-dotnet@v5",
                     StringComparison.Ordinal));
 
         CountOccurrences(
@@ -194,7 +194,7 @@ public class ReleaseWorkflowContractTests
             publishSection,
             "dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(1);
         publishSection.IndexOf(
-            "uses: actions/setup-dotnet@v4",
+            "uses: actions/setup-dotnet@v5",
             StringComparison.Ordinal).ShouldBeLessThan(
                 publishSection.IndexOf(
                     "validate-inputs",

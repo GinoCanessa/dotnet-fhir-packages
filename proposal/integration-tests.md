@@ -462,8 +462,8 @@ jobs:
   integration-tests-offline:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '9.0.x'
       - run: dotnet test test/FhirPkg.IntegrationTests/
@@ -472,8 +472,8 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '9.0.x'
       - run: dotnet test test/FhirPkg.IntegrationTests/
