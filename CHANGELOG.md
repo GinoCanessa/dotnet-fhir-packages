@@ -14,6 +14,12 @@ qualification evidence) lives alongside this file under
 - Restored the defined FHIR/FHIRsmith wildcard grammar, including exact
   two-part versions, part-specific numeric/label/build wildcards, and trailing
   `?` remainder matching.
+- Preserved and installed every required exact package version and its transitive
+  subgraph during recursive dependency resolution.
+
+### Removed
+- Removed SDK and CLI project restore-lock APIs and options. Restore now always
+  resolves the live manifest, registry, and cache graph.
 
 ## [2026.722.1245]
 

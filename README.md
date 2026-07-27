@@ -24,8 +24,11 @@ managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
 - **Hardened package sources** - safely installs expected-identity or
   manifest-discovered packages from caller-owned streams and absolute
   HTTP/HTTPS URIs under finite compressed/archive limits.
-- **Dependency resolution** - resolves full transitive dependency closures with
-  conflict strategies, lock-file support, and circular-dependency detection.
+- **Dependency resolution** - resolves full transitive dependency closures,
+  retains every required exact package version, and uses conflict strategies
+  only to select the preferred name-keyed projection.
+- **Always-live restore** - resolves each project restore from the current
+  manifest plus registry/cache state and installs coexisting exact versions.
 - **FHIR-aware versioning** - understands pre-release hierarchies, wildcards,
   ranges, CI builds, and branch-specific builds.
 - **Resource indexing** - indexes FHIR resources inside packages with fast lookup

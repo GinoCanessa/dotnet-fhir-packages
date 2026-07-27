@@ -158,24 +158,30 @@ flowchart TD
 
 ```csharp
 // Register with DI and resolve the manager
-var services = new ServiceCollection();
+ServiceCollection services = new ServiceCollection();
 services.AddFhirPackageManagement(options =>
 {
     options.IncludeCiBuilds = true;   // CI builds are part of the default chain
-    options.ConflictStrategy = ConflictResolutionStrategy.HighestWins;
 });
 using ServiceProvider provider = services.BuildServiceProvider();
-var manager = provider.GetRequiredService<IFhirPackageManager>();
+IFhirPackageManager manager = provider.GetRequiredService<IFhirPackageManager>();
 
 // Install a package (resolve + download + extract to the cache)
 PackageRecord? record = await manager.InstallAsync("hl7.fhir.us.core#6.1.0");
 
 // Restore all dependencies declared in a project's package.json
-PackageClosure closure = await manager.RestoreAsync("./my-ig");
-// closure.Resolved   — resolved packages, keyed by package id
-// closure.Missing    — unresolved dependencies, keyed by package id
-// closure.Failures   — structured DependencyResolutionFailure entries
-// closure.IsComplete — true when Missing and Failures are both empty
+PackageClosure closure = await manager.RestoreAsync(
+    "./my-ig",
+    new RestoreOptions
+    {
+        ConflictStrategy = ConflictResolutionStrategy.HighestWins,
+    });
+// closure.ResolvedPackages      — every exact identity; versions can coexist
+// closure.Resolved              — preferred package-id lookup
+// closure.InstallationIdentities — install references mapped to exact identities
+// closure.Missing               — compatibility failure projection
+// closure.Failures              — structured DependencyResolutionFailure entries
+// closure.IsComplete            — true when Missing and Failures are both empty
 
 // Search, then resolve without downloading
 IReadOnlyList<CatalogEntry> hits =
@@ -410,7 +416,7 @@ NpmPackage pkg = pf.pcm.loadPackage(packageId, version);
 | Proxy support | ✅ (env var) | ❌ | ❌ | ❌ |
 | Virtual packages | ✅ | ❌ | ❌ | ❌ |
 | Package publish | ❌ | ✅ | ❌ | ❌ |
-| Lock file | ❌ | ✅ | ❌ | ❌ |
+| Project restore lock | ❌ | ❌ | ❌ | ❌ |
 | Full dep tree restore | ❌ | ✅ | ❌ | ✅ |
 | Parallel registry queries | ❌ | ✅ | ✅ | ❌ |
 | Resource type indexing | ✅ (SQLite) | ✅ (.index.json) | ✅ (.index.json) | ✅ (in-memory) |

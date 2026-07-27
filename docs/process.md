@@ -137,7 +137,7 @@ sections.
 reports a separate disposition while keeping the compatibility status
 `Installed`.
 
-If a locked alias identity or source publication timestamp proves that the
+If the resolved alias identity or source publication timestamp proves that the
 cached package is current, the manager returns `AlreadyCurrent` without a
 download. Otherwise, `DiskPackageCache` records the authoritative cache effect
 while holding the package identity lease:
@@ -429,8 +429,8 @@ a dedicated **`DependencyResolver`** — see
 
 `RestoreAsync` is a higher-level workflow designed for project-level dependency
 management. It reads a project's `package.json`, resolves the full transitive
-dependency closure, installs the active dependency-first plan, and writes a
-schema-v2 lock only for a complete result.
+dependency closure from current registry/cache state, and installs every
+reachable exact package identity in dependency-first order.
 
 ### Workflow
 
@@ -438,106 +438,72 @@ schema-v2 lock only for a complete result.
 Read project package.json
   │
   ▼
-Requested lock exists & current? ─ yes ─▶ Restore from lock file (fast path)
-  │ no
-  ▼
-Resolve full dependency closure
+Resolve every in-range dependency edge to an exact identity
   │
   ▼
-Install authoritative active closure in dependency-first order
+Traverse each exact identity and its own dependency subgraph
   │
   ▼
-Durably replace requested lock path
+Build complete and preferred closure projections
+  │
+  ▼
+Install every required exact identity in dependency-first order
   │
   ▼
 Return PackageClosure
 ```
 
-### Lock File Fast Path
-
-The default path is `<project>/fhirpkg.lock.json`; `RestoreOptions.LockFilePath`
-can select an absolute path or a path relative to the project. Only that path is
-read or written. The sibling filename `.fhirpkg-restore.lock` is reserved for
-cross-process writer coordination and cannot be selected as the lock path.
-
-A lock skips full resolution only when it is schema v2, contains no missing or
-typed failures, and exactly matches both:
-
-- the project package name/version and manifest's complete direct-root set and
-  directive versions (package names are case-insensitive; version text is
-  ordinal); and
-- conflict strategy, prerelease policy, preferred FHIR release, max depth, and
-  the deterministic version-fixup policy hash.
-
-Root order must also match for the order-sensitive `FirstWins` strategy. Every
-locked dependency must be a concrete semantic-version pin, must satisfy the
-prerelease policy, and every effective root must be represented. An empty
-manifest therefore accepts only empty root, dependency, and replay-order sets.
-Schema-v1 locks are readable but always stale. Unknown future schemas are rejected without
-rewrite. `OverwriteExisting` affects cache replacement, not lock freshness.
-
 ### Recursive Resolution
 
-When a full resolution is needed, the `DependencyResolver` maintains an active
-dependency graph:
+The `DependencyResolver` builds a graph keyed by exact package identity:
 
 1. For each dependency in the root manifest, parse and apply fixups.
-2. Resolve the version specifier to an exact version via the registry chain.
-3. Retain every active parent edge for each package and apply the **conflict
-   strategy**:
-   - `HighestWins` — keep the higher semantic version.
-   - `FirstWins` — keep the first-encountered version.
-   - `Error` — retain the first version for traversal and record a typed
-     conflict failure.
-4. Read the winner's dependency metadata from all registry candidates before
-   falling back to the cache.
-5. Replace the package's active child edges when its selected version changes.
-   Descendants reachable only from the losing version are pruned, while shared
-   descendants remain active.
-6. Cycles do not suppress later shared-DAG paths. A repeated whole-graph state
-   is reported as an unstable-resolution failure instead of looping.
-7. Depth is root-relative: direct dependencies are depth `0`. A `MaxDepth` of
+2. Resolve each in-range edge to an exact name/version identity through the
+   registry chain, with cache metadata as the documented fallback.
+3. Traverse each exact identity once. Different versions of one package own
+   separate child edges, failures, and transitive subgraphs; shared exact child
+   identities are deduplicated.
+4. Track all incoming routes. The shallowest route controls descendant depth,
+   while first traversal order remains independently available to
+   `FirstWins`.
+5. Build `Resolved` as a preferred projection over the complete exact graph:
+   - `HighestWins` — prefer the highest semantic version.
+   - `FirstWins` — prefer the first-encountered version.
+   - `Error` — prefer the first-encountered version and record a typed conflict
+     failure.
+   No strategy removes another required exact version or its descendants.
+6. Treat only the committed root's same exact identity as its satisfied
+   back-edge. Alternate versions of the root remain normal graph nodes.
+7. Exact-version cycles terminate with each identity ordered once, without
+   suppressing later shared-DAG routes.
+8. Depth is root-relative: direct dependencies are depth `0`. A `MaxDepth` of
    `0` resolves direct dependencies and reports grandchildren as depth-limit
    failures. Negative values are rejected.
 
 The result is a **`PackageClosure`** containing:
 
-- `Resolved` — a map of all successfully resolved packages (name → exact
-  reference).
-- `Failures` — structured missing-package, conflict, depth, metadata, registry,
-  and unstable-graph failures.
+- `ResolvedPackages` — every successfully resolved exact identity, including
+  coexisting versions of one package.
+- `Resolved` — the conflict-policy-selected preferred name → exact-reference
+  projection.
+- `InstallationIdentities` — mappings from exact or mutable installation
+  references to their exact manifest identities.
+- `Failures` — structured missing-package, conflict, depth, metadata, and
+  registry failures.
 - `Missing` — a backward-compatible package → message projection of
   `Failures`.
 - `IsComplete` — true only when both `Failures` and `Missing` are empty.
 
-### Active Closure Installation
+### Exact Closure Installation
 
 Restore consumes the resolver's authoritative dependency-first
 `InstallOrder`, with dependency recursion disabled for each node. Mutable CI
 aliases that cannot expose authoritative metadata before installation use the
 bounded bootstrap order and are then re-resolved from the committed manifest.
-Superseded nodes, losing-only descendants, and pruned failures never enter the
+`InstallationIdentities` supplies the exact expected manifest identity for each
+install reference, including mutable aliases. Every reachable exact version is
+installed once; the preferred `Resolved` projection does not filter the
 installation plan.
-
-### Lock File Output
-
-After successful installation, a lock is written only when the closure is
-complete and `RestoreOptions.WriteLockFile` is true. It records schema version,
-project identity, exact roots, policy identity, only the active exact dependency
-versions, and the complete dependency-first replay order. Replay directives
-preserve `current`, branch-specific `current`, and `dev` aliases while the exact
-map remains the expected manifest identity.
-
-The lock is serialized completely before I/O, written and flushed to a unique
-sibling temporary file, cancellation-checked before commit, atomically
-replaced, and followed by parent-directory synchronization where supported.
-Writers for the same requested path are serialized across manager instances
-and processes by a persistent `.fhirpkg-restore.lock` sibling lease. The manifest is re-read
-immediately before commit; if it changed during resolution, the restore fails
-without replacing the lock. Readers permit replacement, and Windows
-replacement retries transient sharing conflicts. The writer cleans only its
-owned temporary file, so cancellation or an interrupted pre-commit write
-preserves the prior lock byte-for-byte.
 
 ## 9 — Resource Indexing
 

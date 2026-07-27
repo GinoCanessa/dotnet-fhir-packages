@@ -13,8 +13,11 @@ FhirPkg is a C# SDK for discovering, resolving, downloading, caching, and managi
 - **Local disk cache** — stores packages in the standard `~/.fhir/packages`
   layout (or the directory specified by the `PACKAGE_CACHE_FOLDER` environment
   variable), compatible with other FHIR tooling.
-- **Dependency resolution** — resolves full transitive dependency closures with
-  conflict strategies, lock-file support, and circular-dependency detection.
+- **Dependency resolution** — resolves full transitive dependency closures,
+  preserves coexisting exact versions and their subgraphs, and applies conflict
+  strategies only to the preferred name-keyed projection.
+- **Always-live restore** — resolves the current project manifest against live
+  registry/cache state on every call.
 - **FHIR-aware versioning** — understands FHIR pre-release hierarchies
   (`release > ballot > draft > snapshot > cibuild`), wildcards, ranges, CI builds,
   and branch-specific builds.
@@ -165,20 +168,38 @@ var manager = provider.GetRequiredService<IFhirPackageManager>();
 If your project contains a `package.json` with FHIR dependencies:
 
 ```csharp
-var closure = await manager.RestoreAsync("./my-ig-project", new RestoreOptions
-{
-    LockFilePath = "./locks/fhirpkg.lock.json",
-    ConflictStrategy = ConflictResolutionStrategy.HighestWins,
-    WriteLockFile = true,
-    MaxDepth = 20,
-});
+PackageClosure closure = await manager.RestoreAsync(
+    "./my-ig-project",
+    new RestoreOptions
+    {
+        ConflictStrategy = ConflictResolutionStrategy.HighestWins,
+        MaxDepth = 20,
+    });
 
 if (closure.IsComplete)
-    Console.WriteLine($"Restored {closure.Resolved.Count} packages");
+{
+    Console.WriteLine(
+        $"Restored {closure.ResolvedPackages.Count} exact package identities");
+}
 else
-    foreach (var (name, reason) in closure.Missing)
+{
+    foreach ((string name, string reason) in closure.Missing)
+    {
         Console.WriteLine($"Missing: {name} — {reason}");
+    }
+}
+
+foreach (PackageReference exact in closure.ResolvedPackages)
+{
+    Console.WriteLine(exact.FhirDirective);
+}
 ```
+
+`ResolvedPackages` is the complete exact-version closure and may contain more
+than one version of a package. `Resolved` is the preferred name-keyed projection
+selected by `ConflictStrategy`. `InstallationIdentities` maps each exact or
+mutable installation reference to the exact manifest identity it represents;
+installers should use that mapping rather than infer identity from aliases.
 
 ## Configuration
 

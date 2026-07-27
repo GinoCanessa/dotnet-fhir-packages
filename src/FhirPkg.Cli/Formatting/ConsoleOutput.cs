@@ -117,17 +117,31 @@ internal static class ConsoleOutput
         AnsiConsole.MarkupLine("[bold]Restore results:[/]");
         AnsiConsole.WriteLine();
 
-        if (closure.Resolved.Count > 0)
+        IReadOnlyList<PackageReference> resolvedPackages =
+            closure.ResolvedPackages.Count > 0
+                ? closure.ResolvedPackages
+                : closure.Resolved.Values.ToArray();
+        if (resolvedPackages.Count > 0)
         {
             Table table = new Table()
                 .Border(TableBorder.Rounded)
                 .AddColumn("[bold]Package[/]")
                 .AddColumn("[bold]Version[/]");
 
-            foreach ((string? id, PackageReference reference) in closure.Resolved.OrderBy(kvp => kvp.Key))
+            foreach (PackageReference reference
+                     in resolvedPackages
+                         .OrderBy(
+                             reference => reference.Name,
+                             StringComparer.OrdinalIgnoreCase)
+                         .ThenBy(
+                             reference => reference.Name,
+                             StringComparer.Ordinal)
+                         .ThenBy(
+                             reference => reference.Version,
+                             StringComparer.Ordinal))
             {
                 table.AddRow(
-                    Markup.Escape(id),
+                    Markup.Escape(reference.Name),
                     Markup.Escape(reference.Version ?? "latest"));
             }
 
@@ -149,12 +163,12 @@ internal static class ConsoleOutput
 
         if (closure.IsComplete)
         {
-            AnsiConsole.MarkupLine($"[green]✓ Restore complete — {closure.Resolved.Count} package(s) resolved.[/]");
+            AnsiConsole.MarkupLine($"[green]✓ Restore complete — {resolvedPackages.Count} package(s) resolved.[/]");
         }
         else
         {
             AnsiConsole.MarkupLine(
-                $"[yellow]⚠ Restore incomplete — {closure.Resolved.Count} resolved, " +
+                $"[yellow]⚠ Restore incomplete — {resolvedPackages.Count} resolved, " +
                 $"{closure.Missing.Count} missing.[/]");
         }
     }

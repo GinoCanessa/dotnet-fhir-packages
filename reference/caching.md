@@ -91,69 +91,10 @@ hl7.fhir.us.core#6.1.0 = 1048576
 FhirPkg writes `packages.ini` atomically under the cache-wide mutation lock and
 preserves unrelated/unknown sections.
 
-## Restore Lock File (`fhirpkg.lock.json`)
-
-FhirPkg writes a schema-v2 project lock containing both the exact resolved
-versions and the inputs that made that resolution authoritative:
-
-```json
-{
-  "schemaVersion": 2,
-  "updated": "2026-07-18T12:00:00Z",
-  "rootPackage": "example.ig#1.0.0",
-  "roots": [
-    "hl7.fhir.us.core#^6.0.0"
-  ],
-  "policy": {
-    "conflictStrategy": "highestWins",
-    "allowPreRelease": true,
-    "preferredFhirRelease": "r4",
-    "maxDepth": 20,
-    "versionFixupHash": "5fb3..."
-  },
-  "dependencies": {
-    "hl7.fhir.r4.core": "4.0.1",
-    "hl7.fhir.r4.expansions": "4.0.1",
-    "hl7.fhir.us.core": "6.1.0"
-  },
-  "installOrder": [
-    "hl7.fhir.r4.core#4.0.1",
-    "hl7.fhir.r4.expansions#4.0.1",
-    "hl7.fhir.us.core#6.1.0"
-  ],
-  "failures": []
-}
-```
-
-The default path is `<project>/fhirpkg.lock.json`. SDK and CLI callers can
-select another path; relative paths are resolved against the project directory.
-Only that resolved path is read or written.
-
-A lock is current only when its schema, project package identity, exact root
-set, root version text, and full policy identity match the restore request.
-Package names are case-insensitive. Root order must also match when using
-`FirstWins`. Locks with missing or structured failures never take the fast path.
-Dependency values must be concrete semantic-version pins, every effective root
-must be represented, and empty roots require empty dependencies. Incomplete
-resolutions are not written. Schema-v1 locks remain readable but stale; unknown
-future schemas are rejected without replacement.
-
-`installOrder` is the complete dependency-first replay plan. It normally uses
-the exact pins above, but preserves `current`, `current$branch`, or `dev` when
-that alias is the authoritative cache/source identity. The exact dependency map
-still pins the expected manifest identity, so a moved mutable alias fails
-rather than silently restoring a different artifact.
-
-Lock saving uses the same durable primitive as cache metadata and transaction
-journals: serialize completely, write and flush a unique sibling temporary
-file, check cancellation, atomically replace the destination, synchronize the
-parent directory where supported, and clean only the owned temporary file.
-Writers for one lock path hold a persistent `.fhirpkg-restore.lock` sibling
-lease across the restore; that filename is reserved and cannot itself be used
-as a package lock path. The project manifest is revalidated immediately before commit.
-Consequently, concurrent SDK restores cannot overwrite one another out of
-order, and a manifest change or pre-commit failure preserves the prior lock
-byte-for-byte.
+Project restore resolution state is not part of the cache. Each restore reads
+the current manifest and resolves the live registry/cache graph, while the
+identity, global, and operation locks described below continue to coordinate
+package-cache mutation.
 
 ## Cache Validation Strategies
 
