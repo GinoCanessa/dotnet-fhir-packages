@@ -25,16 +25,6 @@ internal static class RestoreCommand
             DefaultValueFactory = _ => "."
         };
 
-        Option<string?> lockFileOption = new Option<string?>("--lock-file", "-l")
-        {
-            Description = "Path to a lock file to use for deterministic restores."
-        };
-
-        Option<bool> noLockOption = new Option<bool>("--no-lock")
-        {
-            Description = "Do not write or update the lock file."
-        };
-
         Option<ConflictResolutionStrategy> conflictStrategyOption = new Option<ConflictResolutionStrategy>("--conflict-strategy")
         {
             Description = "Strategy for resolving version conflicts (HighestWins, FirstWins, Error).",
@@ -55,8 +45,6 @@ internal static class RestoreCommand
         Command command = new Command("restore", "Restore FHIR package dependencies from a project manifest.")
         {
             projectPathArg,
-            lockFileOption,
-            noLockOption,
             conflictStrategyOption,
             maxDepthOption,
             fhirVersionOption
@@ -65,8 +53,6 @@ internal static class RestoreCommand
         command.SetAction(async (parseResult, ct) =>
         {
             string projectPath = parseResult.GetValue(projectPathArg)!;
-            string? lockFile = parseResult.GetValue(lockFileOption);
-            bool noLock = parseResult.GetValue(noLockOption);
             ConflictResolutionStrategy conflictStrategy = parseResult.GetValue(conflictStrategyOption);
             int maxDepth = parseResult.GetValue(maxDepthOption);
             string? fhirVersion = parseResult.GetValue(fhirVersionOption);
@@ -104,9 +90,7 @@ internal static class RestoreCommand
 
                 RestoreOptions restoreOptions = new RestoreOptions
                 {
-                    LockFilePath = lockFile,
                     ConflictStrategy = conflictStrategy,
-                    WriteLockFile = !noLock,
                     MaxDepth = maxDepth,
                     PreferredFhirRelease =
                         preferredFhirRelease,
@@ -116,8 +100,6 @@ internal static class RestoreCommand
                 {
                     ConsoleOutput.WriteVerbose($"Restoring from: {Path.GetFullPath(projectPath)}");
                     ConsoleOutput.WriteVerbose($"Conflict strategy: {conflictStrategy}");
-                    ConsoleOutput.WriteVerbose(
-                        $"Lock file: {lockFile ?? "fhirpkg.lock.json"}");
                 }
 
                 PackageClosure closure;

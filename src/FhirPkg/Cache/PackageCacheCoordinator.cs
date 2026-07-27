@@ -72,24 +72,6 @@ internal sealed class PackageCacheCoordinator
             "global",
             Path.Combine(_lockRoot, "global.lock"));
 
-    internal Task<PackageCacheLease> AcquireFileMutationAsync(
-        string filePath,
-        CancellationToken cancellationToken)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-
-        string fullPath = Path.GetFullPath(filePath);
-        string lockPath = Path.Combine(
-            Path.GetDirectoryName(fullPath)!,
-            ".fhirpkg-restore.lock");
-        return AcquireAsync(
-            "file-mutation",
-            lockPath,
-            cancellationToken,
-            processKeyOverride:
-                "fhirpkg:file-mutation");
-    }
-
     internal Task<PackageCacheLease> AcquireOperationOwnerAsync(
         string operationId,
         CancellationToken cancellationToken)
@@ -149,12 +131,9 @@ internal sealed class PackageCacheCoordinator
     private async Task<PackageCacheLease> AcquireAsync(
         string logicalKey,
         string lockPath,
-        CancellationToken cancellationToken,
-        string? processKeyOverride = null)
+        CancellationToken cancellationToken)
     {
-        string processKey =
-            processKeyOverride
-            ?? GetProcessKey(logicalKey);
+        string processKey = GetProcessKey(logicalKey);
         PackageCacheProcessLockReference processLock =
             RentProcessLock(processKey);
 

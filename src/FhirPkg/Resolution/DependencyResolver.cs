@@ -139,335 +139,7 @@ public class DependencyResolver : IDependencyResolver
             Missing = CreateMissingProjection(result.Failures),
             Failures = result.Failures,
             InstallOrder = result.InstallOrder,
-            ReplayOrder = result.ReplayOrder,
             BootstrapInstallOrder = result.BootstrapInstallOrder,
-            InstallOrderIsComplete = true,
-        };
-    }
-
-    /// <inheritdoc />
-    public async Task<PackageClosure> RestoreFromLockFileAsync(
-        PackageLockFile lockFile,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(lockFile);
-
-        Dictionary<string, PackageReference> resolved =
-            new(StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, string> dependencyPins =
-            new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, string> dependency
-                 in lockFile.Dependencies)
-        {
-            if (!dependencyPins.TryAdd(
-                    dependency.Key,
-                    dependency.Value))
-            {
-                throw new InvalidDataException(
-                    $"Lock file contains duplicate dependency '{dependency.Key}'.");
-            }
-        }
-
-        Dictionary<string, string> missing =
-            new(StringComparer.OrdinalIgnoreCase);
-        List<DependencyResolutionFailure> failures = [];
-        List<PackageReference> requestedReplayOrder = [];
-        HashSet<string> orderedNames =
-            new(StringComparer.OrdinalIgnoreCase);
-        foreach (string directive in lockFile.InstallOrder ?? [])
-        {
-            PackageReference reference =
-                PackageReference.Parse(directive);
-            if (!dependencyPins.ContainsKey(
-                    reference.Name)
-                || !orderedNames.Add(reference.Name))
-            {
-                throw new InvalidDataException(
-                    $"Lock installation directive '{directive}' did not identify exactly one locked dependency.");
-            }
-
-            requestedReplayOrder.Add(reference);
-        }
-
-        IEnumerable<PackageReference> unorderedReferences =
-            dependencyPins
-                .Where(dependency =>
-                    !orderedNames.Contains(
-                        dependency.Key))
-                .OrderBy(
-                    dependency => dependency.Key,
-                    StringComparer.OrdinalIgnoreCase)
-                .ThenBy(
-                    dependency => dependency.Key,
-                    StringComparer.Ordinal)
-                .Select(
-                    dependency =>
-                        new PackageReference(
-                            dependency.Key,
-                            dependency.Value));
-        requestedReplayOrder.AddRange(
-            unorderedReferences);
-
-        List<PackageReference> installOrder = [];
-        List<PackageReference> replayOrder = [];
-
-        _logger.LogInformation(
-            "Restoring {Count} locked dependencies from lock file (updated {Updated:O}).",
-            lockFile.Dependencies.Count, lockFile.Updated);
-
-        foreach (PackageReference replayReference
-                 in requestedReplayOrder)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            string exactVersion =
-                dependencyPins[
-                    replayReference.Name];
-            PackageReference exactReference =
-                new PackageReference(
-                    replayReference.Name,
-                    exactVersion);
-            PackageReference installationReference =
-                replayReference;
-            bool replayIsCached =
-                await _cache.IsInstalledAsync(
-                        replayReference,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            bool staleReplayCache = false;
-            bool available = replayIsCached;
-            if (replayIsCached
-                && replayReference != exactReference)
-            {
-                PackageManifest? cachedManifest =
-                    await _cache.ReadManifestAsync(
-                            replayReference,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                available =
-                    cachedManifest is not null
-                    && cachedManifest.Name.Equals(
-                        exactReference.Name,
-                        StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(
-                        cachedManifest.Version,
-                        exactReference.Version,
-                        StringComparison.Ordinal);
-                staleReplayCache = !available;
-            }
-
-            if (!available
-                && replayReference != exactReference
-                && await _cache.IsInstalledAsync(
-                        exactReference,
-                        cancellationToken)
-                    .ConfigureAwait(false))
-            {
-                available = true;
-                installationReference =
-                    exactReference;
-            }
-
-            if (!available)
-            {
-                VersionType replayType =
-                    PackageDirective.ClassifyVersion(
-                        replayReference.Version);
-                if (replayType == VersionType.Exact)
-                {
-                    FhirSemVer? resolvedVersion =
-                        await _versionResolver.ResolveVersionAsync(
-                                replayReference.Name,
-                                exactVersion,
-                                cancellationToken:
-                                    cancellationToken)
-                            .ConfigureAwait(false);
-                    available =
-                        resolvedVersion is not null
-                        && string.Equals(
-                            resolvedVersion.ToString(),
-                            exactVersion,
-                            StringComparison.Ordinal);
-                }
-                else if (replayType
-                    is VersionType.CiBuild
-                        or VersionType.CiBuildBranch)
-                {
-                    ResolvedDirective? resolvedDirective =
-                        await _registryClient.ResolveAsync(
-                                PackageDirective.Parse(
-                                    replayReference
-                                        .FhirDirective),
-                                cancellationToken:
-                                    cancellationToken)
-                            .ConfigureAwait(false);
-                    if (resolvedDirective is not null
-                        && resolvedDirective.Reference.Name.Equals(
-                            replayReference.Name,
-                            StringComparison.OrdinalIgnoreCase))
-                    {
-                        VersionType resolvedType =
-                            PackageDirective.ClassifyVersion(
-                                resolvedDirective
-                                    .Reference.Version);
-                        available =
-                            resolvedType
-                                is VersionType.CiBuild
-                                    or VersionType.CiBuildBranch
-                            || (resolvedType
-                                    == VersionType.Exact
-                                && string.Equals(
-                                    resolvedDirective
-                                        .Reference.Version,
-                                    exactVersion,
-                                    StringComparison.Ordinal));
-                    }
-                }
-            }
-
-            if (available)
-            {
-                resolved[replayReference.Name] =
-                    exactReference;
-                installOrder.Add(
-                    installationReference);
-                replayOrder.Add(replayReference);
-                continue;
-            }
-
-            if (staleReplayCache)
-            {
-                resolved[replayReference.Name] =
-                    exactReference;
-                installOrder.Add(replayReference);
-                replayOrder.Add(replayReference);
-            }
-
-            string message =
-                $"Locked package '{replayReference.FhirDirective}' with exact identity '{exactReference.FhirDirective}' was not available from the cache or configured registries.";
-            missing[replayReference.Name] =
-                message;
-            failures.Add(
-                new DependencyResolutionFailure
-                {
-                    Code =
-                        DependencyResolutionFailureCode
-                            .PackageNotFound,
-                    PackageId =
-                        replayReference.Name,
-                    VersionSpecifier =
-                        replayReference.Version,
-                    SelectedVersion =
-                        exactVersion,
-                    Message = message,
-                });
-            _logger.LogWarning(
-                "Locked package '{Directive}' with exact identity '{ExactDirective}' was not available.",
-                replayReference.FhirDirective,
-                exactReference.FhirDirective);
-        }
-
-        if (lockFile.Missing is not null)
-        {
-            foreach (KeyValuePair<string, string> entry
-                     in lockFile.Missing)
-            {
-                if (resolved.ContainsKey(entry.Key)
-                    || missing.ContainsKey(entry.Key))
-                {
-                    continue;
-                }
-
-                string message =
-                    $"Previously missing in lock file: '{entry.Value}'";
-                missing[entry.Key] = message;
-                failures.Add(
-                    new DependencyResolutionFailure
-                    {
-                        Code =
-                            DependencyResolutionFailureCode
-                                .PackageNotFound,
-                        PackageId = entry.Key,
-                        VersionSpecifier =
-                            entry.Value,
-                        Message = message,
-                    });
-            }
-        }
-
-        foreach (DependencyResolutionFailure lockedFailure
-                 in lockFile.Failures ?? [])
-        {
-            if (failures.Any(
-                    failure =>
-                        failure.PackageId.Equals(
-                            lockedFailure.PackageId,
-                            StringComparison.OrdinalIgnoreCase)
-                        && failure.Code
-                            == lockedFailure.Code
-                        && string.Equals(
-                            failure.VersionSpecifier,
-                            lockedFailure.VersionSpecifier,
-                            StringComparison.Ordinal)))
-            {
-                continue;
-            }
-
-            failures.Add(lockedFailure);
-            missing.TryAdd(
-                lockedFailure.PackageId,
-                lockedFailure.Message);
-        }
-
-        _logger.LogInformation(
-            "Lock file restore complete: {ResolvedCount} resolved, {MissingCount} missing.",
-            resolved.Count,
-            missing.Count);
-
-        List<PackageReference> resolvedPackages = resolved.Values
-            .OrderBy(
-                reference => reference.Name,
-                StringComparer.OrdinalIgnoreCase)
-            .ThenBy(
-                reference => reference.Name,
-                StringComparer.Ordinal)
-            .ThenBy(
-                reference => reference.Version,
-                StringComparer.Ordinal)
-            .ToList();
-        List<PackageInstallationIdentity> installationIdentities = [];
-        HashSet<ExactPackageIdentity> mappedInstallationReferences = [];
-        foreach (PackageReference replayReference in replayOrder)
-        {
-            if (resolved.TryGetValue(
-                    replayReference.Name,
-                    out PackageReference resolvedReference)
-                && mappedInstallationReferences.Add(
-                    ExactPackageIdentity.Create(
-                        replayReference)))
-            {
-                installationIdentities.Add(
-                    new PackageInstallationIdentity
-                    {
-                        InstallationReference =
-                            replayReference,
-                        ResolvedReference =
-                            resolvedReference,
-                    });
-            }
-        }
-
-        return new PackageClosure
-        {
-            Timestamp = _timeProvider.GetUtcNow().UtcDateTime,
-            Resolved = resolved,
-            ResolvedPackages = resolvedPackages,
-            InstallationIdentities =
-                installationIdentities,
-            Missing = missing,
-            Failures = failures,
-            InstallOrder = installOrder,
-            ReplayOrder = replayOrder,
             InstallOrderIsComplete = true,
         };
     }
@@ -1054,10 +726,7 @@ public class DependencyResolver : IDependencyResolver
                 resolvedPackages,
                 installationIdentities,
                 failures,
-                CreateInstallOrder(
-                    includeCached: false),
-                CreateInstallOrder(
-                    includeCached: true),
+                CreateInstallOrder(),
                 CreateBootstrapInstallOrder());
         }
 
@@ -2017,8 +1686,7 @@ public class DependencyResolver : IDependencyResolver
                 StringComparison.OrdinalIgnoreCase);
         }
 
-        private IReadOnlyList<PackageReference> CreateInstallOrder(
-            bool includeCached)
+        private IReadOnlyList<PackageReference> CreateInstallOrder()
         {
             List<PackageReference> order = [];
             HashSet<ExactPackageIdentity> visited = [];
@@ -2036,8 +1704,7 @@ public class DependencyResolver : IDependencyResolver
                         targetIdentity,
                         visited,
                         active,
-                        order,
-                        includeCached);
+                        order);
                 }
             }
 
@@ -2078,8 +1745,7 @@ public class DependencyResolver : IDependencyResolver
             ExactPackageIdentity identity,
             HashSet<ExactPackageIdentity> visited,
             HashSet<ExactPackageIdentity> active,
-            List<PackageReference> order,
-            bool includeCached)
+            List<PackageReference> order)
         {
             if (visited.Contains(identity)
                 || !_nodes.TryGetValue(
@@ -2106,16 +1772,14 @@ public class DependencyResolver : IDependencyResolver
                         childIdentity,
                         visited,
                         active,
-                        order,
-                        includeCached);
+                        order);
                 }
             }
 
             active.Remove(identity);
             if (visited.Add(identity))
             {
-                if ((includeCached
-                        || node.RequiresInstallation)
+                if (node.RequiresInstallation
                     && !node.BootstrapRequired)
                 {
                     order.Add(
@@ -2447,6 +2111,5 @@ public class DependencyResolver : IDependencyResolver
         IReadOnlyList<PackageInstallationIdentity> InstallationIdentities,
         IReadOnlyList<DependencyResolutionFailure> Failures,
         IReadOnlyList<PackageReference> InstallOrder,
-        IReadOnlyList<PackageReference> ReplayOrder,
         IReadOnlyList<PackageReference> BootstrapInstallOrder);
 }

@@ -32,19 +32,10 @@ public class PublicModelDefaultsTests
             PackageId = "example.package",
             Message = "Not found."
         };
-        PackageLockFile lockFile = new()
-        {
-            Updated = DateTime.UtcNow,
-            Dependencies =
-                new Dictionary<string, string>(
-                    StringComparer.OrdinalIgnoreCase)
-        };
-
         closure.Failures.ShouldBeEmpty();
         closure.ResolvedPackages.ShouldBeEmpty();
         closure.InstallationIdentities.ShouldBeEmpty();
         closure.InstallOrder.ShouldBeEmpty();
-        closure.ReplayOrder.ShouldBeEmpty();
         closure.BootstrapInstallOrder.ShouldBeEmpty();
         closure.InstallOrderIsComplete.ShouldBeFalse();
         closure.IsComplete.ShouldBeTrue();
@@ -54,7 +45,5 @@ public class PublicModelDefaultsTests
         installResult.ManifestDate.ShouldBeNull();
         failure.RequestedVersions.ShouldBeEmpty();
         failure.RegistryFailures.ShouldBeEmpty();
-        lockFile.SchemaVersion.ShouldBe(1);
-        lockFile.Failures.ShouldBeEmpty();
     }
 }

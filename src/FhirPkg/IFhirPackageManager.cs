@@ -41,10 +41,11 @@ public interface IFhirPackageManager
 
     /// <summary>
     /// Restores all dependencies declared in a project's package.json manifest.
-    /// Performs recursive dependency resolution and produces a lock file.
+    /// Always resolves the live dependency graph from the current registry and
+    /// cache state, then installs packages that are not already cached.
     /// </summary>
     /// <param name="projectPath">Path to the project directory containing package.json.</param>
-    /// <param name="options">Restore options controlling conflict strategy, lock file generation, and depth limits.</param>
+    /// <param name="options">Restore options controlling conflict strategy, package eligibility, and depth limits.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The complete package closure containing all resolved and missing dependencies.</returns>
     Task<PackageClosure> RestoreAsync(

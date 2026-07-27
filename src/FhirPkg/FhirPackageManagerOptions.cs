@@ -164,28 +164,16 @@ public class PackageSourceInstallOptions : InstallOptions
 
 /// <summary>
 /// Options controlling how project dependency restoration is performed.
-/// Extends <see cref="InstallOptions"/> with conflict resolution and lock file settings.
+/// Each restore resolves the project's live dependency graph using the current
+/// registry and cache state.
 /// </summary>
 public class RestoreOptions : InstallOptions
 {
-    /// <summary>
-    /// Optional lock file path. Relative paths are resolved against the project
-    /// directory. When omitted, <c>fhirpkg.lock.json</c> in the project
-    /// directory is used.
-    /// </summary>
-    public string? LockFilePath { get; set; }
-
     /// <summary>
     /// Strategy for resolving version conflicts when multiple dependencies require
     /// different versions of the same package. Default: <see cref="ConflictResolutionStrategy.HighestWins"/>.
     /// </summary>
     public ConflictResolutionStrategy ConflictStrategy { get; set; } = ConflictResolutionStrategy.HighestWins;
-
-    /// <summary>
-    /// Whether to write or update the lock file (<c>fhirpkg.lock.json</c>) after successful restoration.
-    /// Default: <c>true</c>.
-    /// </summary>
-    public bool WriteLockFile { get; set; } = true;
 
     /// <summary>
     /// Maximum root-relative depth for transitive dependency resolution.
