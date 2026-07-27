@@ -2963,7 +2963,7 @@ public sealed class FhirPackageManager :
         IEnumerable<PackageReference> installOrder =
             closure.InstallOrderIsComplete
                 ? closure.InstallOrder
-                : closure.Resolved.Values
+                : GetResolvedPackages(closure)
                     .OrderBy(
                         reference => reference.Name,
                         StringComparer.OrdinalIgnoreCase)
@@ -2971,38 +2971,24 @@ public sealed class FhirPackageManager :
                         reference => reference.Version,
                         StringComparer.Ordinal);
         HashSet<string> attemptedPackages =
-            new(StringComparer.OrdinalIgnoreCase);
+            new(StringComparer.Ordinal);
         foreach (PackageReference reference in installOrder)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             if (reference.Name.Equals(
                     record.Manifest.Name,
-                    StringComparison.OrdinalIgnoreCase))
+                    StringComparison.OrdinalIgnoreCase)
+                && string.Equals(
+                    reference.Version,
+                    record.Manifest.Version,
+                    StringComparison.Ordinal))
             {
-                if (string.Equals(
-                        reference.Version,
-                        record.Manifest.Version,
-                        StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                failures.Add(new PackageInstallResult
-                {
-                    Directive = reference.FhirDirective,
-                    Status = PackageInstallStatus.Failed,
-                    ErrorMessage =
-                        $"The active dependency graph requires '{reference.FhirDirective}', but the committed root is '{record.Reference.FhirDirective}'.",
-                    ErrorCode =
-                        PackageInstallErrorCode.DependencyInstallationFailed,
-                    ErrorStage =
-                        PackageInstallStage.DependencyInstallation
-                });
                 continue;
             }
 
-            if (!attemptedPackages.Add(reference.Name))
+            if (!attemptedPackages.Add(
+                    CreateDependencyReferenceKey(reference)))
             {
                 continue;
             }
@@ -3115,6 +3101,12 @@ public sealed class FhirPackageManager :
                 ]);
         }
     }
+
+    private static IEnumerable<PackageReference> GetResolvedPackages(
+        PackageClosure closure) =>
+        closure.ResolvedPackages.Count > 0
+            ? closure.ResolvedPackages
+            : closure.Resolved.Values;
 
     private static string CreateDependencyReferenceKey(
         PackageReference reference) =>
@@ -3276,7 +3268,7 @@ public sealed class FhirPackageManager :
         IEnumerable<PackageReference> installOrder =
             closure.InstallOrderIsComplete
                 ? closure.InstallOrder
-                : closure.Resolved.Values
+                : GetResolvedPackages(closure)
                     .OrderBy(
                         reference => reference.Name,
                         StringComparer.OrdinalIgnoreCase)
@@ -3291,9 +3283,17 @@ public sealed class FhirPackageManager :
             "Installing {Count} packages from closure.",
             references.Count);
 
+        HashSet<string> attemptedReferences =
+            new(StringComparer.Ordinal);
         foreach (PackageReference reference in references)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (!attemptedReferences.Add(
+                    CreateDependencyReferenceKey(reference)))
+            {
+                continue;
+            }
+
             results.Add(
                 await InstallResultAsync(
                         reference.FhirDirective,
@@ -3334,19 +3334,86 @@ public sealed class FhirPackageManager :
         PackageClosure closure,
         PackageReference installationReference)
     {
+        List<PackageInstallationIdentity> mappings =
+            closure.InstallationIdentities
+                .Where(mapping =>
+                    SamePackageReference(
+                        mapping.InstallationReference,
+                        installationReference))
+                .ToList();
+        if (mappings.Count > 0)
+        {
+            PackageReference resolvedReference =
+                mappings[0].ResolvedReference;
+            if (mappings.Skip(1).Any(mapping =>
+                    !SamePackageReference(
+                        mapping.ResolvedReference,
+                        resolvedReference)))
+            {
+                throw CreateAmbiguousClosureIdentityException(
+                    installationReference);
+            }
+
+            return resolvedReference;
+        }
+
         VersionType referenceType =
             PackageDirective.ClassifyVersion(
                 installationReference.Version);
-        return (referenceType
-                    is VersionType.CiBuild
-                        or VersionType.CiBuildBranch
-                        or VersionType.LocalBuild)
+        if (referenceType == VersionType.Exact)
+            return installationReference;
+
+        if (referenceType
+            is not (
+                VersionType.CiBuild
+                or VersionType.CiBuildBranch
+                or VersionType.LocalBuild))
+        {
+            return null;
+        }
+
+        List<PackageReference> exactMatches =
+            closure.ResolvedPackages
+                .Where(reference =>
+                    reference.Name.Equals(
+                        installationReference.Name,
+                        StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        if (exactMatches.Count == 1)
+            return exactMatches[0];
+        if (exactMatches.Count > 1)
+        {
+            throw CreateAmbiguousClosureIdentityException(
+                installationReference);
+        }
+
+        return closure.ResolvedPackages.Count == 0
             && closure.Resolved.TryGetValue(
                 installationReference.Name,
                 out PackageReference selectedReference)
                 ? selectedReference
                 : (PackageReference?)null;
     }
+
+    private static bool SamePackageReference(
+        PackageReference left,
+        PackageReference right) =>
+        left.Name.Equals(
+            right.Name,
+            StringComparison.OrdinalIgnoreCase)
+        && string.Equals(
+            left.Version,
+            right.Version,
+            StringComparison.Ordinal);
+
+    private static PackageInstallException
+        CreateAmbiguousClosureIdentityException(
+            PackageReference installationReference) =>
+        new(
+            PackageInstallErrorCode.DependencyInstallationFailed,
+            PackageInstallStage.DependencyInstallation,
+            $"The dependency closure contains multiple exact versions for '{installationReference.Name}', but installation reference '{installationReference.FhirDirective}' has no unambiguous exact identity mapping.",
+            installationReference.FhirDirective);
 
     /// <summary>
     /// Determines whether an existing lock file covers all dependencies in the manifest.

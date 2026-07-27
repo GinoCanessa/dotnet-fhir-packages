@@ -2194,6 +2194,233 @@ public class FhirPackageManagerTests
     }
 
     [Fact]
+    public async Task InstallAsync_TwoMutableAliasesUseTheirMappedExactIdentities()
+    {
+        PackageRecord rootRecord = CreatePackageRecord(
+            "root.package",
+            "1.0.0",
+            new Dictionary<string, string>
+            {
+                ["shared.package"] = "current$one",
+            });
+        PackageReference firstAlias =
+            new("shared.package", "current$one");
+        PackageReference secondAlias =
+            new("shared.package", "current$two");
+        PackageReference firstExact =
+            new("shared.package", "1.0.0");
+        PackageReference secondExact =
+            new("shared.package", "2.0.0");
+        PackageClosure closure = new()
+        {
+            Timestamp = DateTime.UtcNow,
+            Resolved =
+                new Dictionary<string, PackageReference>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["shared.package"] = secondExact,
+                },
+            ResolvedPackages =
+                [firstExact, secondExact],
+            InstallationIdentities =
+            [
+                new PackageInstallationIdentity
+                {
+                    InstallationReference = firstAlias,
+                    ResolvedReference = firstExact,
+                },
+                new PackageInstallationIdentity
+                {
+                    InstallationReference = secondAlias,
+                    ResolvedReference = secondExact,
+                },
+            ],
+            Missing =
+                new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase),
+            InstallOrder = [firstAlias, secondAlias],
+            InstallOrderIsComplete = true,
+        };
+        ResolvedDirective firstResolved = new()
+        {
+            Reference = firstAlias,
+            TarballUri =
+                new Uri("https://example.test/shared-one.tgz"),
+        };
+        ResolvedDirective secondResolved = new()
+        {
+            Reference = secondAlias,
+            TarballUri =
+                new Uri("https://example.test/shared-two.tgz"),
+        };
+
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                rootRecord.Reference,
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(rootRecord);
+        _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                rootRecord.Manifest,
+                It.IsAny<DependencyResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(closure);
+        _cacheMock.Setup(cache => cache.IsInstalledAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        _registryMock.Setup(registry => registry.ResolveAsync(
+                It.Is<PackageDirective>(
+                    directive =>
+                        directive.PackageId
+                            == "shared.package"),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((
+                PackageDirective directive,
+                VersionResolveOptions? _,
+                CancellationToken _) =>
+                directive.RequestedVersion
+                    == firstAlias.Version
+                    ? firstResolved
+                    : secondResolved);
+        _registryMock.Setup(registry => registry.DownloadAsync(
+                It.IsAny<ResolvedDirective>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PackageDownloadResult
+            {
+                Content = new MemoryStream([1]),
+                ContentType = "application/gzip",
+            });
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                firstAlias,
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(
+                CreateAliasPackageRecord(
+                    firstAlias.Name,
+                    firstAlias.Version!,
+                    firstExact.Version!));
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                secondAlias,
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(
+                CreateAliasPackageRecord(
+                    secondAlias.Name,
+                    secondAlias.Version!,
+                    secondExact.Version!));
+        using FhirPackageManager manager = CreateManager();
+
+        PackageRecord result = await manager.InstallAsync(
+            rootRecord.Reference,
+            new MemoryStream([2]),
+            new PackageSourceInstallOptions
+            {
+                IncludeDependencies = true,
+            },
+            TestContext.Current.CancellationToken);
+
+        result.ShouldBe(rootRecord);
+        _cacheMock.Verify(cache => cache.InstallAsync(
+            firstAlias,
+            It.IsAny<Stream>(),
+            It.Is<InstallCacheOptions?>(options =>
+                options != null
+                && options.IdentityExpectation != null
+                && options.IdentityExpectation
+                    .ExpectedManifestReference
+                    == firstExact),
+            It.IsAny<CancellationToken>()), Times.Once);
+        _cacheMock.Verify(cache => cache.InstallAsync(
+            secondAlias,
+            It.IsAny<Stream>(),
+            It.Is<InstallCacheOptions?>(options =>
+                options != null
+                && options.IdentityExpectation != null
+                && options.IdentityExpectation
+                    .ExpectedManifestReference
+                    == secondExact),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task InstallAsync_AmbiguousMutableAliasWithoutMapping_Fails()
+    {
+        PackageRecord rootRecord = CreatePackageRecord(
+            "root.package",
+            "1.0.0",
+            new Dictionary<string, string>
+            {
+                ["shared.package"] = "current",
+            });
+        PackageReference alias =
+            new("shared.package", "current");
+        PackageClosure closure = new()
+        {
+            Timestamp = DateTime.UtcNow,
+            Resolved =
+                new Dictionary<string, PackageReference>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["shared.package"] =
+                        new PackageReference(
+                            "shared.package",
+                            "2.0.0"),
+                },
+            ResolvedPackages =
+            [
+                new PackageReference(
+                    "shared.package",
+                    "1.0.0"),
+                new PackageReference(
+                    "shared.package",
+                    "2.0.0"),
+            ],
+            Missing =
+                new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase),
+            InstallOrder = [alias],
+            InstallOrderIsComplete = true,
+        };
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                rootRecord.Reference,
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(rootRecord);
+        _dependencyResolverMock.Setup(resolver => resolver.ResolveAsync(
+                rootRecord.Manifest,
+                It.IsAny<DependencyResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(closure);
+        using FhirPackageManager manager = CreateManager();
+
+        PackageInstallException exception =
+            await Should.ThrowAsync<PackageInstallException>(
+                () => manager.InstallAsync(
+                    rootRecord.Reference,
+                    new MemoryStream([1]),
+                    new PackageSourceInstallOptions
+                    {
+                        IncludeDependencies = true,
+                    },
+                    TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(
+            PackageInstallErrorCode.DependencyInstallationFailed);
+        exception.Stage.ShouldBe(
+            PackageInstallStage.DependencyInstallation);
+        exception.Directive.ShouldBe(alias.FhirDirective);
+        _registryMock.Verify(registry => registry.ResolveAsync(
+            It.IsAny<PackageDirective>(),
+            It.IsAny<VersionResolveOptions?>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
     public async Task InstallAsync_CiDependency_RejectsMovedAlias()
     {
         PackageRecord rootRecord = CreatePackageRecord(
@@ -2679,7 +2906,7 @@ public class FhirPackageManagerTests
     }
 
     [Fact]
-    public async Task InstallAsync_DifferentRootVersionInClosure_IsDependencyFailure()
+    public async Task InstallAsync_DifferentRootVersion_IsInstalled()
     {
         PackageRecord rootRecord = CreatePackageRecord(
             "root.package",
@@ -2699,6 +2926,7 @@ public class FhirPackageManagerTests
                 {
                     [conflictingRoot.Name] = conflictingRoot,
                 },
+            ResolvedPackages = [conflictingRoot],
             Missing =
                 new Dictionary<string, string>(
                     StringComparer.OrdinalIgnoreCase),
@@ -2716,45 +2944,76 @@ public class FhirPackageManagerTests
                 It.IsAny<DependencyResolveOptions?>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(closure);
+        _cacheMock.Setup(cache => cache.IsInstalledAsync(
+                conflictingRoot,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        ResolvedDirective resolvedDependency = new()
+        {
+            Reference = conflictingRoot,
+            TarballUri =
+                new Uri("https://example.test/root-v2.tgz"),
+        };
+        _registryMock.Setup(registry => registry.ResolveAsync(
+                It.Is<PackageDirective>(
+                    directive =>
+                        directive.PackageId
+                            == conflictingRoot.Name
+                        && directive.RequestedVersion
+                            == conflictingRoot.Version),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(resolvedDependency);
+        _registryMock.Setup(registry => registry.DownloadAsync(
+                resolvedDependency,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PackageDownloadResult
+            {
+                Content = new MemoryStream([1]),
+                ContentType = "application/gzip",
+            });
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                conflictingRoot,
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(
+                CreatePackageRecord(
+                    conflictingRoot.Name,
+                    conflictingRoot.Version!));
         using FhirPackageManager manager = CreateManager();
 
-        DependencyInstallationException exception =
-            await Should.ThrowAsync<DependencyInstallationException>(
-                () => manager.InstallAsync(
-                    rootRecord.Reference,
-                    new MemoryStream([1]),
-                    new PackageSourceInstallOptions
-                    {
-                        IncludeDependencies = true,
-                    },
-                    TestContext.Current.CancellationToken));
+        PackageRecord result = await manager.InstallAsync(
+            rootRecord.Reference,
+            new MemoryStream([1]),
+            new PackageSourceInstallOptions
+            {
+                IncludeDependencies = true,
+            },
+            TestContext.Current.CancellationToken);
 
-        PackageInstallResult failure =
-            exception.DependencyFailures.ShouldHaveSingleItem();
-        failure.Directive.ShouldBe("root.package#1.0.0-alpha");
-        failure.ErrorCode.ShouldBe(
-            PackageInstallErrorCode.DependencyInstallationFailed);
-        _registryMock.Verify(registry => registry.ResolveAsync(
-            It.IsAny<PackageDirective>(),
-            It.IsAny<VersionResolveOptions?>(),
-            It.IsAny<CancellationToken>()), Times.Never);
+        result.ShouldBe(rootRecord);
+        _cacheMock.Verify(cache => cache.InstallAsync(
+            conflictingRoot,
+            It.IsAny<Stream>(),
+            It.IsAny<InstallCacheOptions?>(),
+            It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task InstallAsync_PartialInstallOrder_FallsBackToResolvedSet()
+    public async Task InstallAsync_PartialInstallOrder_FallsBackToAllResolvedPackages()
     {
         PackageRecord rootRecord = CreatePackageRecord(
             "root.package",
             "1.0.0",
             new Dictionary<string, string>
             {
-                ["first.package"] = "1.0.0",
-                ["second.package"] = "1.0.0",
+                ["shared.package"] = "2.0.0",
             });
         PackageReference firstReference =
-            new("first.package", "1.0.0");
+            new("shared.package", "1.0.0");
         PackageReference secondReference =
-            new("second.package", "1.0.0");
+            new("shared.package", "2.0.0");
         PackageClosure closure = new()
         {
             Timestamp = DateTime.UtcNow,
@@ -2762,9 +3021,10 @@ public class FhirPackageManagerTests
                 new Dictionary<string, PackageReference>(
                     StringComparer.OrdinalIgnoreCase)
                 {
-                    [firstReference.Name] = firstReference,
                     [secondReference.Name] = secondReference,
                 },
+            ResolvedPackages =
+                [firstReference, secondReference],
             Missing =
                 new Dictionary<string, string>(
                     StringComparer.OrdinalIgnoreCase),
@@ -2807,7 +3067,8 @@ public class FhirPackageManagerTests
                 PackageDirective directive,
                 VersionResolveOptions? _,
                 CancellationToken _) =>
-                directive.PackageId == firstReference.Name
+                directive.RequestedVersion
+                    == firstReference.Version
                     ? firstResolved
                     : secondResolved);
         _registryMock.Setup(registry => registry.DownloadAsync(
@@ -2856,6 +3117,174 @@ public class FhirPackageManagerTests
             It.IsAny<Stream>(),
             It.IsAny<InstallCacheOptions?>(),
             It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task InstallAsync_RealResolver_InstallsAllExactVersionsAndSubgraphs()
+    {
+        PackageRecord rootRecord = CreatePackageRecord(
+            "root.package",
+            "1.0.0",
+            CreateDependencies(
+                ("low.parent", "1.0.0"),
+                ("high.parent", "1.0.0")));
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["low.parent"] = CreateDependencyListing(
+                CreateDependencyVersion(
+                    "low.parent",
+                    "1.0.0",
+                    CreateDependencies(
+                        ("shared.package", "3.1.1")))),
+            ["high.parent"] = CreateDependencyListing(
+                CreateDependencyVersion(
+                    "high.parent",
+                    "1.0.0",
+                    CreateDependencies(
+                        ("shared.package", "6.1.0")))),
+            ["shared.package"] = CreateDependencyListing(
+                CreateDependencyVersion(
+                    "shared.package",
+                    "3.1.1",
+                    CreateDependencies(
+                        ("child.v3", "1.0.0"))),
+                CreateDependencyVersion(
+                    "shared.package",
+                    "6.1.0",
+                    CreateDependencies(
+                        ("child.v6", "1.0.0")))),
+            ["child.v3"] = CreateDependencyListing(
+                CreateDependencyVersion(
+                    "child.v3",
+                    "1.0.0",
+                    CreateDependencies())),
+            ["child.v6"] = CreateDependencyListing(
+                CreateDependencyVersion(
+                    "child.v6",
+                    "1.0.0",
+                    CreateDependencies())),
+        };
+
+        _versionResolverMock.Setup(resolver => resolver.ResolveVersionAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((
+                string _,
+                string versionSpecifier,
+                VersionResolveOptions? _,
+                CancellationToken _) =>
+                FhirSemVer.TryParse(
+                    versionSpecifier,
+                    out FhirSemVer? version)
+                    ? version
+                    : null);
+        _registryMock.Setup(registry => registry.GetPackageListingAsync(
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((
+                string packageId,
+                CancellationToken _) =>
+                listings.TryGetValue(
+                    packageId,
+                    out PackageListing? listing)
+                    ? listing
+                    : null);
+        _registryMock.Setup(registry => registry.ResolveAsync(
+                It.IsAny<PackageDirective>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((
+                PackageDirective directive,
+                VersionResolveOptions? _,
+                CancellationToken _) =>
+                new ResolvedDirective
+                {
+                    Reference = new PackageReference(
+                        directive.PackageId,
+                        directive.RequestedVersion),
+                    TarballUri = new Uri(
+                        $"https://example.test/{Uri.EscapeDataString(directive.PackageId)}-{Uri.EscapeDataString(directive.RequestedVersion ?? string.Empty)}.tgz"),
+                });
+        _registryMock.Setup(registry => registry.DownloadAsync(
+                It.IsAny<ResolvedDirective>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PackageDownloadResult
+            {
+                Content = new MemoryStream([1]),
+                ContentType = "application/gzip",
+            });
+        _cacheMock.Setup(cache => cache.ReadManifestAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((PackageManifest?)null);
+        _cacheMock.Setup(cache => cache.IsInstalledAsync(
+                It.IsAny<PackageReference>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                It.Is<PackageReference>(
+                    reference =>
+                        reference.Name != rootRecord.Reference.Name),
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((
+                PackageReference reference,
+                Stream _,
+                InstallCacheOptions? _,
+                CancellationToken _) =>
+                CreatePackageRecord(
+                    reference.Name,
+                    reference.Version!));
+        _cacheMock.Setup(cache => cache.InstallAsync(
+                rootRecord.Reference,
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(rootRecord);
+
+        DependencyResolver dependencyResolver = new(
+            _registryMock.Object,
+            _versionResolverMock.Object,
+            _cacheMock.Object,
+            NullLogger.Instance);
+        using FhirPackageManager manager = new(
+            _cacheMock.Object,
+            _registryMock.Object,
+            _versionResolverMock.Object,
+            dependencyResolver,
+            _indexerMock.Object,
+            new FhirPackageManagerOptions(),
+            NullLogger<FhirPackageManager>.Instance);
+
+        PackageRecord result = await manager.InstallAsync(
+            rootRecord.Reference,
+            new MemoryStream([2]),
+            new PackageSourceInstallOptions
+            {
+                IncludeDependencies = true,
+            },
+            TestContext.Current.CancellationToken);
+
+        result.ShouldBe(rootRecord);
+        PackageReference[] expectedReferences =
+        [
+            new PackageReference("shared.package", "3.1.1"),
+            new PackageReference("shared.package", "6.1.0"),
+            new PackageReference("child.v3", "1.0.0"),
+            new PackageReference("child.v6", "1.0.0"),
+        ];
+        foreach (PackageReference reference in expectedReferences)
+        {
+            _cacheMock.Verify(cache => cache.InstallAsync(
+                reference,
+                It.IsAny<Stream>(),
+                It.IsAny<InstallCacheOptions?>(),
+                It.IsAny<CancellationToken>()), Times.Once);
+        }
     }
 
     [Fact]
@@ -5485,6 +5914,41 @@ public class FhirPackageManagerTests
                 Dependencies = dependencies,
                 Date = manifestDate
             }
+        };
+
+    private static Dictionary<string, string> CreateDependencies(
+        params (string PackageId, string Version)[] dependencies)
+    {
+        Dictionary<string, string> result =
+            new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string packageId, string version) in dependencies)
+        {
+            result.Add(packageId, version);
+        }
+
+        return result;
+    }
+
+    private static PackageListing CreateDependencyListing(
+        params PackageVersionInfo[] versions) =>
+        new()
+        {
+            PackageId = versions[0].Name,
+            Versions = versions.ToDictionary(
+                version => version.Version,
+                StringComparer.Ordinal),
+            VersionCandidates = versions,
+        };
+
+    private static PackageVersionInfo CreateDependencyVersion(
+        string packageId,
+        string version,
+        IReadOnlyDictionary<string, string> dependencies) =>
+        new()
+        {
+            Name = packageId,
+            Version = version,
+            Dependencies = dependencies,
         };
 
     private static PackageListing CreateWildcardGrammarListing()
