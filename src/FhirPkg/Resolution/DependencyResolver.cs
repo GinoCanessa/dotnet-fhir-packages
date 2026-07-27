@@ -1,7 +1,6 @@
 // Copyright (c) Gino Canessa. All rights reserved.
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
-using System.Text;
 using System.Text.Json;
 
 using Microsoft.Extensions.Logging;
@@ -16,8 +15,8 @@ namespace FhirPkg.Resolution;
 
 /// <summary>
 /// Resolves the active transitive dependency closure for a FHIR package manifest.
-/// Handles version-dependent graph replacement, circular dependencies, version
-/// conflicts, depth limiting, and known package fixups.
+/// Preserves every exact package identity while handling circular dependencies,
+/// version preferences, depth limiting, and known package fixups.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -27,9 +26,9 @@ namespace FhirPkg.Resolution;
 /// <list type="number">
 ///   <item><description>Known package fixups (e.g. hl7.fhir.r4.core@4.0.0 → 4.0.1) are applied.</description></item>
 ///   <item><description>Version specifiers are resolved to exact versions via <see cref="IVersionResolver"/>.</description></item>
-///   <item><description>Version conflicts are handled according to the configured <see cref="ConflictResolutionStrategy"/>.</description></item>
-///   <item><description>The selected version's exact child edges replace any losing version's child edges.</description></item>
-///   <item><description>Shared dependency nodes retain every active parent edge.</description></item>
+///   <item><description>Every distinct exact version retains and traverses its own dependency edges.</description></item>
+///   <item><description>Version conflicts select only the preferred <see cref="PackageClosure.Resolved"/> projection.</description></item>
+///   <item><description>Shared exact dependency nodes retain every active parent edge.</description></item>
 ///   <item><description>Resolution depth is bounded by <see cref="DependencyResolveOptions.MaxDepth"/> and truncation is reported.</description></item>
 /// </list>
 /// </remarks>
@@ -129,12 +128,14 @@ public class DependencyResolver : IDependencyResolver
 
         _logger.LogInformation(
             "Dependency resolution complete: {ResolvedCount} resolved, {FailureCount} failures.",
-            result.Resolved.Count, result.Failures.Count);
+            result.ResolvedPackages.Count, result.Failures.Count);
 
         return new PackageClosure
         {
             Timestamp = _timeProvider.GetUtcNow().UtcDateTime,
             Resolved = result.Resolved,
+            ResolvedPackages = result.ResolvedPackages,
+            InstallationIdentities = result.InstallationIdentities,
             Missing = CreateMissingProjection(result.Failures),
             Failures = result.Failures,
             InstallOrder = result.InstallOrder,
@@ -423,10 +424,46 @@ public class DependencyResolver : IDependencyResolver
             resolved.Count,
             missing.Count);
 
+        List<PackageReference> resolvedPackages = resolved.Values
+            .OrderBy(
+                reference => reference.Name,
+                StringComparer.OrdinalIgnoreCase)
+            .ThenBy(
+                reference => reference.Name,
+                StringComparer.Ordinal)
+            .ThenBy(
+                reference => reference.Version,
+                StringComparer.Ordinal)
+            .ToList();
+        List<PackageInstallationIdentity> installationIdentities = [];
+        HashSet<ExactPackageIdentity> mappedInstallationReferences = [];
+        foreach (PackageReference replayReference in replayOrder)
+        {
+            if (resolved.TryGetValue(
+                    replayReference.Name,
+                    out PackageReference resolvedReference)
+                && mappedInstallationReferences.Add(
+                    ExactPackageIdentity.Create(
+                        replayReference)))
+            {
+                installationIdentities.Add(
+                    new PackageInstallationIdentity
+                    {
+                        InstallationReference =
+                            replayReference,
+                        ResolvedReference =
+                            resolvedReference,
+                    });
+            }
+        }
+
         return new PackageClosure
         {
             Timestamp = _timeProvider.GetUtcNow().UtcDateTime,
             Resolved = resolved,
+            ResolvedPackages = resolvedPackages,
+            InstallationIdentities =
+                installationIdentities,
             Missing = missing,
             Failures = failures,
             InstallOrder = installOrder,
@@ -581,27 +618,23 @@ public class DependencyResolver : IDependencyResolver
         private readonly DependencyResolver _owner;
         private readonly PackageManifest _rootManifest;
         private readonly PackageReference _rootReference;
+        private readonly ExactPackageIdentity _rootIdentity;
         private readonly DependencyResolveOptions _options;
         private readonly PackageFixupPolicy _fixupPolicy;
         private readonly VersionResolveOptions _versionResolveOptions;
-        private readonly Dictionary<string, DependencyNode> _nodes =
-            new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<ExactPackageIdentity, DependencyNode> _nodes =
+            [];
         private readonly Dictionary<long, DependencyEdge> _edges = [];
         private readonly Dictionary<long, InvalidDependencyEdge>
             _invalidEdges = [];
         private readonly Dictionary<long, RootBackEdge>
             _rootBackEdges = [];
-        private readonly Queue<string> _pendingPackages = [];
-        private readonly HashSet<string> _queuedPackages =
-            new(StringComparer.OrdinalIgnoreCase);
+        private readonly Queue<ExactPackageIdentity> _pendingPackages = [];
+        private readonly HashSet<ExactPackageIdentity> _queuedPackages = [];
         private readonly Dictionary<string, Dictionary<string, DependencyVersionResolution>>
             _versionResolutions = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, Dictionary<string, DependencyMetadataResult>>
-            _metadata = new(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> _seenStates =
-            new(StringComparer.Ordinal);
-        private readonly HashSet<string> _unstablePackageIds =
-            new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<ExactPackageIdentity, DependencyMetadataResult>
+            _metadata = [];
         private long _nextEdgeId;
 
         internal ActiveDependencyGraph(
@@ -616,6 +649,9 @@ public class DependencyResolver : IDependencyResolver
                 ?? new PackageReference(
                     rootManifest.Name,
                     rootManifest.Version);
+            _rootIdentity = new ExactPackageIdentity(
+                rootManifest.Name,
+                rootManifest.Version);
             _options = options;
             _fixupPolicy = fixupPolicy;
             _versionResolveOptions = new VersionResolveOptions
@@ -632,47 +668,32 @@ public class DependencyResolver : IDependencyResolver
             int dependencyIndex = 0;
             foreach (KeyValuePair<string, string> dependency in rootDependencies)
             {
-                AddEdge(
-                    _rootManifest.Name,
-                    _rootManifest.Version,
-                    dependency.Key,
-                    dependency.Value,
-                    depth: 0,
-                    [dependencyIndex],
-                    isRootEdge: true);
+                await AddEdgeAsync(
+                        _rootManifest.Name,
+                        _rootManifest.Version,
+                        dependency.Key,
+                        dependency.Value,
+                        depth: 0,
+                        [dependencyIndex],
+                        isRootEdge: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 dependencyIndex++;
             }
 
-            _seenStates.Add(CreateStateSignature());
             while (_pendingPackages.Count > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                string packageId = _pendingPackages.Dequeue();
-                _queuedPackages.Remove(packageId);
-                await RecomputeNodeAsync(
-                        _nodes[packageId],
-                        cancellationToken)
-                    .ConfigureAwait(false);
-
-                string stateSignature = CreateStateSignature();
-                if (!_seenStates.Add(stateSignature))
+                ExactPackageIdentity identity =
+                    _pendingPackages.Dequeue();
+                _queuedPackages.Remove(identity);
+                if (_nodes.TryGetValue(
+                        identity,
+                        out DependencyNode? node))
                 {
-                    DisableUnstablePackage(packageId);
-                    _seenStates.Clear();
-                    _seenStates.Add(CreateStateSignature());
-                }
-            }
-
-            foreach (RootBackEdge edge in _rootBackEdges.Values)
-            {
-                if (edge.Depth <= _options.MaxDepth
-                    && PackageDirective.ClassifyVersion(
-                        edge.VersionSpecifier) == VersionType.Latest)
-                {
-                    edge.Resolution = await ResolveVersionAsync(
-                            edge.PackageId,
-                            edge.VersionSpecifier,
+                    await RecomputeNodeAsync(
+                            node,
                             cancellationToken)
                         .ConfigureAwait(false);
                 }
@@ -681,17 +702,43 @@ public class DependencyResolver : IDependencyResolver
 
         internal DependencyGraphResult CreateResult()
         {
+            List<DependencyNode> activeNodes = _nodes.Values
+                .Where(node => node.ActiveDepth.HasValue)
+                .ToList();
+            activeNodes.Sort(CompareNodesByFirstPath);
+
+            List<PackageReference> resolvedPackages = activeNodes
+                .Select(node => node.Identity.Reference)
+                .ToList();
             Dictionary<string, PackageReference> resolved =
                 new(StringComparer.OrdinalIgnoreCase);
-            List<DependencyResolutionFailure> failures = [];
-
-            foreach (DependencyNode node in _nodes.Values)
+            Dictionary<string, List<DependencyNode>> nodesByPackage =
+                new(StringComparer.OrdinalIgnoreCase);
+            foreach (DependencyNode node in activeNodes)
             {
-                if (node.SelectedReference is PackageReference selected)
+                if (!nodesByPackage.TryGetValue(
+                        node.Identity.PackageId,
+                        out List<DependencyNode>? packageNodes))
                 {
-                    resolved[node.PackageId] = selected;
+                    packageNodes = [];
+                    nodesByPackage.Add(
+                        node.Identity.PackageId,
+                        packageNodes);
                 }
+
+                packageNodes.Add(node);
             }
+
+            foreach (KeyValuePair<string, List<DependencyNode>> package
+                     in nodesByPackage)
+            {
+                DependencyNode preferred =
+                    SelectPreferredNode(package.Value);
+                resolved[package.Key] =
+                    preferred.Identity.Reference;
+            }
+
+            List<DependencyResolutionFailure> failures = [];
 
             List<DependencyEdge> orderedEdges = _edges.Values.ToList();
             orderedEdges.Sort(CompareEdges);
@@ -740,6 +787,10 @@ public class DependencyResolver : IDependencyResolver
                             $"Dependency '{edge.PackageId}@{edge.VersionSpecifier}' at depth {edge.Depth} exceeds the maximum depth of {_options.MaxDepth}.",
                     });
                 }
+                else if (edge.IsSatisfied)
+                {
+                    continue;
+                }
                 else if (edge.Resolution is
                     {
                         RegistryFailures.Count: > 0
@@ -759,6 +810,28 @@ public class DependencyResolver : IDependencyResolver
                             resolution.RegistryFailures,
                         Message =
                             $"Registry failures prevented root dependency '{edge.PackageId}@{edge.VersionSpecifier}' from being verified against the committed root.",
+                    });
+                }
+                else if (PackageDirective.ClassifyVersion(
+                             edge.VersionSpecifier)
+                         is VersionType.CiBuild
+                             or VersionType.CiBuildBranch
+                             or VersionType.LocalBuild)
+                {
+                    failures.Add(new DependencyResolutionFailure
+                    {
+                        Code =
+                            DependencyResolutionFailureCode.VersionConflict,
+                        PackageId = edge.PackageId,
+                        VersionSpecifier = edge.VersionSpecifier,
+                        SelectedVersion = _rootManifest.Version,
+                        ParentPackageId = edge.ParentPackageId,
+                        ParentVersion = edge.ParentVersion,
+                        Depth = edge.Depth,
+                        RequestedVersions =
+                            [_rootManifest.Version, edge.VersionSpecifier],
+                        Message =
+                            $"Dependency '{edge.ParentPackageId}@{edge.ParentVersion}' requires root package alias '{edge.PackageId}@{edge.VersionSpecifier}', but the committed root reference is '{_rootReference.FhirDirective}'.",
                     });
                 }
                 else if (edge.Resolution is
@@ -875,30 +948,52 @@ public class DependencyResolver : IDependencyResolver
                 }
             }
 
-            foreach (DependencyNode node in _nodes.Values)
+            if (_options.ConflictStrategy
+                == ConflictResolutionStrategy.Error)
             {
-                if (_options.ConflictStrategy
-                        == ConflictResolutionStrategy.Error)
+                foreach (KeyValuePair<string, List<DependencyNode>> package
+                         in nodesByPackage)
                 {
-                    IReadOnlyList<string> versions =
-                        GetDistinctResolvedVersions(node);
+                    List<string> versions = package.Value
+                        .Select(node => node.Identity.Version)
+                        .Distinct(StringComparer.Ordinal)
+                        .ToList();
+                    string selectedVersion =
+                        SelectPreferredNode(package.Value)
+                            .Identity.Version;
+                    if (package.Key.Equals(
+                            _rootManifest.Name,
+                            StringComparison.OrdinalIgnoreCase)
+                        && !versions.Contains(
+                            _rootManifest.Version,
+                            StringComparer.Ordinal))
+                    {
+                        versions.Insert(
+                            0,
+                            _rootManifest.Version);
+                        selectedVersion =
+                            _rootManifest.Version;
+                    }
+
                     if (versions.Count > 1)
                     {
                         failures.Add(new DependencyResolutionFailure
                         {
                             Code = DependencyResolutionFailureCode.VersionConflict,
-                            PackageId = node.PackageId,
+                            PackageId = package.Key,
                             SelectedVersion =
-                                node.SelectedReference?.Version,
+                                selectedVersion,
                             RequestedVersions = versions,
                             Message =
                                 $"Version conflict among active requirements: {string.Join(", ", versions.Select(version => $"'{version}'"))}.",
                         });
                     }
                 }
+            }
 
-                if (node.SelectedReference is PackageReference selected
-                    && node.Metadata is
+            foreach (DependencyNode node in activeNodes)
+            {
+                if (node.Metadata is
                     {
                         IsComplete: false
                     } metadata)
@@ -906,33 +1001,58 @@ public class DependencyResolver : IDependencyResolver
                     failures.Add(new DependencyResolutionFailure
                     {
                         Code = DependencyResolutionFailureCode.MetadataUnavailable,
-                        PackageId = node.PackageId,
-                        SelectedVersion = selected.Version,
+                        PackageId = node.Identity.PackageId,
+                        SelectedVersion = node.Identity.Version,
                         RegistryFailures = metadata.RegistryFailures,
                         Message = metadata.Message,
                     });
                 }
             }
 
-            foreach (string packageId in _unstablePackageIds)
+            List<PackageInstallationIdentity> installationIdentities = [];
+            Dictionary<ExactPackageIdentity, PackageInstallationIdentity>
+                identitiesByInstallationReference = [];
+            foreach (DependencyNode node in activeNodes)
             {
-                _nodes.TryGetValue(
-                    packageId,
-                    out DependencyNode? unstableNode);
-                failures.Add(new DependencyResolutionFailure
+                PackageReference installationReference =
+                    node.InstallationReference
+                    ?? node.Identity.Reference;
+                ExactPackageIdentity installationKey =
+                    new(
+                        installationReference.Name,
+                        installationReference.Version
+                            ?? throw new InvalidOperationException(
+                                "Installation references must include a version."));
+                PackageInstallationIdentity mapping = new()
                 {
-                    Code =
-                        DependencyResolutionFailureCode.UnstableResolution,
-                    PackageId = packageId,
-                    SelectedVersion =
-                        unstableNode?.SelectedReference?.Version,
-                    Message =
-                        $"Dependency resolution for '{packageId}' repeated a prior active graph state and could not reach a stable closure.",
-                });
+                    InstallationReference = installationReference,
+                    ResolvedReference = node.Identity.Reference,
+                };
+                if (identitiesByInstallationReference.TryGetValue(
+                        installationKey,
+                        out PackageInstallationIdentity? existing))
+                {
+                    if (!SameReference(
+                            existing.ResolvedReference,
+                            mapping.ResolvedReference))
+                    {
+                        throw new InvalidOperationException(
+                            $"Installation reference '{installationReference.FhirDirective}' resolved to multiple exact package identities.");
+                    }
+
+                    continue;
+                }
+
+                identitiesByInstallationReference.Add(
+                    installationKey,
+                    mapping);
+                installationIdentities.Add(mapping);
             }
 
             return new DependencyGraphResult(
                 resolved,
+                resolvedPackages,
+                installationIdentities,
                 failures,
                 CreateInstallOrder(
                     includeCached: false),
@@ -945,20 +1065,6 @@ public class DependencyResolver : IDependencyResolver
             DependencyNode node,
             CancellationToken cancellationToken)
         {
-            if (_unstablePackageIds.Contains(node.PackageId))
-            {
-                RemoveOutgoingEdges(node);
-                node.SelectedReference = null;
-                node.MetadataReference = null;
-                node.InstallationReference = null;
-                node.RequiresInstallation = true;
-                node.BootstrapRequired = false;
-                node.ActiveDepth = null;
-                node.ActivePath = null;
-                node.Metadata = null;
-                return;
-            }
-
             List<DependencyEdge> orderedEdges =
                 node.IncomingEdges.Values.ToList();
             orderedEdges.Sort(CompareEdges);
@@ -969,23 +1075,17 @@ public class DependencyResolver : IDependencyResolver
                 if (edge.Depth > _options.MaxDepth)
                     continue;
 
-                DependencyVersionResolution resolution =
-                    await ResolveVersionAsync(
-                            edge.PackageId,
-                            edge.VersionSpecifier,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                edge.Resolution = resolution;
-                if (resolution.Version is FhirSemVer version)
+                if (edge.Resolution is
+                        DependencyVersionResolution resolution
+                    && edge.TargetIdentity is
+                        ExactPackageIdentity targetIdentity
+                    && targetIdentity.Equals(node.Identity)
+                    && resolution.Version is not null)
                 {
                     requirements.Add(
                         new ResolvedDependencyRequirement(
                             edge,
-                            version,
-                            resolution.InstallationReference,
-                            resolution.MetadataReference,
-                            resolution.RequiresInstallation,
-                            resolution.BootstrapRequired));
+                            resolution));
                 }
             }
 
@@ -996,60 +1096,60 @@ public class DependencyResolver : IDependencyResolver
             bool bootstrapRequired = false;
             int? activeDepth = null;
             int[]? activePath = null;
+            int[]? firstPath = null;
             if (requirements.Count > 0)
             {
-                ResolvedDependencyRequirement winner =
-                    SelectWinner(requirements);
-                selectedReference = new PackageReference(
-                    node.PackageId,
-                    winner.Version.ToString());
-                List<ResolvedDependencyRequirement>
-                    selectedRequirements = requirements
-                        .Where(
-                            requirement => string.Equals(
-                                requirement.Version.ToString(),
-                                winner.Version.ToString(),
-                                StringComparison.Ordinal))
-                        .ToList();
+                selectedReference =
+                    node.Identity.Reference;
                 ResolvedDependencyRequirement installationSource =
-                    selectedRequirements.FirstOrDefault(
+                    requirements.FirstOrDefault(
                         requirement =>
                             IsMutableInstallationAlias(
                                 requirement
+                                    .Resolution
                                     .InstallationReference))
-                    ?? selectedRequirements.FirstOrDefault(
+                    ?? requirements.FirstOrDefault(
                         requirement =>
-                            !requirement.RequiresInstallation)
-                    ?? selectedRequirements.FirstOrDefault(
+                            !requirement.Resolution
+                                .RequiresInstallation)
+                    ?? requirements.FirstOrDefault(
                         requirement =>
-                            !requirement.BootstrapRequired)
-                    ?? winner;
+                            !requirement.Resolution
+                                .BootstrapRequired)
+                    ?? requirements[0];
                 ResolvedDependencyRequirement requirementMetadataSource =
-                    selectedRequirements.FirstOrDefault(
+                    requirements.FirstOrDefault(
                         requirement =>
-                            !requirement.BootstrapRequired)
-                    ?? selectedRequirements.FirstOrDefault(
+                            !requirement.Resolution
+                                .BootstrapRequired)
+                    ?? requirements.FirstOrDefault(
                         requirement =>
-                            !requirement.RequiresInstallation)
+                            !requirement.Resolution
+                                .RequiresInstallation)
                     ?? installationSource;
                 installationReference =
-                    installationSource.InstallationReference
+                    installationSource.Resolution
+                        .InstallationReference
                     ?? selectedReference;
                 requiresInstallation =
-                    selectedRequirements.All(
+                    requirements.All(
                         requirement =>
-                            requirement.RequiresInstallation);
+                            requirement.Resolution
+                                .RequiresInstallation);
                 bootstrapRequired =
-                    selectedRequirements.All(
+                    requirements.All(
                         requirement =>
-                            requirement.BootstrapRequired);
+                            requirement.Resolution
+                                .BootstrapRequired);
                 metadataReference =
-                    requirementMetadataSource.MetadataReference
+                    requirementMetadataSource.Resolution
+                        .MetadataReference
                     ?? selectedReference;
                 ResolvedDependencyRequirement activeRoute =
                     SelectActiveRoute(requirements);
                 activeDepth = activeRoute.Edge.Depth;
                 activePath = activeRoute.Edge.TraversalPath;
+                firstPath = requirements[0].Edge.TraversalPath;
             }
 
             bool selectionChanged =
@@ -1065,7 +1165,8 @@ public class DependencyResolver : IDependencyResolver
                 || node.RequiresInstallation != requiresInstallation
                 || node.BootstrapRequired != bootstrapRequired
                 || node.ActiveDepth != activeDepth
-                || !SamePath(node.ActivePath, activePath);
+                || !SamePath(node.ActivePath, activePath)
+                || !SamePath(node.FirstPath, firstPath);
             if (!selectionChanged)
                 return;
 
@@ -1077,12 +1178,14 @@ public class DependencyResolver : IDependencyResolver
             node.BootstrapRequired = bootstrapRequired;
             node.ActiveDepth = activeDepth;
             node.ActivePath = activePath;
+            node.FirstPath = firstPath;
             node.Metadata = null;
 
-            if (selectedReference is not PackageReference selected
+            if (selectedReference is not PackageReference
                 || metadataReference is not PackageReference metadataSource
                 || activeDepth is null
-                || activePath is null)
+                || activePath is null
+                || firstPath is null)
             {
                 return;
             }
@@ -1103,13 +1206,19 @@ public class DependencyResolver : IDependencyResolver
             foreach (KeyValuePair<string, string> dependency
                      in metadata.Dependencies)
             {
-                DependencyEdgeRegistration registration = AddEdge(
-                    node.PackageId,
-                    selected.Version,
-                    dependency.Key,
-                    dependency.Value,
-                    activeDepth.Value + 1,
-                    AppendPath(activePath, dependencyIndex));
+                DependencyEdgeRegistration registration =
+                    await AddEdgeAsync(
+                            node.Identity.PackageId,
+                            node.Identity.Version,
+                            dependency.Key,
+                            dependency.Value,
+                            activeDepth.Value + 1,
+                            AppendPath(
+                                firstPath,
+                                dependencyIndex),
+                            isRootEdge: false,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                 if (registration.Kind
                     == DependencyEdgeRegistrationKind.Graph)
                 {
@@ -1130,28 +1239,63 @@ public class DependencyResolver : IDependencyResolver
             }
         }
 
-        private ResolvedDependencyRequirement SelectWinner(
-            IReadOnlyList<ResolvedDependencyRequirement> requirements)
+        private DependencyNode SelectPreferredNode(
+            IReadOnlyList<DependencyNode> nodes)
         {
             if (_options.ConflictStrategy
                 is ConflictResolutionStrategy.FirstWins
                 or ConflictResolutionStrategy.Error)
             {
-                return requirements[0];
+                return nodes[0];
             }
 
-            ResolvedDependencyRequirement winner = requirements[0];
-            for (int index = 1; index < requirements.Count; index++)
+            DependencyNode winner = nodes[0];
+            for (int index = 1; index < nodes.Count; index++)
             {
-                ResolvedDependencyRequirement candidate =
-                    requirements[index];
-                if (candidate.Version.CompareTo(winner.Version) > 0)
+                DependencyNode candidate = nodes[index];
+                int comparison =
+                    candidate.Version.CompareTo(winner.Version);
+                if (comparison > 0
+                    || comparison == 0
+                    && StringComparer.Ordinal.Compare(
+                        candidate.Identity.Version,
+                        winner.Identity.Version) > 0)
                 {
                     winner = candidate;
                 }
             }
 
             return winner;
+        }
+
+        private static int CompareNodesByFirstPath(
+            DependencyNode left,
+            DependencyNode right)
+        {
+            int comparison = ComparePaths(
+                left.FirstPath
+                    ?? throw new InvalidOperationException(
+                        "Active dependency nodes must have a first traversal path."),
+                right.FirstPath
+                    ?? throw new InvalidOperationException(
+                        "Active dependency nodes must have a first traversal path."));
+            if (comparison != 0)
+                return comparison;
+
+            comparison = StringComparer.OrdinalIgnoreCase.Compare(
+                left.Identity.PackageId,
+                right.Identity.PackageId);
+            if (comparison != 0)
+                return comparison;
+
+            comparison = StringComparer.Ordinal.Compare(
+                left.Identity.PackageId,
+                right.Identity.PackageId);
+            return comparison != 0
+                ? comparison
+                : StringComparer.Ordinal.Compare(
+                    left.Identity.Version,
+                    right.Identity.Version);
         }
 
         private static ResolvedDependencyRequirement SelectActiveRoute(
@@ -1510,8 +1654,10 @@ public class DependencyResolver : IDependencyResolver
                 return null;
             }
 
+            PackageReference exactReference =
+                new(packageId, version.ToString());
             SeedMetadata(
-                cacheReference,
+                exactReference,
                 DependencyMetadataResult.Available(
                     manifest.Dependencies
                     ?? s_noDependencies));
@@ -1519,7 +1665,7 @@ public class DependencyResolver : IDependencyResolver
                 version,
                 [],
                 cacheReference,
-                cacheReference,
+                exactReference,
                 RequiresInstallation: false);
         }
 
@@ -1527,41 +1673,19 @@ public class DependencyResolver : IDependencyResolver
             PackageReference reference,
             DependencyMetadataResult metadata)
         {
-            string version = reference.Version
-                ?? throw new InvalidOperationException(
-                    "Selected dependency versions must be exact.");
-            if (!_metadata.TryGetValue(
-                    reference.Name,
-                    out Dictionary<string, DependencyMetadataResult>?
-                        packageMetadata))
-            {
-                packageMetadata = new Dictionary<string, DependencyMetadataResult>(
-                    StringComparer.Ordinal);
-                _metadata.Add(reference.Name, packageMetadata);
-            }
-
-            packageMetadata.TryAdd(version, metadata);
+            ExactPackageIdentity identity =
+                ExactPackageIdentity.Create(reference);
+            _metadata.TryAdd(identity, metadata);
         }
 
         private async Task<DependencyMetadataResult> GetMetadataAsync(
             PackageReference reference,
             CancellationToken cancellationToken)
         {
-            string version = reference.Version
-                ?? throw new InvalidOperationException(
-                    "Selected dependency versions must be exact.");
-            if (!_metadata.TryGetValue(
-                    reference.Name,
-                    out Dictionary<string, DependencyMetadataResult>?
-                        packageMetadata))
-            {
-                packageMetadata = new Dictionary<string, DependencyMetadataResult>(
-                    StringComparer.Ordinal);
-                _metadata.Add(reference.Name, packageMetadata);
-            }
-
-            if (packageMetadata.TryGetValue(
-                    version,
+            ExactPackageIdentity identity =
+                ExactPackageIdentity.Create(reference);
+            if (_metadata.TryGetValue(
+                    identity,
                     out DependencyMetadataResult? cached))
             {
                 return cached;
@@ -1573,18 +1697,19 @@ public class DependencyResolver : IDependencyResolver
                         _versionResolveOptions,
                         cancellationToken)
                     .ConfigureAwait(false);
-            packageMetadata.Add(version, metadata);
+            _metadata.Add(identity, metadata);
             return metadata;
         }
 
-        private DependencyEdgeRegistration AddEdge(
+        private async Task<DependencyEdgeRegistration> AddEdgeAsync(
             string parentPackageId,
             string? parentVersion,
             string rawPackageId,
             string? rawVersionSpecifier,
             int depth,
             int[] traversalPath,
-            bool isRootEdge = false)
+            bool isRootEdge,
+            CancellationToken cancellationToken)
         {
             PackageReference fixedReference;
             try
@@ -1661,27 +1786,6 @@ public class DependencyResolver : IDependencyResolver
                     DependencyEdgeRegistrationKind.Invalid);
             }
 
-            if (fixedReference.Name.Equals(
-                    _rootManifest.Name,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                long rootBackEdgeId = ++_nextEdgeId;
-                _rootBackEdges.Add(
-                    rootBackEdgeId,
-                    new RootBackEdge(
-                        rootBackEdgeId,
-                        parentPackageId,
-                        parentVersion,
-                        fixedReference.Name,
-                        fixedReference.Version!,
-                        depth,
-                        traversalPath,
-                        isRootEdge));
-                return new DependencyEdgeRegistration(
-                    rootBackEdgeId,
-                    DependencyEdgeRegistrationKind.RootBack);
-            }
-
             DependencyEdge edge = new(
                 ++_nextEdgeId,
                 parentPackageId,
@@ -1691,25 +1795,94 @@ public class DependencyResolver : IDependencyResolver
                 depth,
                 traversalPath,
                 isRootEdge);
-            if (_versionResolutions.TryGetValue(
-                    edge.PackageId,
-                    out Dictionary<string, DependencyVersionResolution>?
-                        packageResolutions)
-                && packageResolutions.TryGetValue(
-                    edge.VersionSpecifier,
-                    out DependencyVersionResolution? resolution))
+
+            if (depth > _options.MaxDepth)
             {
-                edge.Resolution = resolution;
+                _edges.Add(edge.Id, edge);
+                return new DependencyEdgeRegistration(
+                    edge.Id,
+                    DependencyEdgeRegistrationKind.Graph);
+            }
+
+            bool referencesRoot = fixedReference.Name.Equals(
+                _rootManifest.Name,
+                StringComparison.OrdinalIgnoreCase);
+            if (referencesRoot
+                && IsCommittedRootRequirement(
+                    fixedReference.Version!))
+            {
+                return AddRootBackEdge(
+                    edge,
+                    resolution: null,
+                    isSatisfied: true);
+            }
+
+            DependencyVersionResolution resolution =
+                await ResolveVersionAsync(
+                        edge.PackageId,
+                        edge.VersionSpecifier,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            edge.Resolution = resolution;
+
+            if (referencesRoot
+                && (resolution.Version is null
+                    || string.Equals(
+                        resolution.Version.ToString(),
+                        _rootIdentity.Version,
+                        StringComparison.Ordinal)))
+            {
+                return AddRootBackEdge(
+                    edge,
+                    resolution,
+                    resolution.Version is not null);
+            }
+
+            if (resolution.Version is FhirSemVer version)
+            {
+                ExactPackageIdentity targetIdentity =
+                    new(
+                        edge.PackageId,
+                        version.ToString());
+                edge.TargetIdentity = targetIdentity;
+                DependencyNode node =
+                    GetOrCreateNode(
+                        targetIdentity,
+                        version);
+                node.IncomingEdges.Add(edge.Id, edge);
+                Enqueue(targetIdentity);
             }
 
             _edges.Add(edge.Id, edge);
-
-            DependencyNode node = GetOrCreateNode(edge.PackageId);
-            node.IncomingEdges.Add(edge.Id, edge);
-            Enqueue(node.PackageId);
             return new DependencyEdgeRegistration(
                 edge.Id,
                 DependencyEdgeRegistrationKind.Graph);
+        }
+
+        private DependencyEdgeRegistration AddRootBackEdge(
+            DependencyEdge edge,
+            DependencyVersionResolution? resolution,
+            bool isSatisfied)
+        {
+            RootBackEdge rootBackEdge = new(
+                edge.Id,
+                edge.ParentPackageId,
+                edge.ParentVersion,
+                edge.PackageId,
+                edge.VersionSpecifier,
+                edge.Depth,
+                edge.TraversalPath,
+                edge.IsRootEdge)
+            {
+                Resolution = resolution,
+                IsSatisfied = isSatisfied,
+            };
+            _rootBackEdges.Add(
+                rootBackEdge.Id,
+                rootBackEdge);
+            return new DependencyEdgeRegistration(
+                rootBackEdge.Id,
+                DependencyEdgeRegistrationKind.RootBack);
         }
 
         private void RemoveOutgoingEdges(DependencyNode node)
@@ -1719,9 +1892,15 @@ public class DependencyResolver : IDependencyResolver
                 DependencyEdge edge = _edges[edgeId];
                 _edges.Remove(edgeId);
 
-                DependencyNode child = _nodes[edge.PackageId];
-                child.IncomingEdges.Remove(edgeId);
-                Enqueue(child.PackageId);
+                if (edge.TargetIdentity is
+                        ExactPackageIdentity targetIdentity
+                    && _nodes.TryGetValue(
+                        targetIdentity,
+                        out DependencyNode? child))
+                {
+                    child.IncomingEdges.Remove(edgeId);
+                    Enqueue(targetIdentity);
+                }
             }
 
             node.OutgoingEdgeIds.Clear();
@@ -1739,68 +1918,53 @@ public class DependencyResolver : IDependencyResolver
             node.OutgoingRootBackEdgeIds.Clear();
         }
 
-        private DependencyNode GetOrCreateNode(string packageId)
+        private DependencyNode GetOrCreateNode(
+            ExactPackageIdentity identity,
+            FhirSemVer version)
         {
             if (_nodes.TryGetValue(
-                    packageId,
+                    identity,
                     out DependencyNode? node))
             {
                 return node;
             }
 
-            node = new DependencyNode(packageId);
-            _nodes.Add(packageId, node);
+            node = new DependencyNode(
+                identity,
+                version);
+            _nodes.Add(identity, node);
             return node;
         }
 
-        private void Enqueue(string packageId)
+        private void Enqueue(ExactPackageIdentity identity)
         {
-            if (_queuedPackages.Add(packageId))
+            if (_queuedPackages.Add(identity))
             {
-                _pendingPackages.Enqueue(packageId);
+                _pendingPackages.Enqueue(identity);
             }
         }
 
-        private void DisableUnstablePackage(string packageId)
-        {
-            _unstablePackageIds.Add(packageId);
-            DependencyNode node = _nodes[packageId];
-            RemoveOutgoingEdges(node);
-            node.SelectedReference = null;
-            node.MetadataReference = null;
-            node.InstallationReference = null;
-            node.RequiresInstallation = true;
-            node.BootstrapRequired = false;
-            node.ActiveDepth = null;
-            node.ActivePath = null;
-            node.Metadata = null;
-        }
-
-        private bool IsRootBackEdgeSatisfied(RootBackEdge edge)
+        private bool IsCommittedRootRequirement(
+            string versionSpecifier)
         {
             VersionType versionType =
-                PackageDirective.ClassifyVersion(edge.VersionSpecifier);
+                PackageDirective.ClassifyVersion(versionSpecifier);
             if (versionType == VersionType.Latest)
-            {
-                return string.Equals(
-                    edge.Resolution?.Version?.ToString(),
-                    _rootManifest.Version,
-                    StringComparison.Ordinal);
-            }
+                return false;
 
             if ((versionType
                         is VersionType.CiBuild
                             or VersionType.CiBuildBranch
                             or VersionType.LocalBuild)
                 && IsSameAliasReference(
-                    edge.VersionSpecifier,
+                    versionSpecifier,
                     _rootReference.Version))
             {
                 return true;
             }
 
             if (string.Equals(
-                    edge.VersionSpecifier,
+                    versionSpecifier,
                     _rootManifest.Version,
                     StringComparison.Ordinal))
             {
@@ -1817,11 +1981,15 @@ public class DependencyResolver : IDependencyResolver
 
             return PackageVersionSelector.Select(
                     _rootManifest.Name,
-                    edge.VersionSpecifier,
+                    versionSpecifier,
                     [rootVersion],
                     _versionResolveOptions)
                 is not null;
         }
+
+        private static bool IsRootBackEdgeSatisfied(
+            RootBackEdge edge) =>
+            edge.IsSatisfied;
 
         private static bool IsSameAliasReference(
             string requested,
@@ -1849,51 +2017,28 @@ public class DependencyResolver : IDependencyResolver
                 StringComparison.OrdinalIgnoreCase);
         }
 
-        private IReadOnlyList<string> GetDistinctResolvedVersions(
-            DependencyNode node)
-        {
-            List<DependencyEdge> orderedEdges =
-                node.IncomingEdges.Values
-                    .Where(edge => edge.Depth <= _options.MaxDepth)
-                    .ToList();
-            orderedEdges.Sort(CompareEdges);
-
-            List<string> versions = [];
-            foreach (DependencyEdge edge in orderedEdges)
-            {
-                string? version = edge.Resolution?.Version?.ToString();
-                if (version is not null
-                    && !versions.Contains(
-                        version,
-                        StringComparer.Ordinal))
-                {
-                    versions.Add(version);
-                }
-            }
-
-            return versions;
-        }
-
         private IReadOnlyList<PackageReference> CreateInstallOrder(
             bool includeCached)
         {
             List<PackageReference> order = [];
-            HashSet<string> visited =
-                new(StringComparer.OrdinalIgnoreCase);
-            HashSet<string> active =
-                new(StringComparer.OrdinalIgnoreCase);
+            HashSet<ExactPackageIdentity> visited = [];
+            HashSet<ExactPackageIdentity> active = [];
             List<DependencyEdge> rootEdges = _edges.Values
                 .Where(edge => edge.IsRootEdge)
                 .ToList();
             rootEdges.Sort(CompareEdges);
             foreach (DependencyEdge edge in rootEdges)
             {
-                VisitForInstallOrder(
-                    edge.PackageId,
-                    visited,
-                    active,
-                    order,
-                    includeCached);
+                if (edge.TargetIdentity is
+                    ExactPackageIdentity targetIdentity)
+                {
+                    VisitForInstallOrder(
+                        targetIdentity,
+                        visited,
+                        active,
+                        order,
+                        includeCached);
+                }
             }
 
             return order;
@@ -1903,7 +2048,7 @@ public class DependencyResolver : IDependencyResolver
             CreateBootstrapInstallOrder()
         {
             List<PackageReference> order = [];
-            HashSet<string> visited = new(StringComparer.Ordinal);
+            HashSet<ExactPackageIdentity> visited = [];
             List<DependencyEdge> edges = _edges.Values.ToList();
             edges.Sort(CompareEdges);
             foreach (DependencyEdge edge in edges)
@@ -1918,8 +2063,8 @@ public class DependencyResolver : IDependencyResolver
                     continue;
                 }
 
-                string key =
-                    $"{bootstrap.Name.ToLowerInvariant()}\0{bootstrap.Version}";
+                ExactPackageIdentity key =
+                    ExactPackageIdentity.Create(bootstrap);
                 if (visited.Add(key))
                 {
                     order.Add(bootstrap);
@@ -1930,22 +2075,22 @@ public class DependencyResolver : IDependencyResolver
         }
 
         private void VisitForInstallOrder(
-            string packageId,
-            HashSet<string> visited,
-            HashSet<string> active,
+            ExactPackageIdentity identity,
+            HashSet<ExactPackageIdentity> visited,
+            HashSet<ExactPackageIdentity> active,
             List<PackageReference> order,
             bool includeCached)
         {
-            if (visited.Contains(packageId)
+            if (visited.Contains(identity)
                 || !_nodes.TryGetValue(
-                    packageId,
+                    identity,
                     out DependencyNode? node)
-                || node.SelectedReference is not PackageReference selected)
+                || !node.ActiveDepth.HasValue)
             {
                 return;
             }
 
-            if (!active.Add(packageId))
+            if (!active.Add(identity))
                 return;
 
             List<DependencyEdge> childEdges = node.OutgoingEdgeIds
@@ -1954,16 +2099,20 @@ public class DependencyResolver : IDependencyResolver
             childEdges.Sort(CompareEdges);
             foreach (DependencyEdge childEdge in childEdges)
             {
-                VisitForInstallOrder(
-                    childEdge.PackageId,
-                    visited,
-                    active,
-                    order,
-                    includeCached);
+                if (childEdge.TargetIdentity is
+                    ExactPackageIdentity childIdentity)
+                {
+                    VisitForInstallOrder(
+                        childIdentity,
+                        visited,
+                        active,
+                        order,
+                        includeCached);
+                }
             }
 
-            active.Remove(packageId);
-            if (visited.Add(packageId))
+            active.Remove(identity);
+            if (visited.Add(identity))
             {
                 if ((includeCached
                         || node.RequiresInstallation)
@@ -1971,192 +2120,9 @@ public class DependencyResolver : IDependencyResolver
                 {
                     order.Add(
                         node.InstallationReference
-                        ?? selected);
+                        ?? node.Identity.Reference);
                 }
             }
-        }
-
-        private string CreateStateSignature()
-        {
-            StringBuilder builder = new();
-            IEnumerable<DependencyNode> orderedNodes =
-                _nodes.Values
-                    .OrderBy(
-                        node => node.PackageId,
-                        StringComparer.OrdinalIgnoreCase)
-                    .ThenBy(
-                        node => node.PackageId,
-                        StringComparer.Ordinal);
-            foreach (DependencyNode node in orderedNodes)
-            {
-                builder.Append('N');
-                AppendComponent(builder, node.PackageId);
-                AppendComponent(
-                    builder,
-                    node.SelectedReference?.Version);
-                AppendComponent(
-                    builder,
-                    node.MetadataReference?.FhirDirective);
-                AppendComponent(
-                    builder,
-                    node.InstallationReference?.FhirDirective);
-                builder.Append(
-                    node.RequiresInstallation ? 'I' : 'C');
-                builder.Append(
-                    node.BootstrapRequired ? 'B' : 'R');
-                builder.Append(node.ActiveDepth?.ToString() ?? "-");
-                builder.Append(':');
-                AppendPath(builder, node.ActivePath);
-            }
-
-            List<DependencyEdge> orderedEdges =
-                _edges.Values.ToList();
-            orderedEdges.Sort(CompareSemanticEdges);
-            foreach (DependencyEdge edge in orderedEdges)
-            {
-                builder.Append('E');
-                AppendComponent(builder, edge.ParentPackageId);
-                AppendComponent(builder, edge.ParentVersion);
-                AppendComponent(builder, edge.PackageId);
-                AppendComponent(builder, edge.VersionSpecifier);
-                builder.Append(edge.Depth);
-                builder.Append(edge.IsRootEdge ? 'R' : 'C');
-                builder.Append(':');
-                AppendPath(builder, edge.TraversalPath);
-            }
-
-            IEnumerable<InvalidDependencyEdge> orderedInvalidEdges =
-                _invalidEdges.Values
-                    .OrderBy(
-                        edge => edge.TraversalPath,
-                        DependencyPathComparer.Instance);
-            foreach (InvalidDependencyEdge edge in orderedInvalidEdges)
-            {
-                builder.Append('I');
-                AppendComponent(builder, edge.ParentPackageId);
-                AppendComponent(builder, edge.ParentVersion);
-                AppendComponent(builder, edge.PackageId);
-                AppendComponent(builder, edge.VersionSpecifier);
-                builder.Append(edge.Depth);
-                builder.Append(edge.IsRootEdge ? 'R' : 'C');
-                builder.Append(':');
-                AppendPath(builder, edge.TraversalPath);
-            }
-
-            IEnumerable<RootBackEdge> orderedRootBackEdges =
-                _rootBackEdges.Values
-                    .OrderBy(
-                        edge => edge.TraversalPath,
-                        DependencyPathComparer.Instance);
-            foreach (RootBackEdge edge in orderedRootBackEdges)
-            {
-                builder.Append('R');
-                AppendComponent(builder, edge.ParentPackageId);
-                AppendComponent(builder, edge.ParentVersion);
-                AppendComponent(builder, edge.PackageId);
-                AppendComponent(builder, edge.VersionSpecifier);
-                builder.Append(edge.Depth);
-                builder.Append(edge.IsRootEdge ? 'R' : 'C');
-                builder.Append(':');
-                AppendPath(builder, edge.TraversalPath);
-            }
-
-            foreach (string packageId in _pendingPackages)
-            {
-                builder.Append('Q');
-                AppendComponent(builder, packageId);
-            }
-
-            foreach (string packageId in _unstablePackageIds
-                         .OrderBy(
-                             value => value,
-                             StringComparer.OrdinalIgnoreCase)
-                         .ThenBy(
-                             value => value,
-                             StringComparer.Ordinal))
-            {
-                builder.Append('D');
-                AppendComponent(builder, packageId);
-            }
-
-            return builder.ToString();
-        }
-
-        private static int CompareSemanticEdges(
-            DependencyEdge left,
-            DependencyEdge right)
-        {
-            int comparison = ComparePaths(
-                left.TraversalPath,
-                right.TraversalPath);
-            if (comparison != 0)
-                return comparison;
-
-            comparison = StringComparer.OrdinalIgnoreCase.Compare(
-                left.ParentPackageId,
-                right.ParentPackageId);
-            if (comparison != 0)
-                return comparison;
-
-            comparison = StringComparer.Ordinal.Compare(
-                left.ParentVersion,
-                right.ParentVersion);
-            if (comparison != 0)
-                return comparison;
-
-            comparison = StringComparer.OrdinalIgnoreCase.Compare(
-                left.PackageId,
-                right.PackageId);
-            if (comparison != 0)
-                return comparison;
-
-            comparison = StringComparer.Ordinal.Compare(
-                left.VersionSpecifier,
-                right.VersionSpecifier);
-            if (comparison != 0)
-                return comparison;
-
-            comparison = left.Depth.CompareTo(right.Depth);
-            return comparison != 0
-                ? comparison
-                : left.IsRootEdge.CompareTo(right.IsRootEdge);
-        }
-
-        private static void AppendComponent(
-            StringBuilder builder,
-            string? value)
-        {
-            if (value is null)
-            {
-                builder.Append("-1:");
-                return;
-            }
-
-            builder.Append(value.Length);
-            builder.Append(':');
-            builder.Append(value);
-            builder.Append(';');
-        }
-
-        private static void AppendPath(
-            StringBuilder builder,
-            IReadOnlyList<int>? path)
-        {
-            if (path is null)
-            {
-                builder.Append("-;");
-                return;
-            }
-
-            builder.Append(path.Count);
-            builder.Append(':');
-            foreach (int segment in path)
-            {
-                builder.Append(segment);
-                builder.Append(',');
-            }
-
-            builder.Append(';');
         }
 
         private static int[] AppendPath(
@@ -2245,14 +2211,70 @@ public class DependencyResolver : IDependencyResolver
                     or VersionType.LocalBuild;
     }
 
-    private sealed class DependencyNode
+    private readonly struct ExactPackageIdentity :
+        IEquatable<ExactPackageIdentity>
     {
-        internal DependencyNode(string packageId)
+        internal ExactPackageIdentity(
+            string packageId,
+            string version)
         {
             PackageId = packageId;
+            Version = version;
         }
 
         internal string PackageId { get; }
+
+        internal string Version { get; }
+
+        internal PackageReference Reference =>
+            new(PackageId, Version);
+
+        internal static ExactPackageIdentity Create(
+            PackageReference reference) =>
+            new(
+                reference.Name,
+                reference.Version
+                    ?? throw new InvalidOperationException(
+                        "Exact package identities must include a version."));
+
+        public bool Equals(ExactPackageIdentity other) =>
+            PackageId.Equals(
+                other.PackageId,
+                StringComparison.OrdinalIgnoreCase)
+            && Version.Equals(
+                other.Version,
+                StringComparison.Ordinal);
+
+        public override bool Equals(object? obj) =>
+            obj is ExactPackageIdentity other
+            && Equals(other);
+
+        public override int GetHashCode()
+        {
+            HashCode hashCode = new();
+            hashCode.Add(
+                PackageId,
+                StringComparer.OrdinalIgnoreCase);
+            hashCode.Add(
+                Version,
+                StringComparer.Ordinal);
+            return hashCode.ToHashCode();
+        }
+    }
+
+    private sealed class DependencyNode
+    {
+        internal DependencyNode(
+            ExactPackageIdentity identity,
+            FhirSemVer version)
+        {
+            Identity = identity;
+            Version = version;
+        }
+
+        internal ExactPackageIdentity Identity { get; }
+
+        internal FhirSemVer Version { get; }
 
         internal Dictionary<long, DependencyEdge> IncomingEdges { get; } = [];
 
@@ -2275,6 +2297,8 @@ public class DependencyResolver : IDependencyResolver
         internal int? ActiveDepth { get; set; }
 
         internal int[]? ActivePath { get; set; }
+
+        internal int[]? FirstPath { get; set; }
 
         internal DependencyMetadataResult? Metadata { get; set; }
     }
@@ -2318,15 +2342,13 @@ public class DependencyResolver : IDependencyResolver
         internal bool IsRootEdge { get; }
 
         internal DependencyVersionResolution? Resolution { get; set; }
+
+        internal ExactPackageIdentity? TargetIdentity { get; set; }
     }
 
     private sealed record ResolvedDependencyRequirement(
         DependencyEdge Edge,
-        FhirSemVer Version,
-        PackageReference? InstallationReference,
-        PackageReference? MetadataReference,
-        bool RequiresInstallation,
-        bool BootstrapRequired);
+        DependencyVersionResolution Resolution);
 
     private sealed record DependencyVersionResolution(
         FhirSemVer? Version,
@@ -2368,6 +2390,8 @@ public class DependencyResolver : IDependencyResolver
         bool IsRootEdge)
     {
         internal DependencyVersionResolution? Resolution { get; set; }
+
+        internal bool IsSatisfied { get; set; }
     }
 
     private sealed class DependencyPathComparer :
@@ -2419,6 +2443,8 @@ public class DependencyResolver : IDependencyResolver
 
     private sealed record DependencyGraphResult(
         IReadOnlyDictionary<string, PackageReference> Resolved,
+        IReadOnlyList<PackageReference> ResolvedPackages,
+        IReadOnlyList<PackageInstallationIdentity> InstallationIdentities,
         IReadOnlyList<DependencyResolutionFailure> Failures,
         IReadOnlyList<PackageReference> InstallOrder,
         IReadOnlyList<PackageReference> ReplayOrder,

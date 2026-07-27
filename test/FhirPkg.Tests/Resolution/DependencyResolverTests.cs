@@ -347,6 +347,25 @@ public class DependencyResolverTests
             new PackageReference(
                 "shared.package",
                 "2.0.0"));
+        result.ResolvedPackages
+            .Where(reference =>
+                reference.Name == "shared.package")
+            .ShouldBe(
+                [new PackageReference(
+                    "shared.package",
+                    "2.0.0")]);
+        result.InstallationIdentities.ShouldContain(
+            new PackageInstallationIdentity
+            {
+                InstallationReference =
+                    new PackageReference(
+                        "shared.package",
+                        "current"),
+                ResolvedReference =
+                    new PackageReference(
+                        "shared.package",
+                        "2.0.0"),
+            });
         result.ReplayOrder
             .Where(reference =>
                 reference.Name == "shared.package")
@@ -628,12 +647,66 @@ public class DependencyResolverTests
     }
 
     [Fact]
-    public async Task ResolveAsync_HighestWinner_PrunesLosingSubgraphAndFailures()
+    public async Task ResolveAsync_OutOfRangeEdge_DoesNotResolveOrFetchMetadata()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["direct.package"] = CreateListing(
+                CreateVersion(
+                    "direct.package",
+                    "1.0.0",
+                    Dependencies(("too.deep", "1.0.0")))),
+            ["too.deep"] = CreateListing(
+                CreateVersion(
+                    "too.deep",
+                    "1.0.0",
+                    Dependencies())),
+        };
+        Mock<IVersionResolver> versionResolver =
+            CreateExactVersionResolver();
+        Mock<IRegistryClient> registry =
+            CreateRegistry(listings);
+        DependencyResolver resolver = CreateResolver(
+            versionResolver,
+            registry,
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("direct.package", "1.0.0"))),
+            new DependencyResolveOptions
+            {
+                MaxDepth = 0,
+            },
+            TestContext.Current.CancellationToken);
+
+        DependencyResolutionFailure failure =
+            result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            DependencyResolutionFailureCode.DepthLimitExceeded);
+        failure.PackageId.ShouldBe("too.deep");
+        versionResolver.Verify(
+            value => value.ResolveVersionAsync(
+                "too.deep",
+                It.IsAny<string>(),
+                It.IsAny<VersionResolveOptions?>(),
+                It.IsAny<CancellationToken>()),
+            Times.Never);
+        registry.Verify(
+            value => value.GetPackageListingAsync(
+                "too.deep",
+                It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_HighestWins_PreservesDistinctExactVersionsAndSubgraphs()
     {
         Dictionary<string, PackageListing> listings =
             CreateConflictGraphListings();
         DependencyResolver resolver = CreateResolver(
-            CreateExactVersionResolver("stale.missing"),
+            CreateExactVersionResolver(),
             CreateRegistry(listings),
             CreateCache());
         PackageManifest root = CreateRoot(
@@ -650,35 +723,19 @@ public class DependencyResolverTests
             },
             TestContext.Current.CancellationToken);
 
-        result.Resolved["pivot.package"].Version.ShouldBe("2.0.0");
-        result.Resolved.ContainsKey("winning.child").ShouldBeTrue();
-        result.Resolved.ContainsKey("shared.child").ShouldBeTrue();
-        result.Resolved.ContainsKey("losing.child").ShouldBeFalse();
-        result.Missing.ContainsKey("stale.missing").ShouldBeFalse();
-        result.InstallOrder.ShouldNotContain(
-            reference => reference.Name == "losing.child");
-        List<PackageReference> installOrder =
-            result.InstallOrder.ToList();
-        installOrder.IndexOf(
-                installOrder.Single(
-                    reference =>
-                        reference.Name == "winning.child"))
-            .ShouldBeLessThan(
-                installOrder.IndexOf(
-                    installOrder.Single(
-                        reference =>
-                            reference.Name == "pivot.package")));
+        result.Resolved["shared.package"].Version.ShouldBe("6.1.0");
+        AssertConflictGraphClosure(result);
         result.Failures.ShouldBeEmpty();
         result.IsComplete.ShouldBeTrue();
     }
 
     [Fact]
-    public async Task ResolveAsync_FirstWinner_UsesWinningVersionMetadata()
+    public async Task ResolveAsync_FirstWins_PreservesDistinctExactVersionsAndSubgraphs()
     {
         Dictionary<string, PackageListing> listings =
             CreateConflictGraphListings();
         DependencyResolver resolver = CreateResolver(
-            CreateExactVersionResolver("stale.missing"),
+            CreateExactVersionResolver(),
             CreateRegistry(listings),
             CreateCache());
         PackageManifest root = CreateRoot(
@@ -695,19 +752,19 @@ public class DependencyResolverTests
             },
             TestContext.Current.CancellationToken);
 
-        result.Resolved["pivot.package"].Version.ShouldBe("1.0.0");
-        result.Resolved.ContainsKey("losing.child").ShouldBeTrue();
-        result.Resolved.ContainsKey("winning.child").ShouldBeFalse();
-        result.Missing.ContainsKey("stale.missing").ShouldBeTrue();
+        result.Resolved["shared.package"].Version.ShouldBe("3.1.1");
+        AssertConflictGraphClosure(result);
+        result.Failures.ShouldBeEmpty();
+        result.IsComplete.ShouldBeTrue();
     }
 
     [Fact]
-    public async Task ResolveAsync_ErrorConflict_ReturnsTypedActiveFailure()
+    public async Task ResolveAsync_ErrorConflict_PreservesDistinctExactVersionsAndReportsConflict()
     {
         Dictionary<string, PackageListing> listings =
             CreateConflictGraphListings();
         DependencyResolver resolver = CreateResolver(
-            CreateExactVersionResolver("stale.missing"),
+            CreateExactVersionResolver(),
             CreateRegistry(listings),
             CreateCache());
         PackageManifest root = CreateRoot(
@@ -727,10 +784,62 @@ public class DependencyResolverTests
             failure =>
                 failure.Code
                     == DependencyResolutionFailureCode.VersionConflict);
-        conflict.PackageId.ShouldBe("pivot.package");
-        conflict.RequestedVersions.ShouldBe(["1.0.0", "2.0.0"]);
-        conflict.SelectedVersion.ShouldBe("1.0.0");
-        result.Missing.ContainsKey("pivot.package").ShouldBeTrue();
+        conflict.PackageId.ShouldBe("shared.package");
+        conflict.RequestedVersions.ShouldBe(["3.1.1", "6.1.0"]);
+        conflict.SelectedVersion.ShouldBe("3.1.1");
+        result.Resolved["shared.package"].Version.ShouldBe("3.1.1");
+        AssertConflictGraphClosure(result);
+        result.Missing.ContainsKey("shared.package").ShouldBeTrue();
+        result.IsComplete.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_NonPreferredSubtreeFailure_RemainsReported()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["low.parent"] = CreateListing(
+                CreateVersion(
+                    "low.parent",
+                    "1.0.0",
+                    Dependencies(("shared.package", "3.1.1")))),
+            ["high.parent"] = CreateListing(
+                CreateVersion(
+                    "high.parent",
+                    "1.0.0",
+                    Dependencies(("shared.package", "6.1.0")))),
+            ["shared.package"] = CreateListing(
+                CreateVersion(
+                    "shared.package",
+                    "3.1.1",
+                    Dependencies(("missing.v3", "1.0.0"))),
+                CreateVersion(
+                    "shared.package",
+                    "6.1.0",
+                    Dependencies())),
+        };
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver("missing.v3"),
+            CreateRegistry(listings),
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(
+                    ("low.parent", "1.0.0"),
+                    ("high.parent", "1.0.0"))),
+            cancellationToken:
+                TestContext.Current.CancellationToken);
+
+        result.Resolved["shared.package"].Version.ShouldBe("6.1.0");
+        result.ResolvedPackages.ShouldContain(
+            new PackageReference("shared.package", "3.1.1"));
+        DependencyResolutionFailure failure =
+            result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            DependencyResolutionFailureCode.PackageNotFound);
+        failure.PackageId.ShouldBe("missing.v3");
         result.IsComplete.ShouldBeFalse();
     }
 
@@ -783,6 +892,50 @@ public class DependencyResolverTests
         registry.Verify(client => client.GetPackageListingAsync(
             "shared.package",
             It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ExactVersionCycle_OrdersEachIdentityOnce()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["cycle.package"] = CreateListing(
+                CreateVersion(
+                    "cycle.package",
+                    "1.0.0",
+                    Dependencies(("cycle.package", "2.0.0"))),
+                CreateVersion(
+                    "cycle.package",
+                    "2.0.0",
+                    Dependencies(("cycle.package", "1.0.0")))),
+        };
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            CreateRegistry(listings),
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(("cycle.package", "1.0.0"))),
+            cancellationToken:
+                TestContext.Current.CancellationToken);
+
+        result.Resolved["cycle.package"].Version.ShouldBe("2.0.0");
+        result.ResolvedPackages.ShouldBe(
+            [
+                new PackageReference("cycle.package", "1.0.0"),
+                new PackageReference("cycle.package", "2.0.0"),
+            ]);
+        result.InstallOrder.Count(reference =>
+                reference.Name == "cycle.package"
+                && reference.Version == "1.0.0")
+            .ShouldBe(1);
+        result.InstallOrder.Count(reference =>
+                reference.Name == "cycle.package"
+                && reference.Version == "2.0.0")
+            .ShouldBe(1);
+        result.Failures.ShouldBeEmpty();
     }
 
     [Fact]
@@ -880,7 +1033,7 @@ public class DependencyResolverTests
     }
 
     [Fact]
-    public async Task ResolveAsync_OscillatingHighestGraph_ReturnsTypedFailure()
+    public async Task ResolveAsync_FormerlyOscillatingVersionCycle_CompletesFiniteClosure()
     {
         Dictionary<string, PackageListing> listings = new(
             StringComparer.OrdinalIgnoreCase)
@@ -916,17 +1069,22 @@ public class DependencyResolverTests
             },
             TestContext.Current.CancellationToken);
 
-        DependencyResolutionFailure failure = result.Failures.Single(
-            candidate =>
-                candidate.Code
-                    == DependencyResolutionFailureCode.UnstableResolution);
-        failure.PackageId.ShouldBeOneOf("cycle.a", "cycle.b");
-        result.Resolved.ContainsKey(failure.PackageId).ShouldBeFalse();
-        if (failure.PackageId == "cycle.a")
-        {
-            result.Resolved.ContainsKey("cycle.b").ShouldBeFalse();
-        }
-        result.IsComplete.ShouldBeFalse();
+        result.Resolved["cycle.a"].Version.ShouldBe("2.0.0");
+        result.Resolved["cycle.b"].Version.ShouldBe("2.0.0");
+        result.ResolvedPackages.ShouldBe(
+            [
+                new PackageReference("cycle.a", "1.0.0"),
+                new PackageReference("cycle.b", "2.0.0"),
+                new PackageReference("cycle.a", "2.0.0"),
+            ]);
+        result.InstallOrder.ShouldBe(
+            [
+                new PackageReference("cycle.a", "2.0.0"),
+                new PackageReference("cycle.b", "2.0.0"),
+                new PackageReference("cycle.a", "1.0.0"),
+            ]);
+        result.Failures.ShouldBeEmpty();
+        result.IsComplete.ShouldBeTrue();
     }
 
     [Fact]
@@ -980,6 +1138,74 @@ public class DependencyResolverTests
         result.Resolved["cycle.b"].Version.ShouldBe("1.0.0");
         result.Failures.ShouldBeEmpty();
         result.IsComplete.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task ResolveAsync_ShallowRouteRebasesDepthWithoutChangingFirstWinsPath()
+    {
+        Dictionary<string, PackageListing> listings = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            ["early.parent"] = CreateListing(
+                CreateVersion(
+                    "early.parent",
+                    "1.0.0",
+                    Dependencies(("early.bridge", "1.0.0")))),
+            ["early.bridge"] = CreateListing(
+                CreateVersion(
+                    "early.bridge",
+                    "1.0.0",
+                    Dependencies(("shared.package", "1.0.0")))),
+            ["competing.parent"] = CreateListing(
+                CreateVersion(
+                    "competing.parent",
+                    "1.0.0",
+                    Dependencies(("pivot.package", "2.0.0")))),
+            ["late.parent"] = CreateListing(
+                CreateVersion(
+                    "late.parent",
+                    "1.0.0",
+                    Dependencies(("shared.package", "1.0.0")))),
+            ["shared.package"] = CreateListing(
+                CreateVersion(
+                    "shared.package",
+                    "1.0.0",
+                    Dependencies(("pivot.package", "1.0.0")))),
+            ["pivot.package"] = CreateListing(
+                CreateVersion(
+                    "pivot.package",
+                    "1.0.0",
+                    Dependencies()),
+                CreateVersion(
+                    "pivot.package",
+                    "2.0.0",
+                    Dependencies())),
+        };
+        DependencyResolver resolver = CreateResolver(
+            CreateExactVersionResolver(),
+            CreateRegistry(listings),
+            CreateCache());
+
+        PackageClosure result = await resolver.ResolveAsync(
+            CreateRoot(
+                Dependencies(
+                    ("early.parent", "1.0.0"),
+                    ("competing.parent", "1.0.0"),
+                    ("late.parent", "1.0.0"))),
+            new DependencyResolveOptions
+            {
+                ConflictStrategy =
+                    ConflictResolutionStrategy.FirstWins,
+                MaxDepth = 2,
+            },
+            TestContext.Current.CancellationToken);
+
+        result.Resolved["pivot.package"].Version.ShouldBe("1.0.0");
+        result.ResolvedPackages.ShouldContain(
+            new PackageReference("pivot.package", "1.0.0"));
+        result.ResolvedPackages.ShouldContain(
+            new PackageReference("pivot.package", "2.0.0"));
+        result.Failures.ShouldBeEmpty();
     }
 
     [Fact]
@@ -1668,7 +1894,7 @@ public class DependencyResolverTests
     }
 
     [Fact]
-    public async Task ResolveAsync_ConflictingRootBackEdge_ReturnsTypedFailure()
+    public async Task ResolveAsync_DifferentRootVersion_RemainsActive()
     {
         Dictionary<string, PackageListing> listings = new(
             StringComparer.OrdinalIgnoreCase)
@@ -1678,6 +1904,11 @@ public class DependencyResolverTests
                     "child.package",
                     "1.0.0",
                     Dependencies(("root.package", "2.0.0")))),
+            ["root.package"] = CreateListing(
+                CreateVersion(
+                    "root.package",
+                    "2.0.0",
+                    Dependencies())),
         };
         DependencyResolver resolver = CreateResolver(
             CreateExactVersionResolver(),
@@ -1689,18 +1920,19 @@ public class DependencyResolverTests
                 Dependencies(("child.package", "1.0.0"))),
             cancellationToken: TestContext.Current.CancellationToken);
 
-        result.Resolved.Keys.ShouldBe(["child.package"]);
-        DependencyResolutionFailure failure =
-            result.Failures.ShouldHaveSingleItem();
-        failure.Code.ShouldBe(
-            DependencyResolutionFailureCode.VersionConflict);
-        failure.PackageId.ShouldBe("root.package");
-        failure.VersionSpecifier.ShouldBe("2.0.0");
-        failure.SelectedVersion.ShouldBe("1.0.0");
+        result.Resolved["root.package"].Version.ShouldBe("2.0.0");
+        result.ResolvedPackages.ShouldContain(
+            new PackageReference("root.package", "2.0.0"));
+        result.InstallOrder.ShouldBe(
+            [
+                new PackageReference("root.package", "2.0.0"),
+                new PackageReference("child.package", "1.0.0"),
+            ]);
+        result.Failures.ShouldBeEmpty();
     }
 
     [Fact]
-    public async Task ResolveAsync_RootLatestBackEdge_UsesRegistryLatest()
+    public async Task ResolveAsync_RootLatestDependency_TraversesResolvedAlternateVersion()
     {
         Dictionary<string, PackageListing> listings = new(
             StringComparer.OrdinalIgnoreCase)
@@ -1710,6 +1942,11 @@ public class DependencyResolverTests
                     "child.package",
                     "1.0.0",
                     Dependencies(("root.package", "latest")))),
+            ["root.package"] = CreateListing(
+                CreateVersion(
+                    "root.package",
+                    "2.0.0",
+                    Dependencies())),
         };
         Mock<IVersionResolver> versionResolver =
             CreateExactVersionResolver();
@@ -1729,13 +1966,10 @@ public class DependencyResolverTests
                 Dependencies(("child.package", "1.0.0"))),
             cancellationToken: TestContext.Current.CancellationToken);
 
-        DependencyResolutionFailure failure =
-            result.Failures.ShouldHaveSingleItem();
-        failure.Code.ShouldBe(
-            DependencyResolutionFailureCode.VersionConflict);
-        failure.PackageId.ShouldBe("root.package");
-        failure.VersionSpecifier.ShouldBe("latest");
-        failure.SelectedVersion.ShouldBe("1.0.0");
+        result.Resolved["root.package"].Version.ShouldBe("2.0.0");
+        result.InstallOrder.ShouldContain(
+            new PackageReference("root.package", "2.0.0"));
+        result.Failures.ShouldBeEmpty();
     }
 
     [Fact]
@@ -1914,49 +2148,82 @@ public class DependencyResolverTests
                 CreateVersion(
                     "low.parent",
                     "1.0.0",
-                    Dependencies(("pivot.package", "1.0.0")))),
+                    Dependencies(("shared.package", "3.1.1")))),
             ["high.parent"] = CreateListing(
                 CreateVersion(
                     "high.parent",
                     "1.0.0",
-                    Dependencies(("bridge.package", "1.0.0")))),
-            ["bridge.package"] = CreateListing(
+                    Dependencies(("shared.package", "6.1.0")))),
+            ["shared.package"] = CreateListing(
                 CreateVersion(
-                    "bridge.package",
-                    "1.0.0",
-                    Dependencies(("pivot.package", "2.0.0")))),
-            ["pivot.package"] = CreateListing(
+                    "shared.package",
+                    "3.1.1",
+                    Dependencies(("child.v3", "1.0.0"))),
                 CreateVersion(
-                    "pivot.package",
-                    "1.0.0",
-                    Dependencies(
-                        ("losing.child", "1.0.0"),
-                        ("stale.missing", "1.0.0"),
-                        ("stale.invalid", string.Empty),
-                        ("shared.child", "1.0.0"))),
+                    "shared.package",
+                    "6.1.0",
+                    Dependencies(("child.v6", "1.0.0")))),
+            ["child.v3"] = CreateListing(
                 CreateVersion(
-                    "pivot.package",
-                    "2.0.0",
-                    Dependencies(
-                        ("winning.child", "1.0.0"),
-                        ("shared.child", "1.0.0")))),
-            ["losing.child"] = CreateListing(
-                CreateVersion(
-                    "losing.child",
+                    "child.v3",
                     "1.0.0",
                     Dependencies())),
-            ["winning.child"] = CreateListing(
+            ["child.v6"] = CreateListing(
                 CreateVersion(
-                    "winning.child",
-                    "1.0.0",
-                    Dependencies())),
-            ["shared.child"] = CreateListing(
-                CreateVersion(
-                    "shared.child",
+                    "child.v6",
                     "1.0.0",
                     Dependencies())),
         };
         return listings;
+    }
+
+    private static void AssertConflictGraphClosure(PackageClosure result)
+    {
+        result.ResolvedPackages
+            .Where(reference =>
+                reference.Name == "shared.package")
+            .OrderBy(
+                reference => reference.Version,
+                StringComparer.Ordinal)
+            .ShouldBe(
+                [
+                    new PackageReference(
+                        "shared.package",
+                        "3.1.1"),
+                    new PackageReference(
+                        "shared.package",
+                        "6.1.0"),
+                ]);
+        result.ResolvedPackages.ShouldContain(
+            new PackageReference("child.v3", "1.0.0"));
+        result.ResolvedPackages.ShouldContain(
+            new PackageReference("child.v6", "1.0.0"));
+
+        List<PackageReference> installOrder =
+            result.InstallOrder.ToList();
+        PackageReference sharedV3 =
+            new("shared.package", "3.1.1");
+        PackageReference sharedV6 =
+            new("shared.package", "6.1.0");
+        installOrder.Count(reference => reference == sharedV3)
+            .ShouldBe(1);
+        installOrder.Count(reference => reference == sharedV6)
+            .ShouldBe(1);
+        installOrder.IndexOf(
+                new PackageReference("child.v3", "1.0.0"))
+            .ShouldBeLessThan(
+                installOrder.IndexOf(sharedV3));
+        installOrder.IndexOf(
+                new PackageReference("child.v6", "1.0.0"))
+            .ShouldBeLessThan(
+                installOrder.IndexOf(sharedV6));
+
+        result.ResolvedPackages
+            .Select(reference =>
+                $"{reference.Name.ToUpperInvariant()}#{reference.Version}")
+            .Distinct(StringComparer.Ordinal)
+            .Count()
+            .ShouldBe(result.ResolvedPackages.Count);
     }
 
     private static PackageListing CreateListing(

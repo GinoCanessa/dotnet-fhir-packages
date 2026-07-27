@@ -41,6 +41,8 @@ public class PublicModelDefaultsTests
         };
 
         closure.Failures.ShouldBeEmpty();
+        closure.ResolvedPackages.ShouldBeEmpty();
+        closure.InstallationIdentities.ShouldBeEmpty();
         closure.InstallOrder.ShouldBeEmpty();
         closure.ReplayOrder.ShouldBeEmpty();
         closure.BootstrapInstallOrder.ShouldBeEmpty();
