@@ -222,6 +222,25 @@ public class ReleaseWorkflowContractTests
             "..\\..\\.github\\scripts\\*.ps1");
     }
 
+    [Fact]
+    public void QualificationProject_OnlyAddsProcessHostPropertiesForPublishedMode()
+    {
+        string qualificationProject =
+            ReadContract("FhirPkg.Qualification.csproj");
+        string expectedReference = NormalizeContractText("""
+                <ProjectReference
+                  Include="..\FhirPkg.ProcessTestHost\FhirPkg.ProcessTestHost.csproj"
+                  ReferenceOutputAssembly="false">
+                  <AdditionalProperties
+                    Condition="'$(UsePublishedFhirPkg)' == 'true'">UsePublishedFhirPkg=$(UsePublishedFhirPkg);FhirPkgQualificationPackageVersion=$(FhirPkgQualificationPackageVersion)</AdditionalProperties>
+                </ProjectReference>
+            """);
+
+        qualificationProject.ShouldContain(expectedReference);
+        qualificationProject.ShouldNotContain(
+            "AdditionalProperties=\"UsePublishedFhirPkg=$(UsePublishedFhirPkg);FhirPkgQualificationPackageVersion=$(FhirPkgQualificationPackageVersion)\"");
+    }
+
     [Theory]
     [InlineData("LF", "\n")]
     [InlineData("CRLF", "\r\n")]
