@@ -945,6 +945,53 @@ public sealed class PackageCacheTransactionTests : IDisposable
         result!.OperationId.ShouldBe(operationId);
     }
 
+    [Fact]
+    public async Task DurableFileWriter_ConcurrentReaderAllowsAtomicReplacement()
+    {
+        Directory.CreateDirectory(_cacheRoot);
+        string path = Path.Combine(_cacheRoot, "replace.bin");
+        await File.WriteAllTextAsync(
+            path,
+            "old",
+            TestContext.Current.CancellationToken);
+        FileStream reader = new(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete,
+            4096,
+            FileOptions.Asynchronous);
+        try
+        {
+            Task releaseReaderTask = ReleaseReaderAsync();
+
+            Task replaceTask = DurableFileWriter.WriteAsync(
+                path,
+                "new"u8.ToArray(),
+                SystemPackageCacheFileOperations.Instance,
+                TestContext.Current.CancellationToken);
+
+            await Task.WhenAll(releaseReaderTask, replaceTask);
+        }
+        finally
+        {
+            await reader.DisposeAsync();
+        }
+
+        string content = await File.ReadAllTextAsync(
+            path,
+            TestContext.Current.CancellationToken);
+        content.ShouldBe("new");
+
+        async Task ReleaseReaderAsync()
+        {
+            await Task.Delay(
+                TimeSpan.FromMilliseconds(50),
+                TestContext.Current.CancellationToken);
+            await reader.DisposeAsync();
+        }
+    }
+
     [Theory]
     [InlineData("AtomicReplaceFile", "old")]
     [InlineData("SynchronizeDirectory", "new")]
