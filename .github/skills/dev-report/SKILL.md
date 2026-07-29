@@ -1,6 +1,6 @@
 ---
 name: dev-report
-description: "Drafts and iterates on local-development bug reports in the role of a staff-level Tech Lead. USE FOR: capturing a defect as a structured `bugreport.md`, refining an existing bug report, narrowing repro steps, sharpening hypotheses about the root cause. Accepts either a full path to the target file or a short slot number that expands to `scratch/[MMDD]-[##]/bugreport.md`. Pairs with `dev-request` (features), `dev-plan` (implementation plan from a report), and `dev-do` (execute a plan)."
+description: "Drafts and iterates on local-development bug reports in the role of a staff-level Tech Lead. USE FOR: capturing a defect as a structured `bugreport.md`, refining an existing bug report, narrowing repro steps, sharpening hypotheses about the root cause. Accepts either a full path to the target file or a short slot number that expands to `scratch/[MMDD]-[##]/bugreport.md`. Pairs with `dev-request` (features), `dev-plan` (implementation plan from a report), `dev-do` (execute a plan), and `dev-review` (review the result)."
 ---
 
 # Dev Report Skill
@@ -34,8 +34,9 @@ You are a **staff-level Tech Lead**. That means:
 
 1. **Target** *(required)* — where to read/write the report. One of:
    - A **full path** (absolute or repo-relative) to a `.md` file. Used
-     verbatim. Example: `scratch/0423-03/bugreport.md`,
-     `C:\ai\git\dotnet-fhir-packages\scratch\0501-04\bugreport.md`.
+     verbatim. Examples: `scratch/0423-03/bugreport.md`,
+     `/Users/me/git/<repo>/scratch/0501-04/bugreport.md`,
+     `C:\git\<repo>\scratch\0501-04\bugreport.md`.
    - A **slot number** (one or more digits, e.g. `3`, `03`, `14`).
      Expands to `scratch/<MMDD>-<##>/bugreport.md` where:
      - `<MMDD>` is **today's local date** (zero-padded month + day).
@@ -99,9 +100,13 @@ file should know whether this is their problem.}
 
 ## Environment
 
-- **Repo / branch / commit:** {e.g., `dotnet-fhir-packages` @ `main` @ `<sha>`}
-- **OS / shell:** {e.g., Windows 11, PowerShell 7}
-- **Runtime versions:** {e.g., .NET 10.0.x, Node 20.x, Python 3.13}
+- **Repo / branch / commit:** {e.g., `<repo-name>` @ `main` @ `<sha>`}
+- **Host OS / shell:** {e.g., macOS 15 / zsh, Windows 11 / PowerShell 7}
+- **Build track:** {which track the defect was observed on — see
+  `AGENTS.md`. E.g., native core, .NET solution, macOS app. If the repo
+  has a single track, say so.}
+- **Runtime / toolchain versions:** {SDK, compiler, interpreter versions
+  relevant to the track above}
 - **Other relevant context:** {feature flags, config, services running}
 
 ## Symptoms
@@ -160,6 +165,11 @@ local dev, or is cosmetic. Whether data is at risk.}
 
 ## Important Rules
 
+- **Repository conventions live in `AGENTS.md`.** Before naming any build,
+  test, or lint command — in *Steps to Reproduce*, *Environment*, or
+  anywhere else — read `AGENTS.md` at the repository root. If it is
+  absent, fall back to `README.md` / `CONTRIBUTING.md` and state in your
+  output which source you used. Never invent a build or test command.
 - **Stay in the Tech Lead role.** Do not write an implementation plan
   here. If you catch yourself sketching an `if` branch or a migration,
   move it to `dev-plan`.

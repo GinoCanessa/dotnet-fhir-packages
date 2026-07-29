@@ -1,6 +1,6 @@
 ---
 name: dev-do
-description: "Executes an implementation plan produced by `dev-plan` in the role of a staff-level Engineer. USE FOR: actually doing the work — writing/modifying code, running builds and tests, committing locally as phases complete, and keeping `plan.md` updated with current status. Accepts either a full path to the plan file or a short slot number that expands to `scratch/[MMDD]-[##]/plan.md`. Optional `max_subagents` (default 3) caps parallel sub-agent fan-out. Optional `checkpoint_every` (default 0 = never) yields back to the user after every N completed phases; the default is to run the entire plan in a single invocation without re-prompting. May commit locally with concise conventional-commit messages, but **must not push and must not open a PR**. The `plan.md` file may be edited but never deleted nor committed."
+description: "Executes an implementation plan produced by `dev-plan` in the role of a staff-level Engineer. USE FOR: actually doing the work — writing/modifying code, running builds and tests, committing locally as phases complete, and keeping `plan.md` updated with current status. Accepts either a full path to the plan file or a short slot number that expands to `scratch/[MMDD]-[##]/plan.md`. Optional `max_subagents` (default 3) caps parallel sub-agent fan-out. Optional `checkpoint_every` (default 0 = never) yields back to the user after every N completed phases; the default is to run the entire plan in a single invocation without re-prompting. May commit locally with concise conventional-commit messages, but **must not push and must not open a PR**. The `plan.md` file may be edited but never deleted nor committed. Pairs with `dev-request`/`dev-report` (capture the ask), `dev-plan` (author the plan), and `dev-review` (review the result)."
 ---
 
 # Dev Do Skill
@@ -111,9 +111,10 @@ is **not** a yield condition. Continue immediately to the next
 - Update each phase's `**Status:**` line as you progress
   (`Pending` → `In-progress` → `Complete`, or `Blocked` with a one-line
   reason).
-- Add a `## Progress Log` section if not present and append a one-line
-  entry per phase completion or notable deviation, with the commit SHA
-  when applicable.
+- Append to the `## Progress Log` section — one line per phase
+  completion or notable deviation, with the actual commit SHA when
+  applicable. `dev-plan` seeds this section; create it if an older
+  plan does not have one.
 - Record any deviations from the planned approach inline in the
   affected phase, under a `**Deviation:**` sub-bullet.
 
@@ -128,7 +129,9 @@ sibling source request (`featurerequest.md` / `bugreport.md`).
    - `git status` — note untracked / modified files. If the tree is
      dirty in a way that conflicts with the plan, stop and ask.
    - Confirm the build/test commands named in the plan actually exist
-     in this repo.
+     in this repo, cross-checking them against `AGENTS.md`. If the
+     plan names a command that `AGENTS.md` does not sanction, stop and
+     ask rather than guessing a substitute.
 3. **Plan execution loop.** This is a `while` loop, not a single pass.
    While there is at least one phase with `Status: Pending`, take the
    first such phase (in document order) and:
@@ -140,16 +143,18 @@ sibling source request (`featurerequest.md` / `bugreport.md`).
       red, debug; if you can't get green within reasonable effort,
       mark the phase `Blocked`, write the reason in `plan.md`, and
       stop (yield condition #1).
-   4. Update `plan.md` in the same working tree: mark the phase
-      `Complete` and append a `## Progress Log` entry (with the
-      pending commit SHA placeholder; you'll fill it in after the
-      commit, or amend immediately after).
-   5. Stage the code changes (not the `plan.md`) update and
-      commit as a single phase commit with a concise
+   4. Mark the phase `Complete` in `plan.md`.
+   5. Stage **only** the code changes — never `plan.md` — and commit
+      them as a single phase commit with a concise
       conventional-commit message (`<type>(<scope>): <subject>`,
-      e.g., `fix(github-source): handle empty FSH alias map`). Include
-      the standard co-author trailer required by this repo.
-   6. **Continue immediately to the next `Pending` phase. Do not
+      e.g., `fix(github-source): handle empty FSH alias map`).
+      Include every commit trailer required by `AGENTS.md`.
+   6. Append a one-line entry to the `## Progress Log` section of
+      `plan.md` recording the phase and the **actual** commit SHA you
+      just created. Create the section if the plan does not have one.
+      `plan.md` is never committed, so write the real SHA directly —
+      do not use a placeholder and do not amend the commit for this.
+   7. **Continue immediately to the next `Pending` phase. Do not
       yield.** Successful verification + commit is *not* a stopping
       point. The only legal reasons to break out of this loop are the
       ones listed under "Yield Conditions". If `checkpoint_every > 0`
@@ -157,8 +162,11 @@ sibling source request (`featurerequest.md` / `bugreport.md`).
       brief progress summary and yield (yield condition #4) — then
       resume from this same loop on the next invocation.
 4. **Final verification.** When the loop exits because all phases are
-   `Complete`, run the broader test command from the plan (or the repo
-   default, `dotnet test FhirPkg.sln`) once more end-to-end.
+   `Complete`, re-run the broader verification command named by the
+   plan — or, if the plan names none, the repo default from
+   `AGENTS.md` — once more end-to-end. If the repo has more than one
+   build track, run those you can actually run on this host and state
+   explicitly which tracks you could not verify and why.
 5. **Final wrap-up.** Fires only when the loop has fully exited (all
    phases `Complete`, a `Blocked` phase, a scope-exceeded decision,
    or a checkpoint boundary). Never fires per-phase. Report:
@@ -169,6 +177,8 @@ sibling source request (`featurerequest.md` / `bugreport.md`).
      review.
    - A reminder that nothing has been pushed and no PR has been
      opened.
+   - A suggestion to run `dev-review` against the same slot before
+     opening a PR, when the change is non-trivial.
 
 ## Sub-Agent Use
 
@@ -191,9 +201,10 @@ sibling source request (`featurerequest.md` / `bugreport.md`).
 - **One logical change per commit.** A phase typically maps to one
   commit; if a phase is large, multiple smaller commits within it are
   fine.
-- **Always include the repo-required co-author trailer** at the end of
-  the commit message:
-  `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+- **Always include every commit trailer required by `AGENTS.md`** at
+  the end of the commit message. Read that file rather than assuming;
+  repositories differ. Where the session runtime supplies trailers of
+  its own (session/correlation ids), include those too.
 - **Never `git push`.** Never `gh pr create`. Never force-push or
   rewrite shared history. Local-only `git commit` and `git commit
   --amend` (only on commits you just made in this session) are
@@ -229,11 +240,14 @@ When `plan.md` already shows `In-progress` or partial completion:
   source request.
 - **Source request is still read-only** here, just as in `dev-plan`.
 - **No push, no PR.** Local commits only.
-- **Honor repo conventions and stored memories** — explicit C# types,
-  `[]` for empty collections, `dotnet build FhirPkg.sln` and
-  `dotnet test FhirPkg.sln` as the canonical build/test commands, and any
-  other documented preferences. If a convention contradicts the plan,
-  prefer the convention and note the deviation in `plan.md`.
+- **Honor repo conventions and stored memories.** Repository
+  conventions live in `AGENTS.md`. Read it before naming any build,
+  test, or lint command. If it is absent, fall back to `README.md` /
+  `CONTRIBUTING.md` and state in your output which source you used.
+  Never invent a build or test command. Follow the same file's
+  language/style preferences; where it is silent, match the
+  surrounding code. If a convention contradicts the plan, prefer the
+  convention and note the deviation in `plan.md`.
 - **Stop on red.** A failed verification is a stop condition, not
   something to "fix next time". Mark the phase `Blocked`, record why,
   and report back.

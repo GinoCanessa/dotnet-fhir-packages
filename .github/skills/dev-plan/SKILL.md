@@ -1,6 +1,6 @@
 ---
 name: dev-plan
-description: "Builds and iterates on a detailed implementation plan in the role of a staff-level Engineering Lead, working from either a `featurerequest.md` (from `dev-request`) or a `bugreport.md` (from `dev-report`). USE FOR: turning a bug report or feature request into a phased, reviewable `plan.md`; refining or answering questions on an existing plan. Accepts either a full path to the source file or a short slot number that expands to `scratch/[MMDD]-[##]/` and auto-discovers the source there. The source request file is read-only. Plan output is written to `plan.md` in the same directory. Pairs with `dev-do` (execute the plan)."
+description: "Builds and iterates on a detailed implementation plan in the role of a staff-level Engineering Lead, working from either a `featurerequest.md` (from `dev-request`) or a `bugreport.md` (from `dev-report`). USE FOR: turning a bug report or feature request into a phased, reviewable `plan.md`; refining or answering questions on an existing plan. Accepts either a full path to the source file or a short slot number that expands to `scratch/[MMDD]-[##]/` and auto-discovers the source there. The source request file is read-only. Plan output is written to `plan.md` in the same directory. Pairs with `dev-do` (execute the plan) and `dev-review` (review the result)."
 ---
 
 # Dev Plan Skill
@@ -134,8 +134,8 @@ buildable state. Phases run sequentially.
 
 **Verification:**
 
-- {Specific command(s) to run, e.g.,
-  `dotnet test FhirPkg.sln --filter FullyQualifiedName~Foo`}
+- {Specific command(s) to run, taken from `AGENTS.md`. Name the build
+  track and the host platform each command requires.}
 - {Expected result — what success looks like}
 
 **Status:** Pending
@@ -173,6 +173,13 @@ may be "git revert the implementation commits".}
 
 - {Things explicitly not in this plan, even if related.}
 
+## Progress Log
+
+{Seeded empty by `dev-plan`. `dev-do` appends one line per phase
+completion or notable deviation, with the commit SHA when applicable.
+`dev-review` reads this section to resolve `plan-slot` review scope, so
+the heading must be present even while the plan is still `Draft`.}
+
 ## Notes
 
 {Free-form. Links to docs, prior art, related plans.}
@@ -190,6 +197,10 @@ When `plan.md` already exists:
 - If the user's new input invalidates a Complete phase, surface that
   clearly in your response and propose a new phase to undo/redo it
   rather than rewriting history.
+- If a sibling `analysis.md` (from `dev-review`) exists in the slot,
+  read it. Its Blocker and High findings are valid input for a plan
+  revision — fold them in as new remediation phases rather than editing
+  phases that are already `Complete`.
 
 ## Important Rules
 
@@ -207,10 +218,16 @@ When `plan.md` already exists:
   rework it.
 - **Name specifics.** Files, classes, functions, test methods,
   commands. No "the relevant module".
-- **Honor repo conventions.** Use the build/test commands documented in
-  this repo (e.g., `dotnet build FhirPkg.sln`,
-  `dotnet test FhirPkg.sln`). Use the language/style preferences
-  recorded in repo guidance (e.g., explicit C# types, `[]` for empty
-  collection initializers).
+- **Honor repo conventions.** Repository conventions live in
+  `AGENTS.md`. Before naming any build, test, or lint command, read
+  `AGENTS.md` at the repository root. If it is absent, fall back to
+  `README.md` / `CONTRIBUTING.md` and state in your output which source
+  you used. Never invent a build or test command. Follow the same file's
+  language/style preferences; where it is silent, match the surrounding
+  code rather than importing a preference from another repository.
+- **Verification must be runnable on a real host.** If the repo has more
+  than one build track, say which track each phase's verification
+  exercises and which platform can run it. Do not write a verification
+  step that nobody can execute.
 - **Do not commit.** Files under `scratch/` are gitignored on purpose.
   `dev-do` will commit *implementation* code, not the plan itself.

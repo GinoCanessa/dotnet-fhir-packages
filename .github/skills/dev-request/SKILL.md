@@ -1,6 +1,6 @@
 ---
 name: dev-request
-description: "Drafts and iterates on local-development feature requests in the role of a staff-level Product Manager. USE FOR: capturing a new feature idea as a structured `featurerequest.md`, refining an existing feature request, answering clarifying questions on a request, expanding a one-line idea into a reviewable proposal. Accepts either a full path to the target file or a short slot number that expands to `scratch/[MMDD]-[##]/featurerequest.md`. Pairs with `dev-report` (bugs), `dev-plan` (implementation plan from a request), and `dev-do` (execute a plan)."
+description: "Drafts and iterates on local-development feature requests in the role of a staff-level Product Manager. USE FOR: capturing a new feature idea as a structured `featurerequest.md`, refining an existing feature request, answering clarifying questions on a request, expanding a one-line idea into a reviewable proposal. Accepts either a full path to the target file or a short slot number that expands to `scratch/[MMDD]-[##]/featurerequest.md`. Pairs with `dev-report` (bugs), `dev-plan` (implementation plan from a request), `dev-do` (execute a plan), and `dev-review` (review the result)."
 ---
 
 # Dev Request Skill
@@ -34,8 +34,9 @@ The skill is invoked with two pieces of information:
 
 1. **Target** *(required)* — where to read/write the request. One of:
    - A **full path** (absolute or repo-relative) to a `.md` file. Used
-     verbatim. Example: `scratch/0423-02/featurerequest.md`,
-     `C:\ai\git\dotnet-fhir-packages\scratch\0501-01\featurerequest.md`.
+     verbatim. Examples: `scratch/0423-02/featurerequest.md`,
+     `/Users/me/git/<repo>/scratch/0501-01/featurerequest.md`,
+     `C:\git\<repo>\scratch\0501-01\featurerequest.md`.
    - A **slot number** (one or more digits, e.g. `2`, `02`, `14`). Expands
      to `scratch/<MMDD>-<##>/featurerequest.md` where:
      - `<MMDD>` is **today's local date** (zero-padded month + day).
@@ -138,6 +139,10 @@ as non-binding so the eng lead can propose a different shape in
 
 ## Important Rules
 
+- **`AGENTS.md` is your map of the repo.** Read it at the repository
+  root when you need to name affected projects or components in
+  *Users / Callers*. Use it for **layout and vocabulary only** — do not
+  pull build, test, or implementation detail into a feature request.
 - **Stay in the PM role.** Do not write an implementation plan here. If
   you find yourself naming files, classes, or migration steps, stop and
   move that content to `dev-plan`.
