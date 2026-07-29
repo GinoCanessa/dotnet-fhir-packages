@@ -1,6 +1,6 @@
 ---
 name: dev-review
-description: "Performs a two-track code-quality and QA review in the role of a staff-level Engineering Lead and a staff-level QA Lead, then synthesizes both critiques into a single `analysis.md` suitable to hand back to the engineering team. USE FOR: pre-PR self-review, post-`dev-do` quality gates, ad-hoc deep reviews of a change set. Accepts either a full path to the analysis file or a short slot number that expands to `scratch/[MMDD]-[##]/analysis.md`. Optional `max_subagents` (default 3) caps parallel sub-agent fan-out. Engineering review covers antipatterns, unoptimized hot paths, consistency errors, dead code, and design issues; QA review covers test coverage, edge cases, regression risk, and verifiability. Read-only with respect to the codebase — never modifies source, never commits, never pushes."
+description: "Performs a two-track code-quality and QA review in the role of a staff-level Engineering Lead and a staff-level QA Lead, then synthesizes both critiques into a single `analysis.md` suitable to hand back to the engineering team. USE FOR: pre-PR self-review, post-`dev-do` quality gates, ad-hoc deep reviews of a change set. Accepts either a full path to the analysis file or a short slot number that expands to `scratch/[MMDD]-[##]/analysis.md`. Optional `max_subagents` (default 3) caps parallel sub-agent fan-out. Engineering review covers antipatterns, unoptimized hot paths, consistency errors, dead code, and design issues; QA review covers test coverage, edge cases, regression risk, and verifiability. Read-only with respect to the codebase — never modifies source, never commits, never pushes. Pairs with `dev-request`/`dev-report` (capture the ask), `dev-plan` (fold findings back into a plan), and `dev-do` (execute the remediation)."
 ---
 
 # Dev Review Skill
@@ -37,9 +37,10 @@ Your concerns:
   algorithmic complexity that doesn't match the data shape.
 - **Consistency** — does this change follow the patterns already
   established in this repo? Naming, error handling, logging, DI
-  registration, project layout, the documented conventions
-  (e.g., explicit C# types, `[]` for empty collections,
-  `dotnet build FhirPkg.sln` as the canonical build).
+  registration, project layout, and the conventions documented in
+  `AGENTS.md`. Do **not** invent a convention: if `AGENTS.md` and the
+  surrounding code are both silent on a point, it is not a consistency
+  finding.
 - **Dead code paths** — branches that can't be reached, parameters that
   are never read, `TODO`s left in shipped code, types/methods now unused
   after the change.
@@ -97,8 +98,9 @@ engineer writing the analysis the team will actually read. You:
 
 1. **Target** *(required)* — where to write the analysis. One of:
    - A **full path** (absolute or repo-relative) to a `.md` file. Used
-     verbatim. Example: `scratch/0423-02/analysis.md`,
-     `C:\ai\git\dotnet-fhir-packages\scratch\0501-04\analysis.md`.
+     verbatim. Examples: `scratch/0423-02/analysis.md`,
+     `/Users/me/git/<repo>/scratch/0501-04/analysis.md`,
+     `C:\git\<repo>\scratch\0501-04\analysis.md`.
    - A **slot number** (one or more digits, e.g. `2`, `02`, `14`).
      Expands to `scratch/<MMDD>-<##>/analysis.md`, where:
      - `<MMDD>` is **today's local date** (zero-padded month + day).
@@ -176,10 +178,11 @@ mis-scoping before any expensive work happens.
 3. **Pre-flight.**
    - Confirm the working tree state with `git status` so you know
      whether `working-tree` scope would actually contain anything.
-   - Confirm the build/test commands referenced by the repo (e.g.,
-     `dotnet build FhirPkg.sln`, `dotnet test FhirPkg.sln`)
-     are available — you will *not* run them, but you will reference
-     them in the QA review.
+   - Read `AGENTS.md` at the repository root for the canonical build
+     and test commands. If it is absent, fall back to `README.md` /
+     `CONTRIBUTING.md` and note in the report which source you used.
+     You will *not* run these commands, but you will reference them in
+     the QA review, so they must be real. Never invent one.
 4. **Run the two review passes.** Prefer running them in parallel as
    sub-agents (one `general-purpose` or `code-review` agent per role)
    so they can't anchor on each other. Each sub-agent:
@@ -273,14 +276,30 @@ Each finding is independently actionable.
 
 ## Verification Steps the Team Should Run
 
-- {Specific commands. E.g.,
-  `dotnet test FhirPkg.sln --filter FullyQualifiedName~Foo`}
+- {Specific commands, taken verbatim from `AGENTS.md`. For each, name
+  the build track it exercises and the host platform required to run
+  it.}
+- {Tracks that could **not** be verified from the reviewing host, and
+  why.}
 - {Manual steps if applicable}
 
 ## Out of Scope / Deferred
 
 - {Things the reviewers noticed but consciously did not chase, with
   why. Useful follow-ups go here.}
+
+## Next Steps
+
+How these findings re-enter the loop:
+
+- **Blocker / High** — re-invoke `dev-plan` on this slot with this
+  analysis as input. It folds them in as new remediation phases; then
+  `dev-do` executes them. Do not hand-patch them outside the loop.
+- **Medium** — fix now if the change is still in flight, otherwise
+  record as a follow-up.
+- **Low / Nit** — record and move on. Do not block on these.
+- {Name the concrete next action here, e.g., "Run `dev-plan` on
+  `scratch/0423-02/` to add remediation phases for B1 and H2."}
 
 ## Notes
 
@@ -343,13 +362,13 @@ against a slot whose `analysis.md` already exists:
 - **Drop noise.** Anything a formatter, linter, or trivial rename
   would catch does not deserve a finding number. Mention it once
   in a single Nit line at most, or omit it entirely.
-- **Honor repo conventions and stored memories.** Use them as the
-  baseline for "consistency" findings — explicit C# types, `[]` for
-  empty collections, `dotnet build FhirPkg.sln` and
-  `dotnet test FhirPkg.sln` as the canonical build/test
-  commands, and any other documented preferences. A change that
-  violates a documented convention is at least a Medium finding
-  unless explicitly justified.
+- **Honor repo conventions.** Use `AGENTS.md` at the repository root as
+  the baseline for "consistency" findings, falling back to `README.md`
+  / `CONTRIBUTING.md` if it is absent. A change that violates a
+  **documented** convention is at least a Medium finding unless
+  explicitly justified. A change that merely differs from your personal
+  preference is **not a finding at all** — do not import conventions
+  from other repositories.
 - **Severity is the synthesizer's call.** Do not pass through the
   reviewers' severities verbatim if you disagree. The team reads
   *your* synthesized ranking.
