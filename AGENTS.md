@@ -100,6 +100,12 @@ dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj
 dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
 ```
 
+CI appends `-p:TestTfmsInParallel=false` to the unit-test invocation so the three
+per-TFM `vstest.console` / `testhost` pairs start sequentially on the hosted
+runners (4 vCPU on ubuntu/windows, 3 vCPU on macOS); concurrent testhost startup
+there exhausted the connect window and silently aborted two of the three runs.
+Local runs may omit it, and pinning `--framework` avoids the fanout entirely.
+
 Targeted runs use **VSTest filter syntax**, which *is* valid in this repo:
 
 ```bash
