@@ -222,6 +222,52 @@ public class ReleaseWorkflowContractTests
             "..\\..\\.github\\scripts\\*.ps1");
     }
 
+    [Fact]
+    public void QualificationProject_OnlyAddsProcessHostPropertiesForPublishedMode()
+    {
+        string qualificationProject =
+            ReadContract("FhirPkg.Qualification.csproj");
+        string expectedReference = NormalizeContractText("""
+                <ProjectReference
+                  Include="..\FhirPkg.ProcessTestHost\FhirPkg.ProcessTestHost.csproj"
+                  ReferenceOutputAssembly="false">
+                  <AdditionalProperties
+                    Condition="'$(UsePublishedFhirPkg)' == 'true'">UsePublishedFhirPkg=$(UsePublishedFhirPkg);FhirPkgQualificationPackageVersion=$(FhirPkgQualificationPackageVersion)</AdditionalProperties>
+                </ProjectReference>
+            """);
+
+        qualificationProject.ShouldContain(expectedReference);
+        qualificationProject.ShouldNotContain(
+            "AdditionalProperties=\"UsePublishedFhirPkg=$(UsePublishedFhirPkg);FhirPkgQualificationPackageVersion=$(FhirPkgQualificationPackageVersion)\"");
+    }
+
+    [Fact]
+    public void ReleaseWorkflow_QualificationUsesSingularTargetFrameworkProperty()
+    {
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string qualificationSection = GetSection(
+            releaseWorkflow,
+            "  package-qualification:\n",
+            "  publish:\n");
+        string restoreVerificationSection = GetSection(
+            qualificationSection,
+            "      - name: Verify exact package restore and selected framework asset\n",
+            "      - name: Install exact CLI package for requested framework\n");
+
+        CountOccurrences(
+            qualificationSection,
+            "\"-p:TargetFramework=$env:TARGET_FRAMEWORK\"").ShouldBe(2);
+        qualificationSection.ShouldNotContain(
+            "-p:TargetFrameworks=$env:TARGET_FRAMEWORK");
+        restoreVerificationSection.ShouldContain(
+            "test/FhirPkg.Qualification/obj/project.assets.json");
+        restoreVerificationSection.ShouldContain(
+            "test/FhirPkg.ProcessTestHost/obj/project.assets.json");
+        CountOccurrences(
+            restoreVerificationSection,
+            "Test-QualificationRestore.ps1").ShouldBe(1);
+    }
+
     [Theory]
     [InlineData("LF", "\n")]
     [InlineData("CRLF", "\r\n")]

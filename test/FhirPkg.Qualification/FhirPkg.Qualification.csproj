@@ -23,8 +23,10 @@
   <ItemGroup>
     <ProjectReference
       Include="..\FhirPkg.ProcessTestHost\FhirPkg.ProcessTestHost.csproj"
-      ReferenceOutputAssembly="false"
-      AdditionalProperties="UsePublishedFhirPkg=$(UsePublishedFhirPkg);FhirPkgQualificationPackageVersion=$(FhirPkgQualificationPackageVersion)" />
+      ReferenceOutputAssembly="false">
+      <AdditionalProperties
+        Condition="'$(UsePublishedFhirPkg)' == 'true'">UsePublishedFhirPkg=$(UsePublishedFhirPkg);FhirPkgQualificationPackageVersion=$(FhirPkgQualificationPackageVersion)</AdditionalProperties>
+    </ProjectReference>
   </ItemGroup>
 
   <ItemGroup>
