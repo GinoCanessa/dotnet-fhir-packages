@@ -33,10 +33,25 @@ on:
 permissions:
   contents: read
 
+# vstest.console's default 90 s testhost connect window has been observed to
+# expire on the 4 vCPU windows-latest runner, aborting a run with zero failing
+# tests and only an untyped "MSB4181: ... returned false but did not log an
+# error." Value is in seconds. Declared at workflow scope so it covers every
+# dotnet test step in this file, including ones added later. Job-level
+# timeout-minutes bounds the cost when a testhost genuinely never connects.
+env:
+  VSTEST_CONNECTION_TIMEOUT: "300"
+
 jobs:
   build-and-test:
     name: build-and-test-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Deliberately loose: far above any plausible run duration, including the
+    # serialized Unit tests step. This exists only to bound a genuine hang --
+    # a testhost that never connects (300 s per step) or one that wedges mid-
+    # execution, which the connect timeout does not cover at all. Without it
+    # a wedged job runs to GitHub's 6-hour default.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -81,12 +96,21 @@ jobs:
       - name: Build
         run: dotnet build FhirPkg.sln --configuration Release --no-restore
 
+      # FhirPkg.Tests multi-targets net10.0;net9.0;net8.0 and this step
+      # deliberately does not pin --framework, so MSBuild's
+      # DispatchToInnerBuildsWithVSTestTarget would otherwise launch three
+      # concurrent vstest.console + testhost pairs on a 4 vCPU runner. That
+      # oversubscription starved testhost startup and silently aborted two of
+      # the three per-framework runs. Serializing them via the
+      # TestTfmsInParallel property is the fix -- do not remove this as an
+      # "optimization".
       - name: Unit tests
         run: >-
           dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj
           --configuration Release
           --no-build
           --verbosity normal
+          -p:TestTfmsInParallel=false
 
       - name: Remaining integration tests (net10.0)
         run: >-
@@ -116,6 +140,7 @@ jobs:
   hardened-integration:
     name: hardened-${{ matrix.os }}-${{ matrix.framework }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
