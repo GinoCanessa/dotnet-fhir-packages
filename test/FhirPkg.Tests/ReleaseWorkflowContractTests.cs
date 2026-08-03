@@ -223,6 +223,20 @@ public class ReleaseWorkflowContractTests
     }
 
     [Fact]
+    public void BuildWorkflow_SerializesPerFrameworkUnitTestRunsAndBoundsTesthostStalls()
+    {
+        string buildWorkflow = ReadContract("build-and-test.yaml");
+
+        buildWorkflow.ShouldContain("VSTEST_CONNECTION_TIMEOUT: \"300\"");
+        CountOccurrences(
+            buildWorkflow,
+            "-p:TestTfmsInParallel=false").ShouldBe(1);
+        CountOccurrences(
+            buildWorkflow,
+            "timeout-minutes: 45").ShouldBe(2);
+    }
+
+    [Fact]
     public void QualificationProject_OnlyAddsProcessHostPropertiesForPublishedMode()
     {
         string qualificationProject =
