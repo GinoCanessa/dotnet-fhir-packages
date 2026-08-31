@@ -404,6 +404,7 @@ public class FhirPackageManagerOptions
     public string? CachePath { get; set; }                          // default: null → PACKAGE_CACHE_FOLDER env var → ~/.fhir/packages
     public List<RegistryEndpoint> Registries { get; init; }         // default: []
     public bool IncludeCiBuilds { get; set; }                       // default: true
+    public string? GitHubToken { get; set; }                        // default: null → unauthenticated GitHub lookups
     public bool IncludeHl7WebsiteFallback { get; set; }             // default: true
     public TimeSpan HttpTimeout { get; set; }                       // default: 30s
     public int MaxRedirects { get; set; }                           // default: 5
@@ -418,6 +419,21 @@ public class FhirPackageManagerOptions
 Options are validated and snapshotted when a manager is constructed. Mutating
 the original options or its collections afterward does not reconfigure that
 manager. See [Version Resolution Policy](versioning-policy.md).
+
+`GitHubToken` is used **only** for the `api.github.com` repository lookups behind
+canonical CI build repository selection, and is never sent to a package registry.
+`null` — the default — means those lookups are unauthenticated and carry no
+`Authorization` header, which is subject to GitHub's anonymous rate limit but is
+sufficient in practice because the lookup is skipped entirely for packages that a
+single repository publishes or that the prefix table names.
+
+A token requires a redirect-controlled transport, so the credential cannot follow
+a redirect to another origin. The standalone `new FhirPackageManager(options)`
+constructor and the DI registration both build one, so both support it. The
+`RegistryClientFactory.BuildRegistryClient(options, HttpClient, …)` convenience
+overload can only build an unverified transport and therefore throws
+`InvalidOperationException` when `GitHubToken` is set; use the
+`RegistryHttpTransport` overload instead.
 
 ### InstallOptions
 
@@ -707,8 +723,17 @@ public record ResolvedDirective
     public DateTime? PublicationDate { get; init; }
     public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
     public IReadOnlyList<string>? FhirVersions { get; init; }
+    public IReadOnlyList<string>? ResolutionWarnings { get; init; }
 }
 ```
+
+`ResolutionWarnings` carries non-fatal diagnostics about how the source was
+chosen, and is `null` when the resolution raised none. CI build resolution
+populates it when the selected build is not the canonical repository's default
+build, when canonical selection fell through to the oldest build, when an
+explicit `@current$branch` resolved to a non-canonical publisher, or when the
+requested FHIR release excluded every build from the canonical organization. The
+CLI prints these under `resolve` and includes them in `--json` output.
 
 ### PackageInstallResult
 
