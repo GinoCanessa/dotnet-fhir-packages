@@ -217,7 +217,8 @@ The **`VersionResolver`** receives the `PackageDirective` and the merged
    selects the highest match from ranges such as `^4.0.0`, `~4.0.0`, and
    `>=4.0.0`.
 5. **CI Build / CI Build Branch** — handled directly by the `FhirCiBuildClient`;
-   the version resolver returns `null` and the CI client resolves the build.
+   the version resolver returns `null` and the CI client resolves the build. See
+   [CI Build Selection](#ci-build-selection) below.
 
 Exact requests may resolve from an incomplete listing when one successful
 source supplies a complete policy-compatible candidate. Exact misses and all
@@ -232,6 +233,56 @@ later compatible candidate that supplies it is selected as a whole. Tarball
 URL, checksum, integrity value, dependencies, FHIR metadata, publication date,
 and source registry all come from that same candidate; metadata from
 conflicting copies is never spliced together.
+
+### CI Build Selection
+
+Many implementation guides are built on `build.fhir.org` from more than one
+repository — the canonical one plus any number of forks and feature branches. The
+`qas.json` index lists each build without saying which publisher is authoritative,
+so `FhirCiBuildClient` applies an explicit policy.
+
+**Choosing the repository.** Candidate builds matching the package identifier
+(and the requested FHIR release, when one is given) are narrowed to a single
+repository in three tiers:
+
+1. **Prefix table** — a curated table maps package-identifier prefixes to their
+   canonical organization (for example `ch.fhir.ig.` → `hl7ch`, `hl7.` → `HL7`).
+   A rule applies only when that organization actually published a candidate.
+   This tier is load-bearing: for several real package families the canonical
+   repository is neither the oldest nor the only non-fork, so a fork check alone
+   picks the wrong one.
+2. **Non-fork check** — candidate repositories are queried against
+   `api.github.com`, oldest build first, and the first one GitHub reports is not
+   a fork wins. Results are cached per repository, including negative results.
+   Any failure — rate limit, 404, unreachable host, malformed response — yields
+   no facts rather than an error, and selection continues.
+3. **Oldest build** — the repository owning the oldest build wins.
+
+A package published by exactly one repository short-circuits all three tiers and
+issues no GitHub request at all. Build dates are parsed to instants before
+comparison, because the index publishes at least two mutually incomparable date
+formats; an unparseable date always sorts last.
+
+**Choosing the artifact.** For a plain `@current`, the chosen repository's
+`package.manifest.json` is fetched and the short
+`{baseUrl}/ig/{org}/{repo}/package.tgz` form is used, with the version, date, and
+FHIR versions taken from that manifest — so the reported metadata describes the
+artifact actually served. If the manifest is unavailable or carries no version,
+resolution falls back to the repository's newest branch build at
+`{baseUrl}/ig/{org}/{repo}/branches/{branch}/package.tgz`.
+
+For `@current$branch`, the branch filter is applied **first** and canonical
+selection only breaks ties among the surviving candidates, so naming a fork's
+branch explicitly always reaches it. The branch-qualified URL is always used.
+
+**Warnings.** `ResolvedDirective.ResolutionWarnings` is populated, and matching
+`ILogger` warnings are emitted, when a plain `@current` returns a non-default
+build, when a plain `@current` reaches tier 3, when a `@current$branch` resolves
+to a non-canonical publisher and more than one organization publishes the
+package, or when the requested FHIR release excluded every build from the
+canonical organization. Conditions may co-fire and are not de-duplicated. A plain
+`@current` that resolves to the canonical repository's default build emits
+nothing.
 
 #### Supported Range Grammar
 

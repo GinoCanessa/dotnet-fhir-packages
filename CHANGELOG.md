@@ -16,6 +16,15 @@ qualification evidence) lives alongside this file under
   published package provenance.
 - Restore output now lists every exact resolved package identity, including
   coexisting versions of the same package, in console and JSON formats.
+- Added `ResolvedDirective.ResolutionWarnings`, an additive, null-defaulted list
+  of non-fatal diagnostics describing how a package source was chosen. The CLI's
+  `resolve` command prints each warning, and `--json` emits them as a
+  `resolutionWarnings` array.
+- Added `FhirPackageManagerOptions.GitHubToken`, the CLI's `--github-token`
+  global option, and the `.fhir-pkg.json` `githubToken` key, which authenticate
+  the `api.github.com` repository lookups used when choosing the canonical
+  repository for a CI build. `null` — the default — keeps those lookups
+  unauthenticated and sends no `Authorization` header.
 
 ### Changed
 - Pack, qualify, publish, and independently verify `fhir-pkg-lib` and
@@ -39,6 +48,19 @@ qualification evidence) lives alongside this file under
   `?` remainder matching.
 - Preserved and installed every required exact package version and its transitive
   subgraph during recursive dependency resolution.
+- Fixed `@current` implementation-guide resolution selecting an arbitrary fork or
+  feature branch. A plain `@current` now resolves the canonical repository's
+  default build — chosen by a package-id prefix table, then a GitHub non-fork
+  check, then the oldest build — and takes its version and date from that
+  repository's `package.manifest.json`. Previously the most recent build from any
+  publisher won, which made `hl7.fhir.uv.subscriptions-backport@current` fail to
+  install outright and silently mislabelled roughly 139 other packages.
+- Fixed branch-qualified CI build URLs being collapsed to the default-branch
+  form. The winning record's branch is no longer discarded, so
+  `@current$branch` emits `.../branches/{branch}/package.tgz`.
+- Fixed CI build dates being ranked by a lexical string comparison across two
+  incompatible published formats. Dates are now parsed to instants before
+  comparison.
 
 ### Removed
 - Removed SDK and CLI project restore-lock APIs and options. Restore now always

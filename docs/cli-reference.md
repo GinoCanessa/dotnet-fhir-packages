@@ -38,6 +38,7 @@ command-specific logic runs.
 | `--quiet` | `-q` | `bool` | `false` | Suppress all non-essential output. Only errors are shown. |
 | `--no-color` | — | `bool` | `NO_COLOR` env var | Disable ANSI colored output. |
 | `--json` | — | `bool` | `FHIR_PKG_JSON` env var | Emit machine-readable JSON instead of human-readable tables. |
+| `--github-token <token>` | — | `string` | `githubToken` config key, else unauthenticated | GitHub token used **only** for the `api.github.com` repository lookups behind canonical CI build repository selection. Never sent to a package registry, and never echoed in output. |
 | `--help` | `-h` | — | — | Show help for the command. |
 | `--version` | — | — | — | Show the tool version. |
 
@@ -608,6 +609,25 @@ Published:  2024-01-15
 }
 ```
 
+#### Resolution warnings
+
+When resolution makes a choice worth reviewing, `resolve` prints one
+`Warning:` line per diagnostic after `Published:`, and `--json` adds a
+`resolutionWarnings` array. Both are omitted when there are none.
+
+This mainly affects CI builds, where a package may be built from several
+repositories: a warning is emitted when a plain `@current` did not land on the
+canonical repository's default build, when canonical selection fell back to the
+oldest build, when an explicit `@current$branch` resolved to a non-canonical
+publisher, or when the requested FHIR release excluded every build from the
+canonical organization. See
+[CI Build Selection](process.md#ci-build-selection) for the full policy.
+
+```
+  Warning:    Resolved 'example.ig.core@current' to forker/example-ig (branch
+              'feature'), which is not the canonical repository's default build.
+```
+
 ---
 
 ### publish
@@ -738,6 +758,7 @@ the two files are never merged:
   "httpTimeout": 60,
   "includeCiBuilds": true,
   "verifyChecksums": true,
+  "githubToken": "ghp_example",
   "registries": [
     {
       "url": "https://registry.example.com",
@@ -754,6 +775,7 @@ the two files are never merged:
 | `httpTimeout` | `int` | HTTP timeout in seconds. |
 | `includeCiBuilds` | `bool` | Whether to include the CI build registry. |
 | `verifyChecksums` | `bool` | Whether to verify SHA-1 checksums on download. |
+| `githubToken` | `string` | GitHub token for the `api.github.com` repository lookups behind canonical CI build selection. Overridden by `--github-token`. Omit it to keep those lookups unauthenticated. |
 | `registries` | `array` | Registry endpoints that replace the built-in primary/secondary (CI/HL7 fallback still apply). |
 | `registries[].url` | `string` | Registry base URL. |
 | `registries[].type` | `string` | Registry type: `FhirNpm`, `FhirCiBuild`, `FhirHttp`, `Npm`. |
@@ -783,9 +805,11 @@ A custom registry and its credentials are configured with `--registry`/`-r` and
 `--auth` (or the `registries` array in `.fhir-pkg.json`) — there is no
 `FHIR_REGISTRY` or `FHIR_REGISTRY_TOKEN` variable. CI build resolution is
 disabled with `install --no-ci` or `"includeCiBuilds": false` — there is no
-`FHIR_PKG_NO_CI` variable. Each `FHIRPKG_MAX_*` value must be a positive base-10
-integer (invariant culture); a non-positive or non-numeric value aborts the
-operation.
+`FHIR_PKG_NO_CI` variable. The GitHub token used for canonical CI build selection
+comes from `--github-token` or the `githubToken` config key only; `GITHUB_TOKEN`
+and `GH_TOKEN` are deliberately **not** read from the environment. Each
+`FHIRPKG_MAX_*` value must be a positive base-10 integer (invariant culture); a
+non-positive or non-numeric value aborts the operation.
 
 ---
 
