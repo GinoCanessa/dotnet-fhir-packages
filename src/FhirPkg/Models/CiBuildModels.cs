@@ -97,26 +97,44 @@ public record CiBuildRecord
 }
 
 /// <summary>
-/// Represents a minimal package manifest from a FHIR CI build (typically found in
-/// the output/package/package.json of a CI build).
+/// Represents the <c>package.manifest.json</c> published alongside a FHIR CI build
+/// on the build server, describing the artifact currently served for a repository's
+/// default build.
 /// </summary>
 public record CiBuildManifest
 {
     /// <summary>The package name.</summary>
     [JsonPropertyName("name")]
-    public required string Name { get; init; }
+    public string? Name { get; init; }
 
     /// <summary>The package version (often includes "current" or "current$branch").</summary>
     [JsonPropertyName("version")]
-    public required string Version { get; init; }
+    public string? Version { get; init; }
 
     /// <summary>The build date as a raw string.</summary>
     [JsonPropertyName("date")]
-    public required string Date { get; init; }
+    public string? Date { get; init; }
 
-    /// <summary>The FHIR version(s) this build targets.</summary>
+    /// <summary>
+    /// The FHIR version(s) this build targets, as published under the singular
+    /// <c>fhirVersion</c> key the CI build server actually emits.
+    /// </summary>
+    [JsonPropertyName("fhirVersion")]
+    public IReadOnlyList<string>? FhirVersion { get; init; }
+
+    /// <summary>
+    /// The FHIR version(s) this build targets, as published under the plural
+    /// <c>fhirVersions</c> key used by npm-style package metadata.
+    /// </summary>
     [JsonPropertyName("fhirVersions")]
     public IReadOnlyList<string>? FhirVersions { get; init; }
+
+    /// <summary>
+    /// The FHIR versions declared by this manifest, preferring the singular
+    /// <c>fhirVersion</c> key the CI build server emits.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<string>? EffectiveFhirVersions => FhirVersion ?? FhirVersions;
 
     /// <summary>The jurisdiction code for this package.</summary>
     [JsonPropertyName("jurisdiction")]
