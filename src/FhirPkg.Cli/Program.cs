@@ -71,11 +71,18 @@ internal static class Program
             Recursive = true
         };
 
+        Option<string?> gitHubTokenOption = new Option<string?>("--github-token")
+        {
+            Description = "GitHub token used only for api.github.com repository lookups when choosing the canonical CI build repository.",
+            Recursive = true
+        };
+
         rootCommand.Add(cachePathOption);
         rootCommand.Add(verboseOption);
         rootCommand.Add(quietOption);
         rootCommand.Add(noColorOption);
         rootCommand.Add(jsonOption);
+        rootCommand.Add(gitHubTokenOption);
 
         // Store option references so command handlers can retrieve them
         GlobalOptionsBinder.CachePathOption = cachePathOption;
@@ -83,6 +90,7 @@ internal static class Program
         GlobalOptionsBinder.QuietOption = quietOption;
         GlobalOptionsBinder.NoColorOption = noColorOption;
         GlobalOptionsBinder.JsonOption = jsonOption;
+        GlobalOptionsBinder.GitHubTokenOption = gitHubTokenOption;
 
         // Add subcommands
         rootCommand.Add(InstallCommand.Build());
@@ -162,6 +170,13 @@ internal sealed record GlobalOptions
     public bool Json { get; init; }
 
     /// <summary>
+    /// Optional GitHub token used only for the <c>api.github.com</c> repository lookups
+    /// behind canonical CI build repository selection, or <c>null</c> for unauthenticated
+    /// requests.
+    /// </summary>
+    public string? GitHubToken { get; init; }
+
+    /// <summary>
     /// Builds a <see cref="FhirPackageManagerOptions"/> instance by merging global CLI flags
     /// with optional <c>.fhir-pkg.json</c> config files.
     /// </summary>
@@ -181,6 +196,11 @@ internal sealed record GlobalOptions
         if (CachePath is not null)
         {
             options.CachePath = CachePath;
+        }
+
+        if (GitHubToken is not null)
+        {
+            options.GitHubToken = GitHubToken;
         }
 
         return options;
@@ -237,6 +257,11 @@ internal sealed record GlobalOptions
             target.IncludeCiBuilds = config.IncludeCiBuilds.Value;
         }
 
+        if (config.GitHubToken is not null)
+        {
+            target.GitHubToken = config.GitHubToken;
+        }
+
         if (config.VerifyChecksums is not null)
         {
             target.VerifyChecksums = config.VerifyChecksums.Value;
@@ -275,6 +300,12 @@ internal sealed class ConfigFile
     /// <summary>Whether to include CI builds.</summary>
     public bool? IncludeCiBuilds { get; set; }
 
+    /// <summary>
+    /// GitHub token used only for the <c>api.github.com</c> repository lookups behind
+    /// canonical CI build repository selection.
+    /// </summary>
+    public string? GitHubToken { get; set; }
+
     /// <summary>Whether to verify checksums.</summary>
     public bool? VerifyChecksums { get; set; }
 
@@ -309,6 +340,7 @@ internal static class GlobalOptionsBinder
     private static Option<bool>? _quietOption;
     private static Option<bool>? _noColorOption;
     private static Option<bool>? _jsonOption;
+    private static Option<string?>? _gitHubTokenOption;
 
     /// <summary>The --package-cache-folder option.</summary>
     public static Option<string?> CachePathOption
@@ -344,6 +376,13 @@ internal static class GlobalOptionsBinder
         get => _jsonOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
         set => _jsonOption = value;
     }
+
+    /// <summary>The --github-token option.</summary>
+    public static Option<string?> GitHubTokenOption
+    {
+        get => _gitHubTokenOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _gitHubTokenOption = value;
+    }
 }
 
 /// <summary>
@@ -371,7 +410,8 @@ internal static class ParseResultExtensions
             Verbose = parseResult.GetValue(GlobalOptionsBinder.VerboseOption),
             Quiet = parseResult.GetValue(GlobalOptionsBinder.QuietOption),
             NoColor = noColor,
-            Json = parseResult.GetValue(GlobalOptionsBinder.JsonOption)
+            Json = parseResult.GetValue(GlobalOptionsBinder.JsonOption),
+            GitHubToken = parseResult.GetValue(GlobalOptionsBinder.GitHubTokenOption)
         };
     }
 }

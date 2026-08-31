@@ -338,6 +338,14 @@ internal static class ConsoleOutput
         {
             AnsiConsole.MarkupLine($"  [bold]Published:[/]  {resolved.PublicationDate:yyyy-MM-dd}");
         }
+
+        if (resolved.ResolutionWarnings is { Count: > 0 } warnings)
+        {
+            foreach (string warning in warnings)
+            {
+                AnsiConsole.MarkupLine($"  [yellow]Warning:[/]    {Markup.Escape(warning)}");
+            }
+        }
     }
 
     /// <summary>

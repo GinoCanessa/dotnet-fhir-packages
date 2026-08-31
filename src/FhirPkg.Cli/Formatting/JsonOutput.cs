@@ -175,7 +175,8 @@ internal static class JsonOutput
             Tarball = resolved.TarballUri.ToString(),
             resolved.ShaSum,
             Registry = resolved.SourceRegistry?.Url,
-            resolved.PublicationDate
+            resolved.PublicationDate,
+            resolved.ResolutionWarnings
         });
     }
 
