@@ -44,4 +44,14 @@ public record ResolvedDirective
 
     /// <summary>FHIR versions declared by the selected source candidate.</summary>
     public IReadOnlyList<string>? FhirVersions { get; init; }
+
+    /// <summary>
+    /// Non-fatal diagnostics describing how the source for this package was chosen.
+    /// </summary>
+    /// <remarks>
+    /// Populated when a resolution made a choice a caller may want to review — for
+    /// example a CI build that is not the canonical repository's default build.
+    /// <see langword="null"/> when the resolution raised no diagnostics.
+    /// </remarks>
+    public IReadOnlyList<string>? ResolutionWarnings { get; init; }
 }

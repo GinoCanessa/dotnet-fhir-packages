@@ -20,16 +20,32 @@ public static class RegistryClientFactory
     /// <param name="loggerFactory">The logger factory for creating typed loggers.</param>
     /// <param name="timeProvider">Optional time provider; defaults to <see cref="TimeProvider.System"/>.</param>
     /// <returns>A composite <see cref="IRegistryClient"/> wrapping all configured registries.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when <see cref="FhirPackageManagerOptions.GitHubToken"/> is set. This
+    /// overload can only build an unverified transport, and a credential is refused on
+    /// a transport that is not redirect-controlled.
+    /// </exception>
     public static IRegistryClient BuildRegistryClient(
         FhirPackageManagerOptions options,
         HttpClient httpClient,
         ILoggerFactory loggerFactory,
-        TimeProvider? timeProvider = null) =>
-        BuildRegistryClient(
+        TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (options.GitHubToken is not null)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(FhirPackageManagerOptions)}.{nameof(FhirPackageManagerOptions.GitHubToken)} requires a redirect-controlled transport; " +
+                $"use the {nameof(BuildRegistryClient)} overload that accepts a {nameof(RegistryHttpTransport)}.");
+        }
+
+        return BuildRegistryClient(
             options,
             RegistryHttpTransport.CreateUnverified(httpClient),
             loggerFactory,
             timeProvider);
+    }
 
     /// <summary>
     /// Builds the composite registry client chain from the provided options and
@@ -56,7 +72,8 @@ public static class RegistryClientFactory
                     transport,
                     loggerFactory,
                     options.InstallLimits,
-                    timeProvider));
+                    timeProvider,
+                    options.GitHubToken));
             }
         }
         else
@@ -77,7 +94,8 @@ public static class RegistryClientFactory
                 transport,
                 RegistryEndpoint.FhirCiBuild,
                 loggerFactory.CreateLogger<FhirCiBuildClient>(),
-                timeProvider));
+                timeProvider,
+                options.GitHubToken));
         }
 
         if (options.IncludeHl7WebsiteFallback)
@@ -128,14 +146,16 @@ public static class RegistryClientFactory
             transport,
             loggerFactory,
             installLimits: null,
-            timeProvider);
+            timeProvider,
+            gitHubToken: null);
 
     internal static IRegistryClient CreateClientForEndpoint(
         RegistryEndpoint endpoint,
         RegistryHttpTransport transport,
         ILoggerFactory loggerFactory,
         PackageInstallLimits installLimits,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        string? gitHubToken = null)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(transport);
@@ -147,7 +167,8 @@ public static class RegistryClientFactory
             transport,
             loggerFactory,
             installLimits,
-            timeProvider);
+            timeProvider,
+            gitHubToken);
     }
 
     private static IRegistryClient CreateClientForEndpointCore(
@@ -155,7 +176,8 @@ public static class RegistryClientFactory
         RegistryHttpTransport transport,
         ILoggerFactory loggerFactory,
         PackageInstallLimits? installLimits,
-        TimeProvider? timeProvider)
+        TimeProvider? timeProvider,
+        string? gitHubToken)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(transport);
@@ -171,7 +193,8 @@ public static class RegistryClientFactory
                 transport,
                 endpoint,
                 loggerFactory.CreateLogger<FhirCiBuildClient>(),
-                timeProvider),
+                timeProvider,
+                gitHubToken),
             RegistryType.FhirHttp => new Hl7WebsiteClient(
                 transport,
                 endpoint,
