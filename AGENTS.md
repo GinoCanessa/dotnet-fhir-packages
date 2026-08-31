@@ -35,15 +35,24 @@ projects, and `tools/FhirPkg.Release`.
 
 ## Toolchain pins
 
-- **.NET SDK `10.0.302`**, pinned in `global.json` with
-  `"rollForward": "disable"` and `"allowPrerelease": false`. Do not suggest a
-  different SDK.
+- **.NET SDK `10.0.302` floor**, declared in `global.json` with
+  `"rollForward": "latestFeature"` and `"allowPrerelease": false`. This is a
+  **floor, not an exact pin**: any installed `10.0.3xx` or later feature band
+  satisfies it, so a machine with `10.0.400` builds without installing
+  `10.0.302`. Do not suggest a different major version, and do not tighten the
+  policy back to `disable` — that made the repo unbuildable on any machine
+  lacking that one patch.
 - All projects **multi-target `net10.0;net9.0;net8.0`** and use
   `LangVersion` **14**, `Nullable` enable, `ImplicitUsings` enable. Building
   and testing therefore fans out over three TFMs unless you pass
   `--framework`.
 - CI additionally installs the `9.0.119` and `8.0.423` SDKs so the `net9.0` and
-  `net8.0` targets have matching reference assemblies.
+  `net8.0` targets have matching reference assemblies. CI installs `10.0.302`
+  itself via `setup-dotnet`, so the roll-forward policy above changes nothing
+  there — it resolves to exactly `10.0.302` on the runners and only gives local
+  machines room to use a newer feature band. `ReleaseWorkflowContractTests`
+  asserts the workflow's `dotnet-version: 10.0.302`; changing `global.json`
+  alone does not satisfy it.
 - **Central package management.** All package versions live in
   `Directory.Packages.props`. Add a `<PackageVersion>` there and a bare
   `<PackageReference Include="..." />` in the project — never a `Version=`
@@ -181,6 +190,34 @@ ones you could not.
 
 ---
 
+## Run
+
+The SDK (`src/FhirPkg/`) is a library and is not run directly. The CLI is run
+from source with `dotnet run`, pinning a TFM so the multi-target fanout does
+not build three copies:
+
+```bash
+dotnet run --project src/FhirPkg.Cli/FhirPkg.Cli.csproj --framework net10.0 -- --help
+```
+
+Everything after `--` is passed to the tool. Commands are `install`, `restore`,
+`list`, `remove`, `clean`, `search`, `info`, `resolve`, and `publish`; global
+options include `--package-cache-folder`, `-v|--verbose`, `-q|--quiet`,
+`--no-color`, and `--json`.
+
+Point the tool at a throwaway cache whenever you exercise install/remove/clean
+so a local run cannot disturb the real package cache:
+
+```bash
+dotnet run --project src/FhirPkg.Cli/FhirPkg.Cli.csproj --framework net10.0 -- \
+  --package-cache-folder /tmp/fhir-pkg-scratch list
+```
+
+Never run `publish` against a real registry. No environment variables or
+configuration files are required for the commands above.
+
+---
+
 ## Code style
 
 - **Every `.cs` file starts with the license header** — all 205 source files do:
@@ -237,6 +274,59 @@ ones you could not.
 
 ---
 
+## GitHub Integration
+
+**Off by default, in two independent ways.** A repository whose
+`AGENTS.md` has **no** `## GitHub Integration` section is off. A section
+whose `Enabled` row says **`no`** is equally off. In either case no skill
+prompts about GitHub, and the `dev-*` loop behaves exactly as it did
+before this feature existed.
+
+The block below is **machine-managed**. This section is the **normative
+definition** of both sentinel strings: every skill that reads or writes
+the block reproduces the opener and the closer byte-for-byte from here,
+and no skill re-derives, paraphrases, or reformats them.
+
+<!-- >>> dev-* github integration (managed by dev-* skills) >>> -->
+| Setting | Value |
+|-|-|
+| Enabled | no |
+| Repository | n/a |
+| Label — feature request | n/a |
+| Label — bug report | n/a |
+| Label — docs-only (additive) | n/a |
+| Changelog file | n/a |
+| Changelog entry format | n/a |
+| PR opens as draft | n/a |
+<!-- <<< dev-* github integration (managed by dev-* skills) <<< -->
+
+**These sentinels are not `dev-setup`'s ignore-file sentinels.** The
+ignore-file block that `dev-setup` maintains in `.gitignore` or
+`.git/info/exclude` is delimited by
+`# >>> dev-* skills (managed by dev-setup) >>>` and
+`# <<< dev-* skills (managed by dev-setup) <<<`. That is a **different
+block in a different file**, with a `#` comment prefix rather than an
+HTML comment. Do not conflate the two, and never substitute one pair for
+the other.
+
+Rules for the block:
+
+- Only `dev-setup`, `dev-issue`, and `dev-pr-open` may rewrite it, and
+  only **in place** — never a second copy, never appended to the end of
+  the file.
+- Hand-written text outside the sentinels is never touched. Everything a
+  human writes in this section survives every rewrite.
+- A recorded value of `no`, `none`, or `n/a` is a **resolved answer**, not
+  a missing one. It must never re-trigger a prompt on a later run.
+- When `Enabled` is `no`, every other row is `n/a`.
+
+Because the integration is off, `dev-issue` and `dev-pr-open` are installed
+but inert: nothing in this repository is published to GitHub by a skill. The
+existing rule stands regardless — agents **do not push** and **do not open
+pull requests** unless the user explicitly asks.
+
+---
+
 ## Scratch / slot convention
 
 Local inner-loop work is organized into **slots** under `scratch/`:
@@ -245,6 +335,8 @@ Local inner-loop work is organized into **slots** under `scratch/`:
 scratch/<MMDD>-<##>/
   featurerequest.md    # authored by the dev-request skill
   bugreport.md         # authored by the dev-report skill
+  approach-a|b|c.md    # authored by dev-approach (optional stage)
+  approach.md          # dev-approach's judged winner
   plan.md              # authored by dev-plan, updated by dev-do
   analysis.md          # authored by dev-review
 ```

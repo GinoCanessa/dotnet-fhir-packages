@@ -25,6 +25,10 @@ qualification evidence) lives alongside this file under
   release tool.
 - Updated GitHub workflows to the Node 24-compatible `actions/checkout@v6` and
   `actions/setup-dotnet@v5`.
+- Relaxed the `global.json` SDK policy from `rollForward: disable` to
+  `latestFeature`, so building from source no longer requires the exact
+  `10.0.302` patch and any `10.0.3xx`-or-later SDK works. CI still installs and
+  resolves `10.0.302` exactly.
 
 ### Fixed
 - Fixed the deployment regression that could publish the SDK without the CLI.
