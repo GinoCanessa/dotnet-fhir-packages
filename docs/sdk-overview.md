@@ -213,7 +213,7 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 | `CachePath` | `string?` | `PACKAGE_CACHE_FOLDER` env var, or `~/.fhir/packages` | Local package cache directory |
 | `Registries` | `List<RegistryEndpoint>` | `[]` | Custom registry endpoints (priority order) |
 | `IncludeCiBuilds` | `bool` | `true` | Query the FHIR CI build registry |
-| `GitHubToken` | `string?` | `null` → unauthenticated | Token for the `api.github.com` lookups behind canonical CI build selection; never sent to a package registry |
+| `GitHubToken` | `string?` | `null` → unauthenticated | Token used **only** for the `api.github.com` repository lookups behind canonical CI build selection; never sent to a package registry |
 | `IncludeHl7WebsiteFallback` | `bool` | `true` | Fall back to hl7.org/fhir for core packages |
 | `HttpTimeout` | `TimeSpan` | 30 s | Per-request HTTP timeout |
 | `MaxRedirects` | `int` | `5` | Maximum HTTP redirects per request |
