@@ -290,14 +290,14 @@ and no skill re-derives, paraphrases, or reformats them.
 <!-- >>> dev-* github integration (managed by dev-* skills) >>> -->
 | Setting | Value |
 |-|-|
-| Enabled | no |
-| Repository | n/a |
-| Label — feature request | n/a |
-| Label — bug report | n/a |
-| Label — docs-only (additive) | n/a |
-| Changelog file | n/a |
-| Changelog entry format | n/a |
-| PR opens as draft | n/a |
+| Enabled | yes |
+| Repository | GinoCanessa/dotnet-fhir-packages |
+| Label — feature request | enhancement |
+| Label — bug report | bug |
+| Label — docs-only (additive) | documentation |
+| Changelog file | CHANGELOG.md |
+| Changelog entry format | Bullet under the `## Current` heading, in an `### Added` / `### Changed` / `### Fixed` subsection; past-tense prose; add a trailing `(#N)` issue reference when an issue is bound |
+| PR opens as draft | no |
 <!-- <<< dev-* github integration (managed by dev-* skills) <<< -->
 
 **These sentinels are not `dev-setup`'s ignore-file sentinels.** The
