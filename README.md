@@ -3,7 +3,7 @@
 A C# SDK and CLI tool for discovering, resolving, downloading, caching, and
 managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/LICENSE)
 
 ## Packages
 
@@ -74,9 +74,13 @@ dotnet add package fhir-pkg-lib
 using System.Text.Json.Nodes;
 using FhirPkg;
 using FhirPkg.Indexing;
+using FhirPkg.Models;
 
 // Create a manager with default options
 using var manager = new FhirPackageManager();
+
+// Use your own cancellation token where you have one
+CancellationToken cancellationToken = default;
 
 // Install a package
 var record = await manager.InstallAsync("hl7.fhir.r4.core#4.0.1");
@@ -168,9 +172,9 @@ capability bypass parsed-resource caching.
 ## Building from Source
 
 ```bash
-git clone <repo-url>
-cd cs-fhir-packages
-dotnet build
+git clone https://github.com/GinoCanessa/dotnet-fhir-packages.git
+cd dotnet-fhir-packages
+dotnet build FhirPkg.sln
 ```
 
 ## Running Tests
@@ -183,32 +187,22 @@ dotnet test test/FhirPkg.Tests
 dotnet test test/FhirPkg.IntegrationTests
 ```
 
-## Project Structure
-
-```
-cs-fhir-packages/
-├── src/
-│   ├── FhirPkg/              # SDK library
-│   └── FhirPkg.Cli/          # CLI tool
-├── test/
-│   ├── FhirPkg.Tests/        # Unit tests
-│   └── FhirPkg.IntegrationTests/
-├── docs/                      # Developer documentation
-├── proposal/                  # Design proposals
-└── reference/                 # Reference material
-```
-
+<!-- mirror-of: docs/index.md -->
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [Documentation Index](docs/index.md) | Landing page for all developer docs |
-| [Changelog](CHANGELOG.md) | User-visible changes for both packages, by release. |
-| [SDK Overview](docs/sdk-overview.md) | Introduction, quick start, DI setup, configuration |
-| [SDK API Reference](docs/sdk-api-reference.md) | Complete interface, model, and enum reference |
-| [CLI Overview](docs/cli-overview.md) | Installation, quick start, command summary |
-| [CLI Reference](docs/cli-reference.md) | All commands, options, exit codes, and config |
+| [Documentation Index](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/index.md) | Landing page for all developer docs |
+| [Changelog](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/CHANGELOG.md) | User-visible changes for both packages, by release. |
+| [SDK Overview](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/sdk-overview.md) | Introduction, quick start, DI setup, configuration |
+| [SDK API Reference](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/sdk-api-reference.md) | Reference for the supported public surface — interfaces, models, and enums |
+| [Package Request Process](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/process.md) | End-to-end walkthrough of resolution, download, extraction, caching, and indexing. |
+| [Version Resolution Policy](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/versioning-policy.md) | Configuration snapshots, fixups, pre-release rules, and FHIR-release filtering. |
+| [Release Process and Evidence](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/releases/README.md) | Exact-commit source CI, immutable candidate handoff, 3 x 3 qualification, publication gates, and evidence. |
+| [CLI Overview](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/cli-overview.md) | Installation, quick start, command summary |
+| [CLI Reference](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/cli-reference.md) | All commands, options, exit codes, and config |
+| [FHIR Package Reference](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/reference/index.md) | Package naming, versioning, resolution, registry API, caching, dependencies, client implementations, security, and errors. |
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/LICENSE).

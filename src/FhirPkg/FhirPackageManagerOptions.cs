@@ -49,6 +49,19 @@ public class FhirPackageManagerOptions
     public bool IncludeCiBuilds { get; set; } = true;
 
     /// <summary>
+    /// Optional GitHub token used solely for the <c>api.github.com</c> repository
+    /// lookups behind canonical CI build repository selection.
+    /// </summary>
+    /// <remarks>
+    /// <c>null</c> (the default) means unauthenticated requests and no
+    /// <c>Authorization</c> header, which is the shipped behavior. The token is sent
+    /// only to the GitHub API origin and requires a redirect-controlled transport;
+    /// the <see cref="Registry.RegistryClientFactory"/> overload that accepts a bare
+    /// <see cref="HttpClient"/> rejects a non-<c>null</c> value.
+    /// </remarks>
+    public string? GitHubToken { get; set; }
+
+    /// <summary>
     /// Whether to include the HL7 website (<c>hl7.org/fhir</c>) as a fallback source
     /// for core FHIR packages. Default: <c>true</c>.
     /// </summary>

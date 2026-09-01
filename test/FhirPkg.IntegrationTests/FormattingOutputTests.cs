@@ -66,6 +66,60 @@ public sealed class FormattingOutputTests
             .ShouldBe("6.1.0");
     }
 
+    [Fact]
+    public void WriteResolveResult_WithResolutionWarnings_RendersEachWarning()
+    {
+        string plainWarning =
+            "Resolved 'jkiddo/fhir-subscription-backport-ig' on branch 'fixing-missing-extensions'";
+        string markupWarning =
+            "2 organizations published [example.ig.core]; none is named by the prefix table";
+        ResolvedDirective resolved = CreateResolvedDirective([plainWarning, markupWarning]);
+
+        string consoleOutput = CaptureAnsiConsole(
+            () => ConsoleOutput.WriteResolveResult(resolved));
+        string json = CaptureConsoleOut(
+            () => JsonOutput.WriteResolveResult(resolved));
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement root = document.RootElement;
+
+        consoleOutput.ShouldContain("Warning:");
+        consoleOutput.ShouldContain(plainWarning);
+        consoleOutput.ShouldContain(markupWarning);
+
+        JsonElement warnings = root.GetProperty("resolutionWarnings");
+        warnings.GetArrayLength().ShouldBe(2);
+        warnings[0].GetString().ShouldBe(plainWarning);
+        warnings[1].GetString().ShouldBe(markupWarning);
+    }
+
+    [Fact]
+    public void WriteResolveResult_WithoutResolutionWarnings_OmitsWarningOutput()
+    {
+        ResolvedDirective resolved = CreateResolvedDirective(warnings: null);
+
+        string consoleOutput = CaptureAnsiConsole(
+            () => ConsoleOutput.WriteResolveResult(resolved));
+        string json = CaptureConsoleOut(
+            () => JsonOutput.WriteResolveResult(resolved));
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement root = document.RootElement;
+
+        consoleOutput.ShouldNotContain("Warning:");
+        root.TryGetProperty("resolutionWarnings", out _).ShouldBeFalse();
+    }
+
+    private static ResolvedDirective CreateResolvedDirective(
+        IReadOnlyList<string>? warnings) =>
+        new()
+        {
+            Reference = new PackageReference(
+                "hl7.fhir.uv.subscriptions-backport",
+                "1.1.0"),
+            TarballUri = new Uri(
+                "https://build.fhir.org/ig/jkiddo/fhir-subscription-backport-ig/branches/fixing-missing-extensions/package.tgz"),
+            ResolutionWarnings = warnings,
+        };
+
     private static PackageClosure CreateClosure() =>
         new()
         {

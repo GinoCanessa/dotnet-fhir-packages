@@ -4,6 +4,37 @@ FhirPkg is a C# SDK and CLI tool for discovering, resolving, downloading,
 caching, and managing [FHIR packages](https://registry.fhir.org/) from multiple
 registries.
 
+## How this documentation is organized
+
+Each document has one job. The layer it belongs to says which job that is, and
+the invariant below the table says what follows from it.
+
+| Layer | Documents | Owns | Must not contain |
+|-------|-----------|------|------------------|
+| Publish | `README.md` | Orientation for the nuget.org package page; absolute links only | Repo-relative links; unmarked enumerations of the shipped surface |
+| Route | `docs/index.md`, `reference/index.md` | The list of documents and what each is for | Any fact about the code |
+| Teach | `docs/cli-overview.md`, `docs/sdk-overview.md` | Narrative, quick start, worked examples | Unmarked enumerations |
+| Enumerate | `docs/cli-reference.md`, `docs/sdk-api-reference.md`, `docs/process.md`, `docs/versioning-policy.md`, `docs/releases/README.md` | The exhaustive tables — single source of truth | — |
+| Domain | `reference/**` | The FHIR package ecosystem, vendor-neutral | `FhirPkg`-specific API detail |
+
+**One owner per enumeration.** An enumeration of the shipped surface — a table
+of commands, global options, configuration keys, environment variables, or exit
+codes — has exactly one owning document, named in the *Enumerate* row above.
+Every other appearance of it is either a link to that owner or a marked mirror.
+
+A marked mirror is the single sanctioned exception, for the case where
+repeating a table genuinely serves the reader where they are standing. It must
+carry an HTML comment naming its owner, immediately above the heading it
+duplicates, in this literal form:
+`<!-- mirror-of: docs/cli-reference.md#global-options -->`. The marker turns
+silent drift into greppable drift: when the owner gains a row, `grep` finds
+every copy that has to gain it too.
+
+`AGENTS.md` is deliberately **not** a documentation layer. It is the agent
+contract, and its own preamble already says it "restates only the commands and
+rules an agent needs" — it consumes the owners above rather than being one of
+them.
+
 ## SDK (Library)
 
 Use the **fhir-pkg-lib** NuGet package to integrate FHIR package management
@@ -12,7 +43,7 @@ into your .NET applications.
 | Document | Description |
 |----------|-------------|
 | [SDK Overview](sdk-overview.md) | Introduction, quick start, DI setup, configuration, and architecture. |
-| [SDK API Reference](sdk-api-reference.md) | Complete reference for all public interfaces, models, enums, and options. |
+| [SDK API Reference](sdk-api-reference.md) | Reference for the supported public surface — interfaces, models, enums, and options. |
 | [Package Request Process](process.md) | End-to-end walkthrough of resolution, download, extraction, caching, and indexing. |
 | [Version Resolution Policy](versioning-policy.md) | Configuration snapshots, fixups, pre-release rules, and FHIR-release filtering. |
 | [Release Process and Evidence](releases/README.md) | Exact-commit source CI, immutable candidate handoff, 3 x 3 qualification, publication gates, and evidence. |
@@ -27,6 +58,15 @@ the terminal or CI/CD pipelines.
 |----------|-------------|
 | [CLI Overview](cli-overview.md) | Installation, quick start, command summary, and environment variables. |
 | [CLI Reference](cli-reference.md) | Complete reference for all commands, options, arguments, and exit codes. |
+
+## Domain Reference
+
+Background on the FHIR package ecosystem itself, vendor-neutral and independent
+of any one implementation.
+
+| Document | Description |
+|----------|-------------|
+| [FHIR Package Reference](../reference/index.md) | Package naming, versioning, resolution, registry API, caching, dependencies, client implementations, security, and errors. |
 
 ## Dependencies
 

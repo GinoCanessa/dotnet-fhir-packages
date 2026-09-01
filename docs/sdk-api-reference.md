@@ -25,6 +25,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
   - [PackageManifest](#packagemanifest)
   - [PackageListing & PackageVersionInfo](#packagelisting--packageversioninfo)
   - [CatalogEntry](#catalogentry)
+  - [CiBuildRecord & CiBuildManifest](#cibuildrecord--cibuildmanifest)
   - [ResolvedDirective](#resolveddirective)
   - [PackageInstallResult](#packageinstallresult)
   - [PackageClosure](#packageclosure)
@@ -45,6 +46,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
   - [IRegistryClient](#iregistryclient)
   - [RegistryEndpoint](#registryendpoint)
   - [Built-in Registry Clients](#built-in-registry-clients)
+  - [RegistryClientBase](#registryclientbase)
 - [Resolution](#resolution)
   - [IVersionResolver](#iversionresolver)
   - [IDependencyResolver](#idependencyresolver)
@@ -52,6 +54,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
   - [IPackageIndexer](#ipackageindexer)
 - [Dependency Injection](#dependency-injection)
 - [Utilities](#utilities)
+- [Public Surface Coverage](#public-surface-coverage)
 
 ---
 
@@ -387,6 +390,49 @@ canonical package identity and normalized path when `ResourceCacheSize` is
 positive and the package cache provides generation-aware reads. Other custom
 cache implementations are read on every call.
 
+### FhirPackageManagerResourceExtensions
+
+The extension methods that expose the capability on `IFhirPackageManager`, so
+existing implementations keep compatibility. Each one resolves the manager to
+`IFhirPackageResourceManager` and forwards unchanged, so the behavior above
+applies without an interface change.
+
+```csharp
+public static class FhirPackageManagerResourceExtensions
+{
+    public static Task<PackageIndex?> IndexPackageAsync(
+        this IFhirPackageManager manager,
+        PackageReference reference,
+        IndexingOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    public static Task<IReadOnlyList<ResourceInfo>> FindResourcesAsync(
+        this IFhirPackageManager manager,
+        ResourceSearchCriteria criteria,
+        CancellationToken cancellationToken = default);
+
+    public static Task<ResourceInfo?> FindByCanonicalUrlAsync(
+        this IFhirPackageManager manager,
+        string canonicalUrl,
+        string? packageScope = null,
+        CancellationToken cancellationToken = default);
+
+    public static Task<IReadOnlyList<ResourceInfo>> FindByResourceTypeAsync(
+        this IFhirPackageManager manager,
+        string resourceType,
+        string? packageScope = null,
+        CancellationToken cancellationToken = default);
+
+    public static Task<JsonNode?> ReadResourceAsync(
+        this IFhirPackageManager manager,
+        ResourceInfo resource,
+        CancellationToken cancellationToken = default);
+}
+```
+
+A `null` manager throws `ArgumentNullException`; a manager that does not
+implement the capability throws `NotSupportedException`.
+
 ---
 
 ## Options
@@ -404,6 +450,7 @@ public class FhirPackageManagerOptions
     public string? CachePath { get; set; }                          // default: null → PACKAGE_CACHE_FOLDER env var → ~/.fhir/packages
     public List<RegistryEndpoint> Registries { get; init; }         // default: []
     public bool IncludeCiBuilds { get; set; }                       // default: true
+    public string? GitHubToken { get; set; }                        // default: null → unauthenticated GitHub lookups
     public bool IncludeHl7WebsiteFallback { get; set; }             // default: true
     public TimeSpan HttpTimeout { get; set; }                       // default: 30s
     public int MaxRedirects { get; set; }                           // default: 5
@@ -418,6 +465,21 @@ public class FhirPackageManagerOptions
 Options are validated and snapshotted when a manager is constructed. Mutating
 the original options or its collections afterward does not reconfigure that
 manager. See [Version Resolution Policy](versioning-policy.md).
+
+`GitHubToken` is used **only** for the `api.github.com` repository lookups behind
+canonical CI build repository selection, and is never sent to a package registry.
+`null` — the default — means those lookups are unauthenticated and carry no
+`Authorization` header, which is subject to GitHub's anonymous rate limit but is
+sufficient in practice because the lookup is skipped entirely for packages that a
+single repository publishes or that the prefix table names.
+
+A token requires a redirect-controlled transport, so the credential cannot follow
+a redirect to another origin. The standalone `new FhirPackageManager(options)`
+constructor and the DI registration both build one, so both support it. The
+`RegistryClientFactory.BuildRegistryClient(options, HttpClient, …)` convenience
+overload can only build an unverified transport and therefore throws
+`InvalidOperationException` when `GitHubToken` is set; use the
+`RegistryHttpTransport` overload instead.
 
 ### InstallOptions
 
@@ -691,6 +753,50 @@ public record CatalogEntry
 }
 ```
 
+### CiBuildRecord & CiBuildManifest
+
+Metadata published by the FHIR CI build server. `FhirCiBuildClient` reads
+`CiBuildRecord` entries from the server's `qas.json` index when resolving
+`current` and `current$branch` directives for an implementation guide, and
+reads a `CiBuildManifest` from the `package.manifest.json` published beside a
+repository's default build.
+
+```csharp
+public record CiBuildRecord
+{
+    public string? Url { get; init; }                // "url"
+    public string? Name { get; init; }               // "name"
+    public string? Title { get; init; }              // "title"
+    public required string PackageId { get; init; }  // "package-id"
+    public string? IgVersion { get; init; }          // "ig-ver"
+    public required string Date { get; init; }       // "date"; raw build date
+    public string? DateISO8601 { get; init; }        // "dateISO8601"
+    public required string Repo { get; init; }       // "repo"; see ParseRepo
+    public string? FhirVersion { get; init; }        // "fhir-version"
+    public int? Errors { get; init; }                // "errors"
+    public int? Warnings { get; init; }              // "warnings"
+
+    public (string Org, string RepoName, string Branch)? ParseRepo();
+}
+
+public record CiBuildManifest
+{
+    public string? Name { get; init; }
+    public string? Version { get; init; }                         // often "current" or "current$branch"
+    public string? Date { get; init; }
+    public IReadOnlyList<string>? FhirVersion { get; init; }       // "fhirVersion"; emitted by the CI build server
+    public IReadOnlyList<string>? FhirVersions { get; init; }      // "fhirVersions"; npm-style
+    public IReadOnlyList<string>? EffectiveFhirVersions { get; }   // FhirVersion ?? FhirVersions; JSON-ignored
+    public string? Jurisdiction { get; init; }
+}
+```
+
+`ParseRepo` accepts `Org/Repo/Branch/qa.json` and
+`Org/Repo/branches/Branch/qa.json`, and returns `null` for every other shape;
+records whose `Repo` cannot be parsed are discarded during CI build
+resolution. `EffectiveFhirVersions` prefers the singular `fhirVersion` key the
+build server actually emits over the plural npm-style `fhirVersions`.
+
 ### ResolvedDirective
 
 The result of `ResolveAsync` — an exact version and download location.
@@ -707,8 +813,17 @@ public record ResolvedDirective
     public DateTime? PublicationDate { get; init; }
     public IReadOnlyDictionary<string, string>? Dependencies { get; init; }
     public IReadOnlyList<string>? FhirVersions { get; init; }
+    public IReadOnlyList<string>? ResolutionWarnings { get; init; }
 }
 ```
+
+`ResolutionWarnings` carries non-fatal diagnostics about how the source was
+chosen, and is `null` when the resolution raised none. CI build resolution
+populates it when the selected build is not the canonical repository's default
+build, when canonical selection fell through to the oldest build, when an
+explicit `@current$branch` resolved to a non-canonical publisher, or when the
+requested FHIR release excluded every build from the canonical organization. The
+CLI prints these under `resolve` and includes them in `--json` output.
 
 ### PackageInstallResult
 
@@ -1523,6 +1638,82 @@ redirect-controlled transport, even when no credentials are configured.
 | `NpmRegistryClient` | `Npm` | Standard NPM registries; packument publication |
 | `RedundantRegistryClient` | *(composite)* | Chains multiple clients with automatic fallback |
 
+### RegistryClientBase
+
+The abstract base of every built-in client except the composite
+`RedundantRegistryClient`, and the supported extension point for a custom
+`IRegistryClient`. It owns header scoping, redirect control, deadlines, and
+JSON handling; a derived client supplies only its registry's routes.
+
+```csharp
+public abstract class RegistryClientBase : IRegistryClient
+{
+    protected RegistryClientBase(
+        HttpClient httpClient, RegistryEndpoint endpoint, ILogger logger);
+    protected RegistryClientBase(
+        RegistryHttpTransport transport, RegistryEndpoint endpoint, ILogger logger);
+
+    public RegistryEndpoint Endpoint { get; }
+    public abstract IReadOnlyList<PackageNameType> SupportedNameTypes { get; }
+    public abstract IReadOnlyList<VersionType> SupportedVersionTypes { get; }
+
+    protected static readonly JsonSerializerOptions JsonOptions;
+    protected HttpClient Http { get; }
+    protected RegistryEndpoint EndpointConfig { get; }
+    protected ILogger Logger { get; }
+    protected string BaseUrl { get; }   // normalized endpoint URL, no trailing '/'
+
+    protected Task<T?> GetJsonAsync<T>(
+        string requestUri, CancellationToken cancellationToken) where T : class;
+    protected Task<T?> GetJsonValueAsync<T>(
+        string requestUri, CancellationToken cancellationToken) where T : struct;
+    protected Task<HttpResponseMessage?> GetResponseAsync(
+        string requestUri, CancellationToken cancellationToken);
+    protected Task<HttpResponseMessage> PostJsonAsync<T>(
+        string requestUri, T content, CancellationToken cancellationToken);
+    protected Task<HttpResponseMessage> PutStreamAsync(
+        string requestUri, Stream stream, string contentType,
+        CancellationToken cancellationToken);
+    protected Task<HttpResponseMessage> PutContentAsync(
+        string requestUri, HttpContent content, CancellationToken cancellationToken);
+    protected static Task<PackageDownloadResult> CreateDownloadResultAsync(
+        HttpResponseMessage response, CancellationToken cancellationToken);
+
+    protected PackageListing WithSourceProvenance(PackageListing listing);
+    protected static string? ResolveVersion(
+        PackageDirective directive, PackageListing listing, VersionResolveOptions? options);
+    protected static string? ResolveExact(PackageListing listing, string requestedVersion);
+}
+```
+
+`SupportedNameTypes` and `SupportedVersionTypes` are abstract. The five
+`IRegistryClient` operations are virtual with inert defaults, so a derived
+client overrides only what its registry supports:
+
+| Member | Default when not overridden |
+|--------|----------------------------|
+| `SearchAsync` | empty result list |
+| `GetPackageListingAsync` | `null` |
+| `ResolveAsync` | `null` |
+| `DownloadAsync` | `null` |
+| `PublishAsync` | throws `NotSupportedException` |
+
+The protected helpers apply one error mapping for every derived client: HTTP
+404 becomes `null`, any other unsuccessful status becomes
+`HttpRequestException`, and an expired `HttpTimeout` becomes
+`RegistryResponseTimeoutException`. Headers are built per request message
+rather than on `HttpClient.DefaultRequestHeaders` — a client that defines
+default headers is rejected — so one `HttpClient` can be shared across
+registry clients. The user-agent is sent on every request, while
+`AuthHeaderValue` and `CustomHeaders` are sent only to the endpoint's own
+origin or a listed `TrustedHeaderOrigins` entry. GET redirects are followed
+manually up to `MaxRedirects` when the transport is redirect-controlled;
+credentialed requests and the POST/PUT helpers require such a transport and
+otherwise throw `InvalidOperationException` before network access.
+`WithSourceProvenance` stamps the credential-free provenance described under
+[PackageListing & PackageVersionInfo](#packagelisting--packageversioninfo)
+onto a listing before it is returned.
+
 ---
 
 ## Resolution
@@ -1668,6 +1859,43 @@ public class MyService(IFhirPackageManager packages)
 }
 ```
 
+### ServiceCollectionExtensions
+
+The static class that carries `AddFhirPackageManagement`.
+
+```csharp
+public static class ServiceCollectionExtensions
+{
+    public static IServiceCollection AddFhirPackageManagement(
+        this IServiceCollection services,
+        Action<FhirPackageManagerOptions>? configure = null);
+}
+```
+
+Every service is registered as a singleton with `TryAdd`, so an implementation
+already present in the collection is left in place:
+
+| Service | Registered implementation |
+|---------|--------------------------|
+| `IPackageCache` | `DiskPackageCache` at the configured `CachePath` |
+| `IHardenedPackageCache` | the same cache instance; a cache without the capability fails with `UnsupportedCacheCapability` |
+| `IRegistryClient` | the composite chain built by `RegistryClientFactory` from `Registries`, `IncludeCiBuilds`, and `IncludeHl7WebsiteFallback` |
+| `IVersionResolver` | `VersionResolver` |
+| `IDependencyResolver` | `DependencyResolver` |
+| `IPackageIndexer` | `PackageIndexer` |
+| `IFhirPackageManager` | `FhirPackageManager` |
+| `IHardenedFhirPackageManager` | the same manager instance; a manager without the capability fails with `UnsupportedManagerCapability` |
+| `IFhirPackageResourceManager` | the same manager instance; a manager without the capability throws `InvalidOperationException` |
+
+The method also registers the named `HttpClient` `"FhirPackages"` with
+automatic redirects disabled and `MaxRedirects` applied, so the manager it
+builds always has a redirect-controlled transport and therefore accepts
+`GitHubToken`. A `MemoryResourceCache` is created only when `ResourceCacheSize`
+is positive. Options are configured through
+`AddOptions<FhirPackageManagerOptions>()`; when a `FhirPackageManagerOptions`
+instance is already registered in the collection, that instance configures the
+manager instead of the one `configure` receives.
+
 ---
 
 ## Utilities
@@ -1719,3 +1947,119 @@ public static class DirectiveParser
     public static VersionType ClassifyVersion(string? version);
 }
 ```
+
+---
+
+## Public Surface Coverage
+
+This appendix records the disposition of every public type in `src/FhirPkg/` as
+of this release: each one is either documented by a section of this reference or
+deliberately left out of it with the reason stated. The list is derived from the
+source rather than maintained by hand, so the next audit is a re-run of one
+command from the repository root rather than a re-derivation:
+
+```powershell
+Get-ChildItem src\FhirPkg -Recurse -Filter *.cs -File |
+  Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } |
+  Select-String -Pattern '^\s*public\s+(?:[a-z]+\s+)*(class|record\s+struct|record|struct|interface|enum|delegate)\s+(\w+)'
+```
+
+The type name is capture group 2. The run behind this table returned **93**
+declarations across 61 files — 39 classes, 27 records, 17 enumerations, 9
+interfaces, and 1 record struct — with 93 distinct names, one per row below.
+
+| Type | Namespace/dir | Disposition |
+|------|---------------|-------------|
+| `CacheMetadata` | `FhirPkg.Cache` | Intentionally undocumented — cache metadata file model, surfaced only by `IPackageCache.GetMetadataAsync`, whose contract is stated in [§IPackageCache](#ipackagecache) |
+| `CacheMetadataEntry` | `FhirPkg.Cache` | Intentionally undocumented — per-package metadata entry, surfaced only by `IPackageCache.UpdateMetadataAsync`; its `ContentGeneration` rule is stated in [§IPackageCache](#ipackagecache) |
+| `CatalogEntry` | `FhirPkg.Models` | Documented → [§CatalogEntry](#catalogentry) |
+| `CheckSum` | `FhirPkg.Utilities` | Documented → [§CheckSum](#checksum) |
+| `CiBuildManifest` | `FhirPkg.Models` | Documented → [§CiBuildRecord & CiBuildManifest](#cibuildrecord--cibuildmanifest) |
+| `CiBuildRecord` | `FhirPkg.Models` | Documented → [§CiBuildRecord & CiBuildManifest](#cibuildrecord--cibuildmanifest) |
+| `ConflictResolutionStrategy` | `FhirPkg.Models` | Documented → [§ConflictResolutionStrategy](#conflictresolutionstrategy) |
+| `CorePackageType` | `FhirPkg.Models` | Documented → [§CorePackageType](#corepackagetype) |
+| `CorruptCacheBehavior` | `FhirPkg` | Documented → [§CorruptCacheBehavior](#corruptcachebehavior) |
+| `DependencyInstallationException` | `FhirPkg.Installation` | Documented → [§PackageInstallResult](#packageinstallresult) |
+| `DependencyResolutionFailure` | `FhirPkg.Models` | Documented → [§PackageClosure](#packageclosure) |
+| `DependencyResolutionFailureCode` | `FhirPkg.Models` | Documented → [§DependencyResolutionFailureCode](#dependencyresolutionfailurecode) |
+| `DependencyResolveOptions` | `FhirPkg.Resolution` | Documented → [§IDependencyResolver](#idependencyresolver) |
+| `DependencyResolver` | `FhirPkg.Resolution` | Intentionally undocumented — the concrete resolver registered by `AddFhirPackageManagement`; the documented contract is the interface, [§IDependencyResolver](#idependencyresolver) |
+| `DirectiveParser` | `FhirPkg.Resolution` | Documented → [§DirectiveParser](#directiveparser) |
+| `DiskPackageCache` | `FhirPkg.Cache` | Documented → [§DiskPackageCache](#diskpackagecache) |
+| `FhirCiBuildClient` | `FhirPkg.Registry` | Documented → [§Built-in Registry Clients](#built-in-registry-clients) |
+| `FhirNpmRegistryClient` | `FhirPkg.Registry` | Documented → [§Built-in Registry Clients](#built-in-registry-clients) |
+| `FhirPackageManager` | `FhirPkg` | Documented → [§Constructors (FhirPackageManager)](#constructors-fhirpackagemanager) |
+| `FhirPackageManagerOptions` | `FhirPkg` | Documented → [§FhirPackageManagerOptions](#fhirpackagemanageroptions) |
+| `FhirPackageManagerResourceExtensions` | `FhirPkg` | Documented → [§FhirPackageManagerResourceExtensions](#fhirpackagemanagerresourceextensions) |
+| `FhirPreReleaseType` | `FhirPkg.Models` | Documented → [§FhirPreReleaseType](#fhirprereleasetype) |
+| `FhirRelease` | `FhirPkg.Models` | Documented → [§FhirRelease](#fhirrelease) |
+| `FhirReleaseMapping` | `FhirPkg.Models` | Documented → [§FhirReleaseMapping](#fhirreleasemapping) |
+| `FhirSemVer` | `FhirPkg.Models` | Documented → [§FhirSemVer](#fhirsemver) |
+| `HardenedPackageCacheInspection` | `FhirPkg.Cache` | Documented → [§IHardenedPackageCache](#ihardenedpackagecache) |
+| `HardenedPackageCacheState` | `FhirPkg.Cache` | Documented → [§IHardenedPackageCache](#ihardenedpackagecache) |
+| `Hl7WebsiteClient` | `FhirPkg.Registry` | Documented → [§Built-in Registry Clients](#built-in-registry-clients) |
+| `IDependencyResolver` | `FhirPkg.Resolution` | Documented → [§IDependencyResolver](#idependencyresolver) |
+| `IFhirPackageManager` | `FhirPkg` | Documented → [§Core Interface — IFhirPackageManager](#core-interface--ifhirpackagemanager) |
+| `IFhirPackageResourceManager` | `FhirPkg` | Documented → [§Resource Capability — IFhirPackageResourceManager](#resource-capability--ifhirpackageresourcemanager) |
+| `IHardenedFhirPackageManager` | `FhirPkg` | Documented → [§Hardened Manager Sources](#hardened-manager-sources) |
+| `IHardenedPackageCache` | `FhirPkg.Cache` | Documented → [§IHardenedPackageCache](#ihardenedpackagecache) |
+| `IndexingOptions` | `FhirPkg.Indexing` | Documented → [§IPackageIndexer](#ipackageindexer) |
+| `IniParser` | `FhirPkg.Utilities` | Intentionally undocumented — implementation detail, not part of the supported contract |
+| `InstallCacheOptions` | `FhirPkg.Cache` | Documented → [§InstallCacheOptions](#installcacheoptions) |
+| `InstallOptions` | `FhirPkg` | Documented → [§InstallOptions](#installoptions) |
+| `IPackageCache` | `FhirPkg.Cache` | Documented → [§IPackageCache](#ipackagecache) |
+| `IPackageIndexer` | `FhirPkg.Indexing` | Documented → [§IPackageIndexer](#ipackageindexer) |
+| `IRegistryClient` | `FhirPkg.Registry` | Documented → [§IRegistryClient](#iregistryclient) |
+| `IVersionResolver` | `FhirPkg.Resolution` | Documented → [§IVersionResolver](#iversionresolver) |
+| `MemoryResourceCache` | `FhirPkg.Cache` | Documented → [§MemoryResourceCache](#memoryresourcecache) |
+| `NpmDistribution` | `FhirPkg.Models` | Documented → [§PackageListing & PackageVersionInfo](#packagelisting--packageversioninfo) |
+| `NpmRegistryClient` | `FhirPkg.Registry` | Documented → [§Built-in Registry Clients](#built-in-registry-clients) |
+| `NpmRepository` | `FhirPkg.Models` | Documented → [§PackageManifest](#packagemanifest) |
+| `PackageCacheKey` | `FhirPkg.Installation` | Intentionally undocumented — implementation detail, not part of the supported contract |
+| `PackageClosure` | `FhirPkg.Models` | Documented → [§PackageClosure](#packageclosure) |
+| `PackageDirective` | `FhirPkg.Models` | Documented → [§PackageDirective](#packagedirective) |
+| `PackageDownloadResult` | `FhirPkg.Models` | Intentionally undocumented — registry transport result returned only by `IRegistryClient.DownloadAsync` ([§IRegistryClient](#iregistryclient)); no `IFhirPackageManager` operation surfaces it |
+| `PackageFixups` | `FhirPkg.Utilities` | Intentionally undocumented — implementation detail, not part of the supported contract |
+| `PackageIndex` | `FhirPkg.Indexing` | Documented → [§PackageIndex & ResourceIndexEntry](#packageindex--resourceindexentry) |
+| `PackageIndexer` | `FhirPkg.Indexing` | Intentionally undocumented — the concrete indexer registered by `AddFhirPackageManagement`; the documented contract is the interface, [§IPackageIndexer](#ipackageindexer) |
+| `PackageInstallationIdentity` | `FhirPkg.Models` | Documented → [§PackageInstallationIdentity](#packageinstallationidentity) |
+| `PackageInstallDisposition` | `FhirPkg.Models` | Documented → [§PackageInstallDisposition](#packageinstalldisposition) |
+| `PackageInstallErrorCode` | `FhirPkg.Installation` | Documented → [§PackageInstallErrorCode](#packageinstallerrorcode) |
+| `PackageInstallException` | `FhirPkg.Installation` | Intentionally undocumented — the typed failure it carries is enumerated as [§PackageInstallErrorCode](#packageinstallerrorcode) and [§PackageInstallStage](#packageinstallstage), which is where callers branch |
+| `PackageInstallLimits` | `FhirPkg` | Intentionally undocumented — its defaults, per-call tightening rule, and `FHIRPKG_*` overrides are stated under [§PackageSourceInstallOptions](#packagesourceinstalloptions) |
+| `PackageInstallResult` | `FhirPkg.Models` | Documented → [§PackageInstallResult](#packageinstallresult) |
+| `PackageInstallStage` | `FhirPkg.Installation` | Documented → [§PackageInstallStage](#packageinstallstage) |
+| `PackageInstallStatus` | `FhirPkg.Models` | Documented → [§PackageInstallStatus](#packageinstallstatus) |
+| `PackageListing` | `FhirPkg.Models` | Documented → [§PackageListing & PackageVersionInfo](#packagelisting--packageversioninfo) |
+| `PackageManifest` | `FhirPkg.Models` | Documented → [§PackageManifest](#packagemanifest) |
+| `PackageNameType` | `FhirPkg.Models` | Documented → [§PackageNameType](#packagenametype) |
+| `PackageProgress` | `FhirPkg.Models` | Documented → [§PackageProgress](#packageprogress) |
+| `PackageProgressPhase` | `FhirPkg.Models` | Documented → [§PackageProgressPhase](#packageprogressphase) |
+| `PackageRecord` | `FhirPkg.Models` | Documented → [§PackageRecord](#packagerecord) |
+| `PackageReference` | `FhirPkg.Models` | Documented → [§PackageReference](#packagereference) |
+| `PackageSearchCriteria` | `FhirPkg.Models` | Documented → [§PackageSearchCriteria](#packagesearchcriteria) |
+| `PackageSourceInstallOptions` | `FhirPkg` | Documented → [§PackageSourceInstallOptions](#packagesourceinstalloptions) |
+| `PackageVersionInfo` | `FhirPkg.Models` | Documented → [§PackageListing & PackageVersionInfo](#packagelisting--packageversioninfo) |
+| `PublishResult` | `FhirPkg.Models` | Documented → [§PublishResult](#publishresult) |
+| `RedundantRegistryClient` | `FhirPkg.Registry` | Documented → [§Built-in Registry Clients](#built-in-registry-clients) |
+| `RegistryAttemptFailure` | `FhirPkg.Registry` | Documented → [§IRegistryClient](#iregistryclient) |
+| `RegistryClientBase` | `FhirPkg.Registry` | Documented → [§RegistryClientBase](#registryclientbase) |
+| `RegistryClientFactory` | `FhirPkg.Registry` | Intentionally undocumented — covered where it is required: `CreateClientForEndpoint` in [§RegistryEndpoint](#registryendpoint) and `BuildRegistryClient` in [§FhirPackageManagerOptions](#fhirpackagemanageroptions) |
+| `RegistryEndpoint` | `FhirPkg.Registry` | Documented → [§RegistryEndpoint](#registryendpoint) |
+| `RegistryFailureCategory` | `FhirPkg.Registry` | Documented → [§RegistryFailureCategory](#registryfailurecategory) |
+| `RegistryHttpTransport` | `FhirPkg.Registry` | Intentionally undocumented — the transport guarantee it carries is described where it is required, in [§RegistryEndpoint](#registryendpoint) and [§FhirPackageManagerOptions](#fhirpackagemanageroptions) |
+| `RegistryOperationException` | `FhirPkg.Registry` | Documented → [§IRegistryClient](#iregistryclient) |
+| `RegistryResponseTimeoutException` | `FhirPkg.Registry` | Intentionally undocumented — the `HttpTimeout` deadline that throws it is stated in [§IRegistryClient](#iregistryclient); it adds no members to `TimeoutException` |
+| `RegistryType` | `FhirPkg.Models` | Documented → [§RegistryType](#registrytype) |
+| `ResolvedDirective` | `FhirPkg.Models` | Documented → [§ResolvedDirective](#resolveddirective) |
+| `ResourceIndexEntry` | `FhirPkg.Indexing` | Documented → [§PackageIndex & ResourceIndexEntry](#packageindex--resourceindexentry) |
+| `ResourceInfo` | `FhirPkg.Indexing` | Documented → [§ResourceInfo & ResourceSearchCriteria](#resourceinfo--resourcesearchcriteria) |
+| `ResourceSearchCriteria` | `FhirPkg.Indexing` | Documented → [§ResourceInfo & ResourceSearchCriteria](#resourceinfo--resourcesearchcriteria) |
+| `RestoreOptions` | `FhirPkg` | Documented → [§RestoreOptions](#restoreoptions) |
+| `SafeMode` | `FhirPkg.Models` | Documented → [§SafeMode](#safemode) |
+| `ServiceCollectionExtensions` | `FhirPkg` | Documented → [§ServiceCollectionExtensions](#servicecollectionextensions) |
+| `TarballExtractor` | `FhirPkg.Cache` | Intentionally undocumented — implementation detail, not part of the supported contract |
+| `TempDirectory` | `FhirPkg.Utilities` | Intentionally undocumented — implementation detail, not part of the supported contract |
+| `VersionResolveOptions` | `FhirPkg` | Documented → [§VersionResolveOptions](#versionresolveoptions) |
+| `VersionResolver` | `FhirPkg.Resolution` | Intentionally undocumented — the concrete resolver registered by `AddFhirPackageManagement`; the documented contract is the interface, [§IVersionResolver](#iversionresolver) |
+| `VersionType` | `FhirPkg.Models` | Documented → [§VersionType](#versiontype) |

@@ -10,12 +10,23 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+## [2026.901.1609] - 2026-09-01
+
 ### Added
 - Added the tested `FhirPkg.Release` C# tool for validating release inputs,
   package and symbol contents, synchronized candidates, publication state, and
   published package provenance.
 - Restore output now lists every exact resolved package identity, including
   coexisting versions of the same package, in console and JSON formats.
+- Added `ResolvedDirective.ResolutionWarnings`, an additive, null-defaulted list
+  of non-fatal diagnostics describing how a package source was chosen. The CLI's
+  `resolve` command prints each warning, and `--json` emits them as a
+  `resolutionWarnings` array.
+- Added `FhirPackageManagerOptions.GitHubToken`, the CLI's `--github-token`
+  global option, and the `.fhir-pkg.json` `githubToken` key, which authenticate
+  the `api.github.com` repository lookups used when choosing the canonical
+  repository for a CI build. `null` — the default — keeps those lookups
+  unauthenticated and sends no `Authorization` header.
 
 ### Changed
 - Pack, qualify, publish, and independently verify `fhir-pkg-lib` and
@@ -25,6 +36,15 @@ qualification evidence) lives alongside this file under
   release tool.
 - Updated GitHub workflows to the Node 24-compatible `actions/checkout@v6` and
   `actions/setup-dotnet@v5`.
+- Relaxed the `global.json` SDK policy from `rollForward: disable` to
+  `latestFeature`, so building from source no longer requires the exact
+  `10.0.302` patch and any `10.0.3xx`-or-later SDK works. CI still installs and
+  resolves `10.0.302` exactly.
+- Audited the documentation set for currency, completeness, and correctness
+  ahead of this release: the CLI and SDK overviews now mirror their reference
+  documents and cover `--github-token` / `githubToken` / `GitHubToken`,
+  `docs/sdk-api-reference.md` carries a public-surface coverage table, and
+  `README.md`'s links resolve from the NuGet package page.
 
 ### Fixed
 - Fixed the deployment regression that could publish the SDK without the CLI.
@@ -35,6 +55,19 @@ qualification evidence) lives alongside this file under
   `?` remainder matching.
 - Preserved and installed every required exact package version and its transitive
   subgraph during recursive dependency resolution.
+- Fixed `@current` implementation-guide resolution selecting an arbitrary fork or
+  feature branch. A plain `@current` now resolves the canonical repository's
+  default build — chosen by a package-id prefix table, then a GitHub non-fork
+  check, then the oldest build — and takes its version and date from that
+  repository's `package.manifest.json`. Previously the most recent build from any
+  publisher won, which made `hl7.fhir.uv.subscriptions-backport@current` fail to
+  install outright and silently mislabelled roughly 139 other packages.
+- Fixed branch-qualified CI build URLs being collapsed to the default-branch
+  form. The winning record's branch is no longer discarded, so
+  `@current$branch` emits `.../branches/{branch}/package.tgz`.
+- Fixed CI build dates being ranked by a lexical string comparison across two
+  incompatible published formats. Dates are now parsed to instants before
+  comparison.
 
 ### Removed
 - Removed SDK and CLI project restore-lock APIs and options. Restore now always
