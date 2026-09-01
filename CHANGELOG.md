@@ -10,6 +10,8 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+## [2026.901.1609] - 2026-09-01
+
 ### Added
 - Added the tested `FhirPkg.Release` C# tool for validating release inputs,
   package and symbol contents, synchronized candidates, publication state, and
