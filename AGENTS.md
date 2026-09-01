@@ -237,9 +237,12 @@ dotnet run --project src/FhirPkg.Cli/FhirPkg.Cli.csproj --framework net10.0 -- -
 ```
 
 Everything after `--` is passed to the tool. Commands are `install`, `restore`,
-`list`, `remove`, `clean`, `search`, `info`, `resolve`, and `publish`; global
-options include `--package-cache-folder`, `-v|--verbose`, `-q|--quiet`,
-`--no-color`, and `--json`.
+`list`, `remove`, `clean`, `search`, `info`, `resolve`, and `publish`. Only two
+global options matter for a local run: `--package-cache-folder`, which the
+throwaway-cache rule below depends on, and `--json` for machine-readable
+output. The full option list is enumerated in
+[`docs/cli-reference.md`](docs/cli-reference.md#global-options) under
+`## Global Options`; this file does not restate it.
 
 Point the tool at a throwaway cache whenever you exercise install/remove/clean
 so a local run cannot disturb the real package cache:
@@ -259,12 +262,10 @@ configuration files are required for the commands above.
 There is **no authoritative style config file** — see `## Lint / format` above.
 The rules below are the whole of it, and review is what enforces them.
 
-- **Every `.cs` file starts with the license header** — all 205 source files do:
-
-  ```csharp
-  // Copyright (c) Gino Canessa. Licensed under the MIT License.
-  ```
-
+- **Every `.cs` file starts with a license header** whose first line begins
+  `// Copyright (c) Gino Canessa.`. More than one wording of that line is in
+  use across the tree, so a new file takes the header of the files around it
+  rather than a normalized one.
 - **File-scoped namespaces** everywhere (`namespace FhirPkg.Cache;`). There are
   zero block-scoped namespaces in the repo.
 - **Explicit types, not `var`.** This is a real convention here: `var` appears
