@@ -69,6 +69,7 @@ fhir-pkg clean --force
 fhir-pkg publish ./my-package.tgz --registry https://my-registry.example.com --auth "Bearer token"
 ```
 
+<!-- mirror-of: docs/cli-reference.md#global-options -->
 ## Global Options
 
 These options apply to **every** command:
@@ -80,6 +81,7 @@ These options apply to **every** command:
 | `--quiet` | `-q` | bool | `false` | Suppress all non-essential output |
 | `--no-color` | — | bool | `NO_COLOR` env var | Disable colored output |
 | `--json` | — | bool | `FHIR_PKG_JSON` env var | Output results as JSON |
+| `--github-token` | — | string | `githubToken` config key, else unauthenticated | GitHub token for the `api.github.com` repository lookups behind canonical CI build selection |
 | `--help` | `-h` | — | — | Show help |
 | `--version` | — | — | — | Show version |
 
@@ -135,6 +137,7 @@ conflict-policy-selected, name-keyed lookup for compatibility.
 > resolution is disabled with `install --no-ci` or `"includeCiBuilds": false` in
 > `.fhir-pkg.json` — there is no `FHIR_PKG_NO_CI` variable.
 
+<!-- mirror-of: docs/cli-reference.md#configuration-file -->
 ## Configuration File
 
 `fhir-pkg` looks for an optional `.fhir-pkg.json` configuration file in the
@@ -154,6 +157,7 @@ Example `.fhir-pkg.json`:
   "httpTimeout": 60,
   "includeCiBuilds": false,
   "verifyChecksums": true,
+  "githubToken": "ghp_example",
   "registries": [
     {
       "url": "https://my-registry.example.com",
