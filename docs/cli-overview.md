@@ -81,7 +81,7 @@ These options apply to **every** command:
 | `--quiet` | `-q` | bool | `false` | Suppress all non-essential output |
 | `--no-color` | — | bool | `NO_COLOR` env var | Disable colored output |
 | `--json` | — | bool | `FHIR_PKG_JSON` env var | Output results as JSON |
-| `--github-token` | — | string | `githubToken` config key, else unauthenticated | GitHub token for the `api.github.com` repository lookups behind canonical CI build selection |
+| `--github-token` | — | string | `githubToken` config key, else unauthenticated | GitHub token used **only** for the `api.github.com` repository lookups behind canonical CI build repository selection. Never sent to a package registry, and never echoed in output. |
 | `--help` | `-h` | — | — | Show help |
 | `--version` | — | — | — | Show version |
 
@@ -167,6 +167,14 @@ Example `.fhir-pkg.json`:
   ]
 }
 ```
+
+`githubToken` supplies the GitHub token for the `api.github.com` repository
+lookups behind canonical CI build selection. It is overridden by
+`--github-token`; omit it to keep those lookups unauthenticated. As
+[Global Options](#global-options) above states, that token is used only for
+those lookups — never sent to a package registry, and never echoed in output.
+See [Configuration File](cli-reference.md#configuration-file) for the full
+field-by-field schema.
 
 ## Exit Codes
 
