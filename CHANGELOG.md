@@ -38,6 +38,11 @@ qualification evidence) lives alongside this file under
   `latestFeature`, so building from source no longer requires the exact
   `10.0.302` patch and any `10.0.3xx`-or-later SDK works. CI still installs and
   resolves `10.0.302` exactly.
+- Audited the documentation set for currency, completeness, and correctness
+  ahead of this release: the CLI and SDK overviews now mirror their reference
+  documents and cover `--github-token` / `githubToken` / `GitHubToken`,
+  `docs/sdk-api-reference.md` carries a public-surface coverage table, and
+  `README.md`'s links resolve from the NuGet package page.
 
 ### Fixed
 - Fixed the deployment regression that could publish the SDK without the CLI.
