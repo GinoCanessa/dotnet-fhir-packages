@@ -67,6 +67,15 @@ public class FhirCiBuildClientPolicyTests
         ]
         """;
 
+    private const string ContestedManifest = """
+        {
+          "name": "example.ig.core",
+          "version": "0.2.0",
+          "date": "20260101000000",
+          "fhirVersion": ["4.0.1"]
+        }
+        """;
+
     private const string ReleaseFilteredQas = """
         [
           {
@@ -243,6 +252,43 @@ public class FhirCiBuildClientPolicyTests
     }
 
     [Fact]
+    public async Task ResolveAsync_NonForkGitHubRepository_SelectedViaTierTwo()
+    {
+        // No prefix rule names example.ig.core, so tier 2 decides. The non-fork sits on
+        // the *newer* organization, so the tarball URL itself proves tier 2 fired:
+        // tier 3 would have taken first-org's older build.
+        RoutingHandler handler = new()
+        {
+            Qas = ContestedQas,
+            GitHubRepositories =
+            {
+                ["first-org/example-ig"] = """{"fork": true, "parent": {"full_name": "second-org/example-ig"}}""",
+                ["second-org/example-ig"] = """{"fork": false}""",
+            },
+            Manifests =
+            {
+                ["second-org/example-ig"] = ContestedManifest,
+            },
+        };
+
+        FhirCiBuildClient client = CreateClient(handler);
+
+        ResolvedDirective? result = await client.ResolveAsync(
+            PackageDirective.Parse("example.ig.core#current"),
+            options: null,
+            TestContext.Current.CancellationToken);
+
+        result.ShouldNotBeNull();
+        result.TarballUri.ShouldBe(
+            new Uri("https://build.fhir.org/ig/second-org/example-ig/package.tgz"));
+        result.Reference.Version.ShouldBe("0.2.0");
+        result.ResolutionWarnings.ShouldBeNull();
+
+        handler.GitHubRequests.Select(u => u.AbsolutePath).ShouldBe(
+            ["/repos/first-org/example-ig", "/repos/second-org/example-ig"]);
+    }
+
+    [Fact]
     public async Task ResolveAsync_ReleaseFilterRemovesCanonicalOrganization_ResolvesForkAndWarns()
     {
         RoutingHandler handler = new() { Qas = ReleaseFilteredQas };
@@ -330,6 +376,8 @@ public class FhirCiBuildClientPolicyTests
 
         public HttpStatusCode GitHubStatusCode { get; init; } = HttpStatusCode.NotFound;
 
+        public Dictionary<string, string> GitHubRepositories { get; init; } = [];
+
         public int QasRequestCount { get; private set; }
 
         public List<Uri> GitHubRequests { get; } = [];
@@ -343,7 +391,12 @@ public class FhirCiBuildClientPolicyTests
             if (string.Equals(uri.Host, "api.github.com", StringComparison.OrdinalIgnoreCase))
             {
                 GitHubRequests.Add(uri);
-                return Task.FromResult(Respond(GitHubStatusCode, "{\"message\":\"Not Found\"}"));
+
+                return GitHubRepositories.TryGetValue(
+                    uri.AbsolutePath["/repos/".Length..],
+                    out string? payload)
+                    ? Task.FromResult(Respond(HttpStatusCode.OK, payload))
+                    : Task.FromResult(Respond(GitHubStatusCode, "{\"message\":\"Not Found\"}"));
             }
 
             if (uri.AbsolutePath.Equals("/ig/qas.json", StringComparison.OrdinalIgnoreCase))
