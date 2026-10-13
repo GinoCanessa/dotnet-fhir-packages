@@ -322,9 +322,18 @@ public static class TarballExtractor
     }
 
     /// <summary>
-    /// Validates an extracted package layout and normalizes an accepted legacy
-    /// root layout into the standard <c>package/</c> directory.
+    /// Validates an extracted standard or legacy package layout and normalizes
+    /// accepted root content into the standard <c>package/</c> directory.
     /// </summary>
+    /// <remarks>
+    /// Standard layouts require one <c>package/package.json</c> manifest and may
+    /// include only the optional lowercase <c>openapi/</c> and <c>other/</c> sibling
+    /// directories. All ancillary destinations beneath <c>package/</c> are checked
+    /// before any moves; occupied destinations are rejected without merging.
+    /// Unambiguous legacy root layouts are also normalized beneath <c>package/</c>.
+    /// This is an in-place, layout-only operation: it does not validate package
+    /// identity or provide transactional rollback if a filesystem operation fails.
+    /// </remarks>
     /// <param name="extractedPath">The root directory of the extracted package.</param>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="extractedPath"/> is <c>null</c>.</exception>
     public static void NormalizePackageStructure(string extractedPath)

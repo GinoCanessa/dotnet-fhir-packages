@@ -445,21 +445,50 @@ internal static class PackageArchiveLayoutValidator
 
         if (hasStandardManifest)
         {
-            bool allContentIsStandard = inventory.Nodes.All(node =>
-                string.Equals(
-                    node.TopLevelCanonicalSegment,
-                    PackageDirectoryName,
-                    StringComparison.Ordinal));
-            if (!allContentIsStandard || manifestNodes.Count != 1)
+            List<PackageArchiveInventoryNode> rootNodes = inventory.Nodes
+                .Where(node => node.Depth == 1)
+                .ToList();
+            bool allRootsAreSupported = rootNodes.All(node =>
+                node.Kind == PackageArchiveEntryKind.Directory
+                && (string.Equals(
+                        node.CanonicalSegment,
+                        PackageDirectoryName,
+                        StringComparison.Ordinal)
+                    || string.Equals(
+                        node.CanonicalSegment,
+                        "openapi",
+                        StringComparison.Ordinal)
+                    || string.Equals(
+                        node.CanonicalSegment,
+                        "other",
+                        StringComparison.Ordinal)));
+            if (!allRootsAreSupported || manifestNodes.Count != 1)
             {
                 throw InvalidLayout(
                     directive,
-                    "Standard package archives must contain only one package/ tree and manifest.");
+                    "Standard package archives must contain one package/ tree and manifest, with only optional openapi/ and other/ directory trees.");
             }
 
-            string contentPath = Path.Combine(
-                extractedPath,
-                PackageDirectoryName);
+            List<PackageArchiveInventoryNode> ancillaryRoots = rootNodes
+                .Where(node => !string.Equals(
+                    node.CanonicalSegment,
+                    PackageDirectoryName,
+                    StringComparison.Ordinal))
+                .ToList();
+            PackageArchiveInventoryNode packageNode = manifestNodes[0].Parent!;
+            foreach (PackageArchiveInventoryNode ancillaryRoot in ancillaryRoots)
+            {
+                if (packageNode.TryGetChild(ancillaryRoot.CanonicalSegment, out _))
+                {
+                    throw InvalidLayout(
+                        directive,
+                        $"Package archive ancillary normalization destination 'package/{ancillaryRoot.CanonicalSegment}' is already occupied.");
+                }
+            }
+
+            string contentPath = ancillaryRoots.Count > 0
+                ? NormalizeRootEntries(extractedPath)
+                : Path.Combine(extractedPath, PackageDirectoryName);
             return new PackageArchiveLayoutResult(
                 PackageArchiveLayout.Standard,
                 contentPath,
@@ -476,7 +505,7 @@ internal static class PackageArchiveLayoutValidator
                     "Legacy package archives must not contain a package/ subtree or second manifest.");
             }
 
-            string contentPath = NormalizeLegacyLayout(extractedPath);
+            string contentPath = NormalizeRootEntries(extractedPath);
             return new PackageArchiveLayoutResult(
                 PackageArchiveLayout.Legacy,
                 contentPath,
@@ -501,7 +530,7 @@ internal static class PackageArchiveLayoutValidator
             ManifestFileName,
             StringComparison.Ordinal);
 
-    private static string NormalizeLegacyLayout(string extractedPath)
+    private static string NormalizeRootEntries(string extractedPath)
     {
         string contentPath = Path.Combine(
             extractedPath,

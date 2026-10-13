@@ -10,6 +10,11 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+### Fixed
+- Restored installation of the `hl7.fhir.r4.core#4.0.1` archive variant by
+  safely normalizing only the supported optional lowercase `openapi/` and
+  `other/` roots under `package/`, without relaxing validation.
+
 ## [2026.901.1609] - 2026-09-01
 
 ### Added

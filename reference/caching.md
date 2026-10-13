@@ -172,11 +172,27 @@ sequenceDiagram
 
 ### Package Normalization
 
-Standard archives must contain all materialized content under `package/` and
-exactly one regular `package/package.json`. A narrowly defined legacy layout is
-accepted only when there is one root `package.json`, no `package/` subtree or
-wrapper directory, and no mixed/second manifest. Legacy normalization occurs
-only after the complete archive shape has passed validation.
+Standard incoming archives must contain exactly one regular
+`package/package.json`. Content normally resides under `package/`, but optional
+lowercase `openapi/` and `other/` directory trees may also appear beside it.
+These root names are exact and case-sensitive; directories implied by their
+file paths are supported without explicit directory entries. Arbitrary sibling
+roots, root files, and additional manifests are not accepted.
+
+Only after the complete archive passes validation and every ancillary
+destination is checked for occupancy are these trees relocated to
+`package/openapi/` and `package/other/`. Existing destinations conflict even
+when empty or spelled with different case; directories are never merged and
+files are never overwritten. Manifest, resource, and ancillary payload bytes
+are preserved without rewriting content or references. Relocation does not
+guarantee that ancillary cross-tree relative links retain their original
+meaning.
+
+All installed content still resides under `package/`. The narrowly defined
+legacy layout remains supported only when there is one root `package.json`,
+no `package/` subtree or wrapper directory, and no mixed/second manifest.
+Legacy normalization also occurs only after the complete archive shape has
+passed validation.
 
 ### Index Generation
 
