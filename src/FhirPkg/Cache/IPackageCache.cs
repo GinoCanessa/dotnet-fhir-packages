@@ -101,15 +101,17 @@ public interface IPackageCache : IDisposable
 
     /// <summary>
     /// Installs a package from a tarball stream into the cache.
-    /// Performs atomic extraction via a temporary directory, normalizes the package structure,
-    /// and moves the result to the final cache location.
+    /// Validates content in a temporary directory and atomically moves the result
+    /// to the final cache location. Standard archives retain their distributed
+    /// layout; legacy root contents are wrapped beneath <c>package/</c> unless
+    /// <see cref="InstallCacheOptions.Unmodified"/> is enabled.
     /// </summary>
     /// <param name="reference">The package identity (name and version) to install.</param>
     /// <param name="tarballStream">
     /// A readable stream containing the .tgz tarball. The stream is consumed from
     /// its current position and is left open.
     /// </param>
-    /// <param name="options">Optional installation options (overwrite, checksum verification).</param>
+    /// <param name="options">Optional installation options (overwrite, checksum verification, layout preservation).</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A <see cref="PackageRecord"/> for the newly installed package.</returns>
     /// <exception cref="InvalidOperationException">Thrown when the package is already installed and overwrite is not enabled.</exception>
@@ -158,13 +160,17 @@ public interface IPackageCache : IDisposable
     /// Gets the text content of a file within a cached package.
     /// </summary>
     /// <param name="reference">The package identity.</param>
-    /// <param name="relativePath">Path relative to the package/ content directory.</param>
+    /// <param name="relativePath">
+    /// Path relative to the selected content directory, which may be the identity
+    /// root for preserved root-layout packages. Parent traversal is not allowed.
+    /// </param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The file content as a string, or <c>null</c> if the file or package does not exist.</returns>
     Task<string?> GetFileContentAsync(PackageReference reference, string relativePath, CancellationToken ct = default);
 
     /// <summary>
-    /// Gets the content folder path (package/) for a cached package.
+    /// Gets the selected content folder path for a cached package: normally
+    /// <c>package/</c>, or the identity root for a preserved root-layout package.
     /// Returns <c>null</c> if the package is not installed.
     /// </summary>
     /// <param name="reference">The package identity.</param>
@@ -198,6 +204,17 @@ public class InstallCacheOptions
     /// If <c>false</c> (default), throws if the package is already installed.
     /// </summary>
     public bool OverwriteExisting { get; set; }
+
+    /// <summary>
+    /// If <c>true</c>, preserves legacy root-layout contents at the cache identity
+    /// root instead of wrapping the complete archive beneath <c>package/</c>.
+    /// Defaults to <c>false</c>. Applies to installation and
+    /// <see cref="IHardenedPackageCache.ImportAsync"/> for this invocation only;
+    /// no mode is stored in the cache. Standard archives retain their distributed
+    /// layout in either mode. Existing cache hits are not reconstructed; use
+    /// <see cref="OverwriteExisting"/> to reinstall from the source.
+    /// </summary>
+    public bool Unmodified { get; set; }
 
     /// <summary>
     /// If <c>true</c> (default), verifies the SHA-1 checksum of the tarball against
@@ -257,6 +274,8 @@ public class InstallCacheOptions
     /// <summary>
     /// When <c>true</c>, a mutable alias whose acquired archive SHA-256 matches
     /// the recorded archive may refresh metadata without replacing content.
+    /// This shortcut is disabled when <see cref="Unmodified"/> is enabled or
+    /// ordinary replacement must wrap an existing preserved root layout.
     /// </summary>
     public bool SkipIfArchiveUnchanged { get; set; }
 

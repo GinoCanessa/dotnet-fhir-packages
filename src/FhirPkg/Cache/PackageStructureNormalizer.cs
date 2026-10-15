@@ -9,6 +9,32 @@ internal static class PackageStructureNormalizer
     private const string PackageDirectoryName = "package";
     private const string ManifestFileName = "package.json";
 
+    internal static void WrapLegacyRoot(
+        string extractedPath,
+        IPackageCacheFileOperations fileOperations,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(extractedPath);
+        ArgumentNullException.ThrowIfNull(fileOperations);
+
+        string stagingPath = Path.GetFullPath(extractedPath);
+        string siblingPath = Path.Combine(
+            Path.GetDirectoryName(stagingPath)!,
+            $"legacy-{Guid.NewGuid():N}");
+
+        // Keep the complete tree together, including any incidental package entry.
+        // The final staging path must remain expanded for transaction recovery.
+        cancellationToken.ThrowIfCancellationRequested();
+        fileOperations.MoveDirectory(stagingPath, siblingPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        fileOperations.CreateDirectory(stagingPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        fileOperations.MoveDirectory(
+            siblingPath,
+            Path.Combine(stagingPath, PackageDirectoryName));
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
     internal static PackageArchiveLayoutResult ValidateAndNormalize(
         string extractedPath,
         PackageArchiveInventory inventory,

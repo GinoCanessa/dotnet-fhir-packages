@@ -35,12 +35,14 @@ internal sealed class PackageCacheValidator
         if (ancestorFailure is not null)
             return ancestorFailure;
 
-        PackageCacheInspection? shapeFailure = InspectShape(cacheKey, targetPath);
+        PackageCacheInspection? shapeFailure = InspectShape(
+            cacheKey,
+            targetPath,
+            out string contentPath,
+            out string manifestPath);
         if (shapeFailure is not null)
             return shapeFailure;
 
-        string contentPath = Path.Combine(targetPath, "package");
-        string manifestPath = Path.Combine(contentPath, "package.json");
         try
         {
             using FileStream stream =
@@ -142,12 +144,14 @@ internal sealed class PackageCacheValidator
         if (ancestorFailure is not null)
             return ancestorFailure;
 
-        PackageCacheInspection? shapeFailure = InspectShape(cacheKey, targetPath);
+        PackageCacheInspection? shapeFailure = InspectShape(
+            cacheKey,
+            targetPath,
+            out string contentPath,
+            out string manifestPath);
         if (shapeFailure is not null)
             return shapeFailure;
 
-        string contentPath = Path.Combine(targetPath, "package");
-        string manifestPath = Path.Combine(contentPath, "package.json");
         try
         {
             await using FileStream stream =
@@ -239,8 +243,12 @@ internal sealed class PackageCacheValidator
 
     private static PackageCacheInspection? InspectShape(
         PackageCacheKey cacheKey,
-        string targetPath)
+        string targetPath,
+        out string contentPath,
+        out string manifestPath)
     {
+        contentPath = Path.Combine(targetPath, "package");
+        manifestPath = Path.Combine(contentPath, "package.json");
         FileAttributes targetAttributes;
         try
         {
@@ -285,7 +293,37 @@ internal sealed class PackageCacheValidator
                 "The cache target is not a regular directory.");
         }
 
-        string contentPath = Path.Combine(targetPath, "package");
+        try
+        {
+            // Without an exact root candidate, retain standard-only cache
+            // compatibility, including the host filesystem's case behavior.
+            // With one, incidental package entries must not redirect root content.
+            if (HasExactManifestCandidate(targetPath)
+                && !HasExactStandardManifestCandidate(targetPath))
+            {
+                contentPath = targetPath;
+                manifestPath = Path.Combine(targetPath, "package.json");
+            }
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            return Corrupt(
+                cacheKey,
+                targetPath,
+                contentPath,
+                manifestPath,
+                exception.Message);
+        }
+        catch (IOException exception)
+        {
+            return Corrupt(
+                cacheKey,
+                targetPath,
+                contentPath,
+                manifestPath,
+                exception.Message);
+        }
+
         PackageCacheInspection? contentFailure = InspectRequiredPath(
             cacheKey,
             targetPath,
@@ -294,12 +332,44 @@ internal sealed class PackageCacheValidator
         if (contentFailure is not null)
             return contentFailure;
 
-        string manifestPath = Path.Combine(contentPath, "package.json");
         return InspectRequiredPath(
             cacheKey,
             targetPath,
             manifestPath,
             expectDirectory: false);
+    }
+
+    private static bool HasExactStandardManifestCandidate(string targetPath) =>
+        TryGetExactChildAttributes(targetPath, "package", out FileAttributes attributes)
+        && attributes.HasFlag(FileAttributes.Directory)
+        && !attributes.HasFlag(FileAttributes.ReparsePoint)
+        && HasExactManifestCandidate(Path.Combine(targetPath, "package"));
+
+    private static bool HasExactManifestCandidate(string contentPath) =>
+        TryGetExactChildAttributes(contentPath, "package.json", out FileAttributes attributes)
+        && !attributes.HasFlag(FileAttributes.Directory)
+        && !attributes.HasFlag(FileAttributes.ReparsePoint)
+        && !attributes.HasFlag(FileAttributes.Device);
+
+    private static bool TryGetExactChildAttributes(
+        string parentPath,
+        string name,
+        out FileAttributes attributes)
+    {
+        foreach (string path in Directory.EnumerateFileSystemEntries(
+            parentPath,
+            name,
+            SearchOption.TopDirectoryOnly))
+        {
+            if (string.Equals(Path.GetFileName(path), name, StringComparison.Ordinal))
+            {
+                attributes = File.GetAttributes(path);
+                return true;
+            }
+        }
+
+        attributes = default;
+        return false;
     }
 
     private PackageCacheInspection? InspectTargetAncestors(

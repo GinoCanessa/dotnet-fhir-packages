@@ -931,18 +931,12 @@ public sealed class HardenedInstallationIntegrationTests
         {
             files.Keys.Any(path => path.StartsWith(root + "/", StringComparison.Ordinal))
                 .ShouldBeTrue($"The retained {root}/ tree must contain payloads.");
-            string destination = "package/" + root;
-            allPaths.Any(path =>
-                string.Equals(path, destination, StringComparison.OrdinalIgnoreCase)
-                || path.StartsWith(destination + "/", StringComparison.OrdinalIgnoreCase))
-                .ShouldBeFalse($"Ancillary destination {destination} must be unoccupied.");
         }
 
         TestContext.Current.TestOutputHelper?.WriteLine(
             $"Inspected complete inventory: {entryCount} entries, {files.Count} files, " +
             $"{files.Values.Sum(bytes => bytes.LongLength)} expanded bytes; " +
-            $"roots: {string.Join(", ", expectedRoots)}; one exact manifest; " +
-            "all prospective ancillary destinations unoccupied.");
+            $"roots: {string.Join(", ", expectedRoots)}; one exact manifest.");
         return new CoreArchiveInventory(files, directories);
     }
 
@@ -956,16 +950,12 @@ public sealed class HardenedInstallationIntegrationTests
         record.Manifest.Version.ShouldBe(s_coreReference.Version);
         record.DirectoryPath.ShouldBe(Path.Combine(cachePath, s_coreReference.FhirDirective));
         record.ContentPath.ShouldBe(Path.Combine(record.DirectoryPath, "package"));
-        Directory.EnumerateFileSystemEntries(record.DirectoryPath)
-            .Select(Path.GetFileName).ShouldHaveSingleItem().ShouldBe("package");
         record.SizeBytes.ShouldBe(inventory.Files.Values.Sum(bytes => bytes.LongLength));
 
-        foreach (string directory in inventory.Directories)
-        {
-            Directory.Exists(Path.Combine(
-                record.DirectoryPath,
-                NormalizeCoreArchivePath(directory))).ShouldBeTrue(directory);
-        }
+        Directory.EnumerateDirectories(record.DirectoryPath, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(record.DirectoryPath, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(inventory.Directories.OrderBy(path => path, StringComparer.Ordinal));
 
         foreach (KeyValuePair<string, byte[]> file in inventory.Files)
         {
@@ -976,13 +966,13 @@ public sealed class HardenedInstallationIntegrationTests
             }
 
             byte[] installedBytes = await File.ReadAllBytesAsync(
-                Path.Combine(record.DirectoryPath, NormalizeCoreArchivePath(file.Key)),
+                Path.Combine(record.DirectoryPath, file.Key),
                 TestContext.Current.CancellationToken);
             installedBytes.SequenceEqual(file.Value).ShouldBeTrue(
                 $"Original payload changed: {file.Key}");
         }
 
-        string[] expectedFiles = inventory.Files.Keys.Select(NormalizeCoreArchivePath)
+        string[] expectedFiles = inventory.Files.Keys
             .Append("package/.index.json")
             .Distinct(StringComparer.Ordinal)
             .OrderBy(path => path, StringComparer.Ordinal)
@@ -1072,11 +1062,6 @@ public sealed class HardenedInstallationIntegrationTests
             || normalized.StartsWith("package/openapi/", StringComparison.OrdinalIgnoreCase)
             || normalized.StartsWith("package/other/", StringComparison.OrdinalIgnoreCase);
     }
-
-    private static string NormalizeCoreArchivePath(string path) =>
-        path == "package" || path.StartsWith("package/", StringComparison.Ordinal)
-            ? path
-            : "package/" + path;
 
     private sealed record CoreArchiveInventory(
         IReadOnlyDictionary<string, byte[]> Files,

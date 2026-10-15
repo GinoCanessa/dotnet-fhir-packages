@@ -7,8 +7,8 @@ using FhirPkg.Installation;
 namespace FhirPkg.Cache;
 
 /// <summary>
-/// Extracts .tgz (gzip-compressed tar) package archives and normalizes
-/// the resulting directory structure for FHIR package cache storage.
+/// Extracts .tgz (gzip-compressed tar) package archives and provides an explicit
+/// compatibility transformation for extracted package structures.
 /// </summary>
 /// <remarks>
 /// FHIR packages are distributed as npm-style .tgz tarballs. The expected
@@ -16,6 +16,8 @@ namespace FhirPkg.Cache;
 /// all resource files and the package.json manifest.
 /// <see cref="NormalizePackageStructure"/> accepts that standard layout or one
 /// unambiguous legacy root layout and rejects all other shapes.
+/// Cache installation uses a separate content-location and layout-preservation
+/// policy rather than this explicitly requested compatibility transformation.
 /// </remarks>
 public static class TarballExtractor
 {
@@ -353,6 +355,11 @@ public static class TarballExtractor
             directive: null);
     }
 
+    /// <summary>
+    /// Retains the compatibility transformation and original-layout result used
+    /// by publish identity discovery and standard-only NPM publication validation.
+    /// Cache installation and import use the read-only content locator instead.
+    /// </summary>
     internal static PackageArchiveLayoutResult ValidateAndNormalizePackageStructure(
         string extractedPath,
         PackageArchiveInventory inventory,
