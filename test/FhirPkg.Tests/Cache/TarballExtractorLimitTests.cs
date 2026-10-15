@@ -7,6 +7,7 @@ using System.Text;
 using FhirPkg.Cache;
 using FhirPkg.Installation;
 using FhirPkg.Models;
+using FhirPkg.Tests.Support;
 using Shouldly;
 using Xunit;
 
@@ -54,6 +55,216 @@ public class TarballExtractorLimitTests : IDisposable
         metrics.MaximumDepth.ShouldBe(2);
         metrics.MetadataBytes.ShouldBeGreaterThan(0);
         metrics.MetadataEntryCount.ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ExtractAsync_UnicodeNamesAndBytes_ArePreserved(
+        bool explicitParent,
+        bool useBackslashes)
+    {
+        const string directoryName = "soUrce-e\u0301";
+        const string emptyDirectoryName = "empty-e\u0301";
+        const string fileName = "cafe\u0301-\u0394-\u65e5\U0001f600.bin";
+        const string otherFileName = "résumé-\u0958.txt";
+        byte[] content = [0, 255, 128, 13, 10, 1, 2, 3];
+        byte[] otherContent = Encoding.UTF8.GetBytes("Unicode café \u65e5\U0001f600");
+        List<ArbitraryTarEntry> entries =
+        [
+            ArbitraryTarBuilder.Directory($"package/{emptyDirectoryName}/"),
+            ArbitraryTarBuilder.File($"package/{directoryName}/{fileName}", content),
+            ArbitraryTarBuilder.File($"package/{otherFileName}", otherContent)
+        ];
+        if (explicitParent)
+            entries.Insert(0, ArbitraryTarBuilder.Directory($"package/{directoryName}/"));
+
+        ArbitraryTarEntry[] archiveEntries = entries.Select(entry => useBackslashes
+            ? entry with { Name = entry.Name.Replace('/', '\\') }
+            : entry).ToArray();
+        using MemoryStream archive = ArbitraryTarBuilder.Create(archiveEntries);
+        string destination = GetDestination();
+
+        await TarballExtractor.ExtractAsync(
+            archive,
+            destination,
+            CreateLimits(),
+            directive: null,
+            TestContext.Current.CancellationToken);
+
+        Dictionary<string, byte[]> expectedFiles = new Dictionary<string, byte[]>(
+            StringComparer.Ordinal)
+        {
+            [$"package/{directoryName}/{fileName}"] = content,
+            [$"package/{otherFileName}"] = otherContent
+        };
+        string[] actualFiles = Directory.EnumerateFiles(
+            destination,
+            "*",
+            SearchOption.AllDirectories).ToArray();
+        actualFiles
+            .Select(path => Path.GetRelativePath(destination, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(expectedFiles.Keys.OrderBy(path => path, StringComparer.Ordinal));
+        string[] expectedDirectories =
+        [
+            "package",
+            $"package/{directoryName}",
+            $"package/{emptyDirectoryName}"
+        ];
+        Directory.EnumerateDirectories(destination, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(destination, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(expectedDirectories.OrderBy(path => path, StringComparer.Ordinal));
+        foreach (string actualFile in actualFiles)
+        {
+            string relativePath = Path.GetRelativePath(destination, actualFile).Replace('\\', '/');
+            (await File.ReadAllBytesAsync(
+                actualFile,
+                TestContext.Current.CancellationToken)).ShouldBe(expectedFiles[relativePath]);
+        }
+    }
+
+    [Theory]
+    [InlineData("a", 255, "", 255)]
+    [InlineData("é", 127, "a", 128)]
+    [InlineData("e\u0301", 85, "", 170)]
+    public async Task ExtractAsync_ExactComponentAtPortableLimit_WritesUnchanged(
+        string repeatedText,
+        int repeatCount,
+        string suffix,
+        int expectedUnits)
+    {
+        string component = string.Concat(Enumerable.Repeat(repeatedText, repeatCount)) + suffix;
+        component.Length.ShouldBe(expectedUnits);
+        Encoding.UTF8.GetByteCount(component).ShouldBe(255);
+        string entryName = $"folder/{component}";
+        byte[] content = [0, 128, 255];
+        using MemoryStream archive = CreateArchive((entryName, content));
+        PackageInstallLimits limits = CreateLimits();
+        limits.MaxArchivePathLength = entryName.Length;
+        string destination = GetDestination();
+
+        ArchiveExtractionMetrics metrics = await TarballExtractor.ExtractAsync(
+            archive,
+            destination,
+            limits,
+            directive: null,
+            TestContext.Current.CancellationToken);
+
+        string actualFile = Directory.EnumerateFiles(
+            destination,
+            "*",
+            SearchOption.AllDirectories).Single();
+        Path.GetRelativePath(destination, actualFile).Replace('\\', '/').ShouldBe(entryName);
+        (await File.ReadAllBytesAsync(
+            actualFile,
+            TestContext.Current.CancellationToken)).ShouldBe(content);
+        metrics.MaximumPathLength.ShouldBe(entryName.Length);
+    }
+
+    [Theory]
+    [InlineData("a", 256)]
+    [InlineData("é", 128)]
+    public async Task ExtractAsync_ComponentOneOverPortableLimit_RejectsBeforeTargetWrite(
+        string repeatedText,
+        int repeatCount)
+    {
+        string component = string.Concat(Enumerable.Repeat(repeatedText, repeatCount));
+        Encoding.UTF8.GetByteCount(component).ShouldBe(256);
+        string entryName = $"folder/{component}";
+        using MemoryStream archive = CreateArchive((entryName, [1]));
+        PackageInstallLimits limits = CreateLimits();
+        limits.MaxArchivePathLength = entryName.Length;
+
+        await AssertPathLengthFailureBeforeWriteAsync(archive, limits);
+    }
+
+    [Theory]
+    [InlineData("e\u0301", 85, "a", 171, 256)]
+    [InlineData("e\u0301", 127, "", 254, 381)]
+    [InlineData("a", 253, "\u03b9\u0308\u0301", 256, 259)]
+    public async Task ExtractAsync_ExactComponentOverLimitWithCanonicalWithinLimit_RejectsBeforeTargetWrite(
+        string repeatedText,
+        int repeatCount,
+        string suffix,
+        int expectedUnits,
+        int expectedBytes)
+    {
+        string component = string.Concat(Enumerable.Repeat(repeatedText, repeatCount)) + suffix;
+        component.Length.ShouldBe(expectedUnits);
+        Encoding.UTF8.GetByteCount(component).ShouldBe(expectedBytes);
+        string entryName = $"folder/{component}/file.txt";
+        PortableArchivePath path = PortableArchivePath.Create(entryName, isDirectory: false);
+        path.Segments[1].Length.ShouldBeLessThanOrEqualTo(255);
+        Encoding.UTF8.GetByteCount(path.Segments[1]).ShouldBeLessThanOrEqualTo(255);
+        using MemoryStream archive = CreateArchive((entryName, [1]));
+        PackageInstallLimits limits = CreateLimits();
+        limits.MaxArchivePathLength = path.ExactSpelling.Length;
+
+        await AssertPathLengthFailureBeforeWriteAsync(archive, limits);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_ExactDirectoryComponentOneByteOverLimit_RejectsBeforeTargetWrite()
+    {
+        string component = string.Concat(Enumerable.Repeat("e\u0301", 85)) + "a";
+        string entryName = $"folder/{component}/";
+        PortableArchivePath path = PortableArchivePath.Create(entryName, isDirectory: true);
+        Encoding.UTF8.GetByteCount(path.ExactSegments[1]).ShouldBe(256);
+        Encoding.UTF8.GetByteCount(path.Segments[1]).ShouldBeLessThanOrEqualTo(255);
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.Directory(entryName));
+        PackageInstallLimits limits = CreateLimits();
+        limits.MaxArchivePathLength = path.ExactSpelling.Length;
+
+        await AssertPathLengthFailureBeforeWriteAsync(archive, limits);
+    }
+
+    [Theory]
+    [InlineData("folder/cafe\u0301.txt")]
+    [InlineData("folder/\u0958.txt")]
+    public async Task ExtractAsync_DifferentSpellingLengths_AtLimitReportsGreaterLength(
+        string entryName)
+    {
+        string canonicalPath = entryName.Normalize(NormalizationForm.FormC);
+        int maximumLength = Math.Max(canonicalPath.Length, entryName.Length);
+        maximumLength.ShouldBe(Math.Min(canonicalPath.Length, entryName.Length) + 1);
+        using MemoryStream archive = CreateArchive(
+            (entryName, [1, 2, 3]),
+            ("a.txt", [4]));
+        PackageInstallLimits limits = CreateLimits();
+        limits.MaxArchivePathLength = maximumLength;
+
+        ArchiveExtractionMetrics metrics = await TarballExtractor.ExtractAsync(
+            archive,
+            GetDestination(),
+            limits,
+            directive: null,
+            TestContext.Current.CancellationToken);
+
+        metrics.MaximumPathLength.ShouldBe(maximumLength);
+        metrics.EntryCount.ShouldBe(2);
+        metrics.ExpandedBytes.ShouldBe(4);
+        metrics.LargestEntryBytes.ShouldBe(3);
+    }
+
+    [Theory]
+    [InlineData("folder/cafe\u0301.txt")]
+    [InlineData("folder/\u0958.txt")]
+    public async Task ExtractAsync_OneSpellingOverConfiguredLimit_RejectsBeforeTargetWrite(
+        string entryName)
+    {
+        string canonicalPath = entryName.Normalize(NormalizationForm.FormC);
+        int minimumLength = Math.Min(canonicalPath.Length, entryName.Length);
+        minimumLength.ShouldBe(Math.Max(canonicalPath.Length, entryName.Length) - 1);
+        using MemoryStream archive = CreateArchive((entryName, [1]));
+        PackageInstallLimits limits = CreateLimits();
+        limits.MaxArchivePathLength = minimumLength;
+
+        await AssertPathLengthFailureBeforeWriteAsync(archive, limits);
     }
 
     [Fact]
@@ -408,6 +619,26 @@ public class TarballExtractorLimitTests : IDisposable
         exception.ErrorCode.ShouldBe(PackageInstallErrorCode.InvalidArchive);
         exception.Stage.ShouldBe(PackageInstallStage.ArchiveValidation);
         exception.InnerException.ShouldBeOfType<InvalidDataException>();
+    }
+
+    private async Task AssertPathLengthFailureBeforeWriteAsync(
+        MemoryStream archive,
+        PackageInstallLimits limits)
+    {
+        string destination = GetDestination();
+        PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(
+            () => TarballExtractor.ExtractAsync(
+                archive,
+                destination,
+                limits,
+                "example.package#1.0.0",
+                TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(
+            PackageInstallErrorCode.ArchivePathLengthLimitExceeded);
+        exception.Stage.ShouldBe(PackageInstallStage.ArchiveValidation);
+        exception.Directive.ShouldBe("example.package#1.0.0");
+        Directory.EnumerateFileSystemEntries(destination).ShouldBeEmpty();
     }
 
     private string GetDestination() =>

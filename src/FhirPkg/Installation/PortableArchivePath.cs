@@ -154,6 +154,17 @@ internal sealed class PortableArchivePath
             exactSegments);
     }
 
+    internal void ValidateExtractionSpelling(string? directive = null)
+    {
+        foreach (string segment in ExactSegments)
+        {
+            ValidateComponent(
+                segment,
+                enforcePortableLength: true,
+                directive);
+        }
+    }
+
     internal string GetCanonicalPrefix(int segmentCount) =>
         string.Join('/', Segments.Take(segmentCount));
 

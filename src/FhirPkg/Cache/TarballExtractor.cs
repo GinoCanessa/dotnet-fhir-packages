@@ -96,8 +96,12 @@ public static class TarballExtractor
                 entry.Name,
                 isDirectory,
                 directive);
+            portablePath.ValidateExtractionSpelling(directive);
 
-            if (portablePath.CanonicalPath.Length > limits.MaxArchivePathLength)
+            int pathLength = Math.Max(
+                portablePath.CanonicalPath.Length,
+                portablePath.ExactSpelling.Length);
+            if (pathLength > limits.MaxArchivePathLength)
             {
                 throw ArchivePathLengthLimitExceeded(
                     directive,
@@ -109,7 +113,7 @@ public static class TarballExtractor
 
             maximumPathLength = Math.Max(
                 maximumPathLength,
-                portablePath.CanonicalPath.Length);
+                pathLength);
             maximumDepth = Math.Max(maximumDepth, portablePath.Depth);
 
             inventory.Add(
@@ -123,7 +127,7 @@ public static class TarballExtractor
                 Path.Combine(
                 [
                     fullDestination,
-                    .. portablePath.Segments
+                    .. portablePath.ExactSegments
                 ]));
             string relativePath = Path.GetRelativePath(fullDestination, targetPath);
 
@@ -343,7 +347,7 @@ public static class TarballExtractor
             PackageArchiveInventory.FromFileSystem(
                 extractedPath,
                 directive: null);
-        _ = PackageArchiveLayoutValidator.ValidateAndNormalize(
+        _ = PackageStructureNormalizer.ValidateAndNormalize(
             extractedPath,
             inventory,
             directive: null);
@@ -353,7 +357,7 @@ public static class TarballExtractor
         string extractedPath,
         PackageArchiveInventory inventory,
         string? directive) =>
-        PackageArchiveLayoutValidator.ValidateAndNormalize(
+        PackageStructureNormalizer.ValidateAndNormalize(
             extractedPath,
             inventory,
             directive);
@@ -430,7 +434,7 @@ public static class TarballExtractor
         new PackageInstallException(
             PackageInstallErrorCode.ArchivePathLengthLimitExceeded,
             PackageInstallStage.ArchiveValidation,
-            $"Package archive path exceeds the normalized length limit of {limit}.",
+            $"Package archive path exceeds the length limit of {limit} in canonical or exact spelling.",
             directive);
 
     private static PackageInstallException ArchiveDepthLimitExceeded(

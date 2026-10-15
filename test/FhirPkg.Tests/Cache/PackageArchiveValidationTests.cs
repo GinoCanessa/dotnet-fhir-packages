@@ -312,7 +312,7 @@ public class PackageArchiveValidationTests : IDisposable
         Dictionary<string, string?> before = await SnapshotTreeAsync(extractedPath);
 
         PackageInstallException exception = Should.Throw<PackageInstallException>(
-            () => PackageArchiveLayoutValidator.ValidateAndNormalize(
+            () => PackageStructureNormalizer.ValidateAndNormalize(
                 extractedPath,
                 inventory,
                 "example.package#1.0.0"));
@@ -322,6 +322,14 @@ public class PackageArchiveValidationTests : IDisposable
         exception.Message.ShouldContain($"package/{conflictingRoot}");
         Dictionary<string, string?> after = await SnapshotTreeAsync(extractedPath);
         AssertSameTree(before, after);
+
+        PackageInstallException compatibilityException = Should.Throw<PackageInstallException>(
+            () => TarballExtractor.NormalizePackageStructure(extractedPath));
+
+        AssertArchiveFailure(compatibilityException);
+        compatibilityException.Message.ShouldContain("normalization destination");
+        compatibilityException.Message.ShouldContain($"package/{conflictingRoot}");
+        AssertSameTree(before, await SnapshotTreeAsync(extractedPath));
     }
 
     [Fact]
@@ -360,6 +368,151 @@ public class PackageArchiveValidationTests : IDisposable
         Dictionary<string, string?> repeated = await SnapshotTreeAsync(extractedPath);
         AssertSameTree(normalized, repeated);
         Directory.Exists(Path.Combine(extractedPath, "package", "package")).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task NormalizePackageStructure_LegacyLayout_IsIdempotent()
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package.json", Manifest),
+            ArbitraryTarBuilder.File("README.md", "readme"),
+            ArbitraryTarBuilder.File("resources/cafe\u0301.json", OtherResource),
+            ArbitraryTarBuilder.Directory("empty/"));
+        string extractedPath = Path.Combine(_testRoot, "normalize-legacy");
+        await TarballExtractor.ExtractAsync(
+            archive,
+            extractedPath,
+            TestContext.Current.CancellationToken);
+        Dictionary<string, string?> before = await SnapshotTreeAsync(extractedPath);
+        Dictionary<string, string?> expected = before.ToDictionary(
+            entry => $"package/{entry.Key}",
+            entry => entry.Value,
+            StringComparer.Ordinal);
+        expected.Add("package", null);
+
+        TarballExtractor.NormalizePackageStructure(extractedPath);
+
+        Dictionary<string, string?> normalized = await SnapshotTreeAsync(extractedPath);
+        AssertSameTree(expected, normalized);
+        Directory.EnumerateFileSystemEntries(extractedPath)
+            .Select(Path.GetFileName)
+            .ShouldBe(["package"]);
+
+        TarballExtractor.NormalizePackageStructure(extractedPath);
+
+        AssertSameTree(normalized, await SnapshotTreeAsync(extractedPath));
+        Directory.Exists(Path.Combine(extractedPath, "package", "package")).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ValidateAndNormalizePackageStructure_PreservesOriginalLayoutAndNormalizedPaths(
+        bool standardLayout)
+    {
+        string prefix = standardLayout ? "package/" : "";
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File($"{prefix}package.json", Manifest),
+            ArbitraryTarBuilder.File($"{prefix}resource.json", PatientResource));
+        string extractedPath = Path.Combine(_testRoot, "compatibility");
+        ArchiveExtractionMetrics metrics = await TarballExtractor.ExtractAsync(
+            archive,
+            extractedPath,
+            new PackageInstallLimits(),
+            "example.package#1.0.0",
+            TestContext.Current.CancellationToken);
+        PackageArchiveInventory? inventory = metrics.Inventory;
+        inventory.ShouldNotBeNull();
+        Dictionary<string, string?> before = await SnapshotTreeAsync(extractedPath);
+        Dictionary<string, string?> expected = standardLayout
+            ? before
+            : before.ToDictionary(
+                entry => $"package/{entry.Key}",
+                entry => entry.Value,
+                StringComparer.Ordinal);
+        if (!standardLayout)
+            expected.Add("package", null);
+
+        PackageArchiveLayoutResult result = TarballExtractor.ValidateAndNormalizePackageStructure(
+            extractedPath,
+            inventory,
+            "example.package#1.0.0");
+
+        result.Layout.ShouldBe(
+            standardLayout ? PackageArchiveLayout.Standard : PackageArchiveLayout.Legacy);
+        result.ContentPath.ShouldBe(Path.Combine(extractedPath, "package"));
+        result.ManifestPath.ShouldBe(Path.Combine(extractedPath, "package", "package.json"));
+        AssertSameTree(expected, await SnapshotTreeAsync(extractedPath));
+    }
+
+    [Theory]
+    [InlineData("unknown/", true)]
+    [InlineData("unknown/nested/file.json", false)]
+    [InlineData("unknown.txt", false)]
+    [InlineData("README.md", false)]
+    [InlineData("openapi", false)]
+    [InlineData("other", false)]
+    [InlineData("OpenApi/", true)]
+    [InlineData("Other/", true)]
+    [InlineData("OpenApi/nested/file.json", false)]
+    [InlineData("Other/nested/file.json", false)]
+    public async Task NormalizePackageStructure_UnsupportedAncillaryLayout_DoesNotMutate(
+        string unsupportedPath,
+        bool isDirectory)
+    {
+        string unsupportedRoot = unsupportedPath.Split('/')[0];
+        ArbitraryTarEntry unsupportedEntry = isDirectory
+            ? ArbitraryTarBuilder.Directory(unsupportedPath)
+            : ArbitraryTarBuilder.File(unsupportedPath, OtherResource);
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+        [
+            .. CreateAncillaryEntries(
+                includeOpenApi: !string.Equals(
+                    unsupportedRoot,
+                    "openapi",
+                    StringComparison.OrdinalIgnoreCase),
+                includeOther: !string.Equals(
+                    unsupportedRoot,
+                    "other",
+                    StringComparison.OrdinalIgnoreCase)),
+            unsupportedEntry
+        ]);
+
+        await AssertNormalizationFailsWithoutMutationAsync(archive);
+    }
+
+    [Theory]
+    [InlineData("openapi/package.json")]
+    [InlineData("other/package.json")]
+    [InlineData("openapi/nested/Package.json")]
+    [InlineData("other/nested/Package.json")]
+    [InlineData("openapi/PACKAGE.JSON")]
+    [InlineData("other/PACKAGE.JSON")]
+    public async Task NormalizePackageStructure_AncillarySecondManifest_DoesNotMutate(
+        string manifestPath)
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+        [
+            .. CreateAncillaryEntries(),
+            ArbitraryTarBuilder.File(manifestPath, Manifest)
+        ]);
+
+        await AssertNormalizationFailsWithoutMutationAsync(archive);
+    }
+
+    [Theory]
+    [InlineData(InvalidLayout.MixedStandardRoot)]
+    [InlineData(InvalidLayout.LegacyWithPackageTree)]
+    [InlineData(InvalidLayout.WrapperRoot)]
+    [InlineData(InvalidLayout.SecondManifest)]
+    [InlineData(InvalidLayout.MissingManifest)]
+    [InlineData(InvalidLayout.ManifestWrongCase)]
+    public async Task NormalizePackageStructure_InvalidLayout_DoesNotMutate(
+        InvalidLayout invalidLayout)
+    {
+        using MemoryStream archive = CreateInvalidLayoutArchive(invalidLayout);
+
+        await AssertNormalizationFailsWithoutMutationAsync(archive);
     }
 
     [Theory]
@@ -968,6 +1121,22 @@ public class PackageArchiveValidationTests : IDisposable
             ],
             _ => throw new ArgumentOutOfRangeException(nameof(unsafeEntry), unsafeEntry, null)
         };
+
+    private async Task AssertNormalizationFailsWithoutMutationAsync(MemoryStream archive)
+    {
+        string extractedPath = Path.Combine(_testRoot, "normalize-rejected");
+        await TarballExtractor.ExtractAsync(
+            archive,
+            extractedPath,
+            TestContext.Current.CancellationToken);
+        Dictionary<string, string?> before = await SnapshotTreeAsync(extractedPath);
+
+        PackageInstallException exception = Should.Throw<PackageInstallException>(
+            () => TarballExtractor.NormalizePackageStructure(extractedPath));
+
+        AssertArchiveFailure(exception);
+        AssertSameTree(before, await SnapshotTreeAsync(extractedPath));
+    }
 
     private static async Task<Dictionary<string, string?>> SnapshotTreeAsync(string root)
     {
