@@ -12,6 +12,8 @@ internal sealed record ResolvedPackageInstallPolicy
 
     internal required bool VerifyChecksums { get; init; }
 
+    internal required bool Unmodified { get; init; }
+
     internal required bool IncludeDependencies { get; init; }
 
     internal required bool OverwriteExisting { get; init; }
@@ -99,6 +101,7 @@ internal sealed record ResolvedPackageInstallPolicy
             Limits = limits,
             CorruptCacheBehavior = corruptCacheBehavior,
             VerifyChecksums = managerOptions.VerifyChecksums,
+            Unmodified = managerOptions.Unmodified,
             IncludeDependencies = effectiveOptions.IncludeDependencies,
             OverwriteExisting = effectiveOptions.OverwriteExisting,
             PreferredFhirRelease = effectiveOptions.PreferredFhirRelease,

@@ -1113,6 +1113,7 @@ public class DiskPackageCache :
     async Task<PackageIndex?> IPackageCacheIndexStore.GetOrCreateIndexAsync(
         PackageReference reference,
         bool forceReindex,
+        bool persistIndex,
         Func<PackageRecord, CancellationToken, Task<PackageIndex>> generator,
         CancellationToken cancellationToken,
         Action<PackageRecord, PackageIndex>? indexReady)
@@ -1176,6 +1177,33 @@ public class DiskPackageCache :
 
         string expectedTargetPath = inspection.TargetPath;
         string expectedContentPath = inspection.ContentPath!;
+        if (!persistIndex)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            PackageCacheInspection currentInspection =
+                await _validator.InspectAsync(
+                        cacheKey,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            EnsureIndexCommitTargetIsUnchanged(
+                cacheKey,
+                currentInspection,
+                expectedTargetPath,
+                expectedContentPath);
+            EnsureGeneratedIndexIsValid(
+                generatedIndex,
+                currentInspection.ContentPath!);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            indexReady?.Invoke(
+                package with
+                {
+                    Index = generatedIndex,
+                },
+                generatedIndex);
+            return generatedIndex;
+        }
+
         string indexPath = Path.Combine(
             expectedContentPath,
             IndexFileName);

@@ -221,7 +221,10 @@ public sealed class FhirPackageManager :
             versionResolver,
             dependencyResolver,
             packageIndexer,
-            configuration,
+            ValidateUnmodifiedCollaborators(
+                configuration,
+                cache,
+                packageIndexer),
             logger,
             memoryCache,
             CreateDirectHttpClient(configuration.Options),
@@ -249,11 +252,7 @@ public sealed class FhirPackageManager :
             packageIndexer,
             FhirPackageManagerConfiguration.Create(options, managerInstallLimits),
             logger,
-            memoryCache,
-            CreateDirectHttpClient(options),
-            ownsHttpClient: true,
-            loggerFactory: null,
-            redirectsControlled: true)
+            memoryCache)
     {
     }
 
@@ -311,6 +310,11 @@ public sealed class FhirPackageManager :
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(httpClient);
+
+        _ = ValidateUnmodifiedCollaborators(
+            configuration,
+            cache,
+            packageIndexer);
 
         FhirPackageManagerOptions options = configuration.Options;
         PackageInstallLimits managerInstallLimits = configuration.InstallLimits;
@@ -1042,15 +1046,16 @@ public sealed class FhirPackageManager :
         if (_cache is IPackageCacheIndexStore indexStore)
         {
             IndexedPackageResult? readyResult = null;
-            PackageIndex? persistedIndex =
+            PackageIndex? index =
                 await indexStore.GetOrCreateIndexAsync(
                         package.Reference,
                         forceReindex,
+                        persistIndex: !_options.Unmodified,
                         BuildPackageIndexAsync,
                         cancellationToken,
                         (currentPackage, currentIndex) =>
                         {
-                            RegisterPersistedIndex(
+                            RegisterPackageIndex(
                                 currentPackage,
                                 currentIndex);
                             readyResult =
@@ -1059,7 +1064,7 @@ public sealed class FhirPackageManager :
                                     currentIndex);
                         })
                     .ConfigureAwait(false);
-            if (persistedIndex is null)
+            if (index is null)
             {
                 throw new DirectoryNotFoundException(
                     $"Cached package '{package.Reference.FhirDirective}' is not available for indexing.");
@@ -1073,13 +1078,13 @@ public sealed class FhirPackageManager :
 
             return readyResult
                 ?? throw new InvalidOperationException(
-                    "The package cache did not publish the persisted index generation.");
+                    "The package cache did not publish the index generation.");
         }
 
         if (!forceReindex
             && package.Index is not null)
         {
-            RegisterPersistedIndex(
+            RegisterPackageIndex(
                 package,
                 package.Index);
             return new IndexedPackageResult(
@@ -1098,7 +1103,7 @@ public sealed class FhirPackageManager :
                 package.Reference);
         }
 
-        RegisterPersistedIndex(
+        RegisterPackageIndex(
             package,
             generatedIndex);
         return new IndexedPackageResult(
@@ -1258,7 +1263,7 @@ public sealed class FhirPackageManager :
         }
     }
 
-    private void RegisterPersistedIndex(
+    private void RegisterPackageIndex(
         PackageRecord package,
         PackageIndex index)
     {
@@ -1455,6 +1460,31 @@ public sealed class FhirPackageManager :
         };
     }
 
+    private static FhirPackageManagerConfiguration ValidateUnmodifiedCollaborators(
+        FhirPackageManagerConfiguration configuration,
+        IPackageCache cache,
+        IPackageIndexer packageIndexer)
+    {
+        if (!configuration.Options.Unmodified)
+            return configuration;
+
+        if (cache is not IPackageCacheIndexStore)
+        {
+            throw new PackageInstallException(
+                PackageInstallErrorCode.UnsupportedCacheCapability,
+                PackageInstallStage.PolicyValidation,
+                "Unmodified mode requires the built-in coordinated package cache.");
+        }
+
+        if (packageIndexer is not IManagedPackageIndexer)
+        {
+            throw new NotSupportedException(
+                "Unmodified mode requires the read-only managed package index builder.");
+        }
+
+        return configuration;
+    }
+
     private IHardenedPackageCache RequireHardenedCache()
     {
         if (_cache is IHardenedPackageCache hardenedCache)
@@ -1593,6 +1623,7 @@ public sealed class FhirPackageManager :
         new()
         {
             OverwriteExisting = policy.OverwriteExisting,
+            Unmodified = policy.Unmodified,
             VerifyChecksum = policy.VerifyChecksums,
             Limits = policy.Limits,
             ReportedContentLength = reportedContentLength,
@@ -2253,6 +2284,7 @@ public sealed class FhirPackageManager :
         {
             OverwriteExisting = request.Policy.OverwriteExisting
                 || (request.Freshness == PackageInstallFreshness.RefreshableAlias && isInstalled),
+            Unmodified = request.Policy.Unmodified,
             VerifyChecksum = request.Policy.VerifyChecksums,
             Limits = request.Policy.Limits,
             ReportedContentLength = downloadResult.ContentLength,

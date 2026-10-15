@@ -6,6 +6,7 @@ using FhirPkg.Indexing;
 using FhirPkg.Installation;
 using FhirPkg.Models;
 using FhirPkg.Tests.Support;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using Xunit;
 
@@ -32,6 +33,267 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             """{"index-version":2,"files":[{"filename":"patient.json","resourceType":"Patient"},{"filename":"PATIENT.json","resourceType":"Patient"}]}""",
             """{"index-version":2,"files":[{"filename":"missing.json","resourceType":"Patient"}]}"""
         };
+
+    public static TheoryData<bool, bool, string, bool> IndexModes
+    {
+        get
+        {
+            TheoryData<bool, bool, string, bool> cases = [];
+            foreach (bool persistIndex in new[] { false, true })
+            {
+                foreach (bool rootLayout in new[] { false, true })
+                {
+                    foreach (string state in new[] { "valid", "missing", "invalid", "directory" })
+                    {
+                        cases.Add(persistIndex, rootLayout, state, false);
+                        cases.Add(persistIndex, rootLayout, state, true);
+                    }
+                }
+            }
+
+            return cases;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(IndexModes))]
+    public async Task GetOrCreateIndex_PersistenceMatrix_PreservesPublisherPayload(
+        bool persistIndex,
+        bool rootLayout,
+        string state,
+        bool forceReindex)
+    {
+        const string filename = "patient-e\u0301.json";
+        string prefix = rootLayout ? string.Empty : "package/";
+        string publisherIndex =
+            "{\r\n \"files\" : [ { \"filename\" : \"" + filename
+            + "\", \"resourceType\" : \"Patient\", \"id\" : \"publisher\" } ],\r\n"
+            + " \"index-version\" : 2, \"publisher-extension\" : \"retain me\"\r\n}\r\n";
+        List<ArbitraryTarEntry> entries =
+        [
+            ArbitraryTarBuilder.File(
+                $"{prefix}package.json",
+                """{"name":"example.package","version":"1.0.0"}"""),
+            ArbitraryTarBuilder.File(
+                $"{prefix}{filename}",
+                """{"resourceType":"Patient","id":"generated"}"""),
+            ArbitraryTarBuilder.File("other/.index.json", "opaque ancillary index"),
+            ArbitraryTarBuilder.File("other/package.json", "opaque ancillary manifest"),
+            ArbitraryTarBuilder.Directory("empty/"),
+        ];
+        if (!rootLayout)
+            entries.Add(ArbitraryTarBuilder.File(".index.json", "opaque root index"));
+        if (state is "valid" or "invalid")
+        {
+            entries.Add(ArbitraryTarBuilder.File(
+                $"{prefix}.index.json",
+                state == "valid" ? publisherIndex : "invalid publisher index"));
+        }
+        else if (state == "directory")
+        {
+            entries.Add(ArbitraryTarBuilder.File(
+                $"{prefix}.index.json/payload.txt",
+                "this directory must never be deleted"));
+        }
+
+        RecordingFileOperations fileOperations = new();
+        using DiskPackageCache cache = CreateCache(fileOperations);
+        using MemoryStream archive = ArbitraryTarBuilder.Create([.. entries]);
+        PackageRecord installed = await cache.InstallAsync(
+            s_reference,
+            archive,
+            new InstallCacheOptions { Unmodified = rootLayout },
+            TestContext.Current.CancellationToken);
+        string indexPath = Path.Combine(installed.ContentPath, ".index.json");
+        Dictionary<string, byte[]> before = ReadPayload(installed.DirectoryPath);
+        string[] directoriesBefore = Directory.GetDirectories(
+            installed.DirectoryPath, "*", SearchOption.AllDirectories);
+        Directory.GetFiles(installed.ContentPath)
+            .Select(Path.GetFileName)
+            .ShouldContain(filename);
+        fileOperations.Clear();
+        IPackageCacheIndexStore store = cache;
+        IManagedPackageIndexer builder =
+            new PackageIndexer(NullLogger<PackageIndexer>.Instance);
+        int generatorCalls = 0;
+        PackageRecord? readyPackage = null;
+        PackageIndex? readyIndex = null;
+
+        Task<PackageIndex?> indexing = store.GetOrCreateIndexAsync(
+            s_reference,
+            forceReindex,
+            persistIndex,
+            async (package, cancellationToken) =>
+            {
+                generatorCalls++;
+                package.Reference.ShouldBe(s_reference);
+                package.ContentPath.ShouldBe(installed.ContentPath);
+                return await builder.BuildIndexAsync(package, cancellationToken);
+            },
+            TestContext.Current.CancellationToken,
+            (package, index) =>
+            {
+                readyPackage = package;
+                readyIndex = index;
+            });
+        bool reusesPublisherIndex = state == "valid" && !forceReindex;
+        if (persistIndex && state == "directory")
+        {
+            await Should.ThrowAsync<IOException>(() => indexing);
+            readyPackage.ShouldBeNull();
+            readyIndex.ShouldBeNull();
+            fileOperations.AtomicDestinations.ShouldContain(indexPath);
+            fileOperations.DeletedPaths.ShouldNotContain(indexPath);
+        }
+        else
+        {
+            PackageIndex? index = await indexing;
+            index.ShouldNotBeNull();
+            index.Files.Single().Id.ShouldBe(
+                reusesPublisherIndex ? "publisher" : "generated");
+            index.Files.Single().Filename.ShouldBe(filename);
+            readyPackage.ShouldNotBeNull();
+            readyPackage.Index.ShouldBeSameAs(index);
+            readyIndex.ShouldBeSameAs(index);
+            if (persistIndex && !reusesPublisherIndex)
+                fileOperations.AtomicDestinations.ShouldContain(indexPath);
+        }
+
+        generatorCalls.ShouldBe(reusesPublisherIndex ? 0 : 1);
+        if (!persistIndex || reusesPublisherIndex)
+        {
+            fileOperations.AssertNoPayloadWrites(installed.DirectoryPath);
+            fileOperations.ReadPaths.Count(path => path == indexPath).ShouldBe(1);
+        }
+        Directory.GetDirectories(
+                installed.DirectoryPath, "*", SearchOption.AllDirectories)
+            .ShouldBe(directoriesBefore, ignoreOrder: true);
+        Dictionary<string, byte[]> after = ReadPayload(installed.DirectoryPath);
+        bool changedIndex = persistIndex && !reusesPublisherIndex && state != "directory";
+        foreach ((string path, byte[] content) in before)
+        {
+            if (!changedIndex || path != indexPath)
+                after[path].ShouldBe(content);
+        }
+        after.Keys.ShouldBe(
+            changedIndex ? before.Keys.Append(indexPath).Distinct() : before.Keys,
+            ignoreOrder: true);
+
+        PackageIndex? onDisk = await cache.GetIndexAsync(
+            s_reference,
+            TestContext.Current.CancellationToken);
+        if (changedIndex)
+            onDisk!.Files.Single().Id.ShouldBe("generated");
+        else if (state == "valid")
+            onDisk!.Files.Single().Id.ShouldBe("publisher");
+        else
+            onDisk.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(false, "structure")]
+    [InlineData(true, "structure")]
+    [InlineData(false, "missing-file")]
+    [InlineData(true, "missing-file")]
+    [InlineData(false, "size")]
+    [InlineData(true, "size")]
+    [InlineData(false, "null")]
+    [InlineData(true, "null")]
+    public async Task GetOrCreateIndex_InvalidGeneratedIndex_IsNeverPublished(
+        bool persistIndex,
+        string failure)
+    {
+        RecordingFileOperations fileOperations = new();
+        using DiskPackageCache cache = CreateCache(
+            fileOperations,
+            new PackageInstallLimits { MaxEntryBytes = 512 });
+        using MemoryStream archive = CreateArchive("resource", CreateIndexJson("publisher"));
+        PackageRecord installed = await cache.InstallAsync(
+            s_reference,
+            archive,
+            new InstallCacheOptions(),
+            TestContext.Current.CancellationToken);
+        byte[] before = await File.ReadAllBytesAsync(
+            GetIndexPath(), TestContext.Current.CancellationToken);
+        fileOperations.Clear();
+        PackageIndex generated = failure switch
+        {
+            "structure" => new PackageIndex { IndexVersion = 1, Files = [] },
+            "missing-file" => new PackageIndex
+            {
+                Files =
+                [
+                    new ResourceIndexEntry
+                    {
+                        Filename = "missing.json",
+                        ResourceType = "Patient",
+                    },
+                ],
+            },
+            "size" => CreateIndex(new string('x', 2048)),
+            "null" => null!,
+            _ => throw new InvalidOperationException(),
+        };
+        IPackageCacheIndexStore store = cache;
+        bool published = false;
+
+        await Should.ThrowAsync<InvalidDataException>(() => store.GetOrCreateIndexAsync(
+            s_reference,
+            forceReindex: true,
+            persistIndex,
+            (_, _) => Task.FromResult(generated),
+            TestContext.Current.CancellationToken,
+            (_, _) => published = true));
+
+        published.ShouldBeFalse();
+        fileOperations.AssertNoPayloadWrites(installed.DirectoryPath);
+        (await File.ReadAllBytesAsync(GetIndexPath(), TestContext.Current.CancellationToken))
+            .ShouldBe(before);
+    }
+
+    [Theory]
+    [InlineData("cancel")]
+    [InlineData("changed-target")]
+    public async Task GetOrCreateIndex_NoPersistence_RevalidatesBeforePublishing(string failure)
+    {
+        RecordingFileOperations fileOperations = new();
+        using DiskPackageCache cache = CreateCache(fileOperations);
+        await InstallWithoutIndexAsync(cache, "resource");
+        using CancellationTokenSource cancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        fileOperations.Clear();
+        IPackageCacheIndexStore store = cache;
+        bool published = false;
+        string target = PackageCacheKey.Create(s_reference).GetPackageDirectoryPath(_cacheRoot);
+
+        Task<PackageIndex?> indexing = store.GetOrCreateIndexAsync(
+            s_reference,
+            forceReindex: true,
+            persistIndex: false,
+            async (package, cancellationToken) =>
+            {
+                if (failure == "cancel")
+                    cancellation.Cancel();
+                else
+                {
+                    await File.WriteAllTextAsync(
+                        Path.Combine(package.ContentPath, "package.json"),
+                        """{"name":"different.package","version":"1.0.0"}""",
+                        cancellationToken);
+                }
+                return CreateIndex("generated");
+            },
+            cancellation.Token,
+            (_, _) => published = true);
+
+        if (failure == "cancel")
+            await Should.ThrowAsync<OperationCanceledException>(() => indexing);
+        else
+            await Should.ThrowAsync<IOException>(() => indexing);
+        published.ShouldBeFalse();
+        fileOperations.AssertNoPayloadWrites(target);
+        File.Exists(GetIndexPath()).ShouldBeFalse();
+    }
 
     [Fact]
     public async Task ValidExistingIndex_PopulatesEveryPackageRecordRead()
@@ -262,6 +524,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         PackageIndex? index = await store.GetOrCreateIndexAsync(
             s_reference,
             forceReindex: false,
+            persistIndex: true,
             (record, _) =>
             {
                 record.Index.ShouldBeNull();
@@ -296,6 +559,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         await store.GetOrCreateIndexAsync(
             s_reference,
             forceReindex: false,
+            persistIndex: true,
             (_, _) => Task.FromResult(CreateIndex("first")),
             TestContext.Current.CancellationToken);
         int skippedGeneratorCalls = 0;
@@ -303,6 +567,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         PackageIndex? retained = await store.GetOrCreateIndexAsync(
             s_reference,
             forceReindex: false,
+            persistIndex: true,
             (_, _) =>
             {
                 skippedGeneratorCalls++;
@@ -312,6 +577,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         PackageIndex? replaced = await store.GetOrCreateIndexAsync(
             s_reference,
             forceReindex: true,
+            persistIndex: true,
             (_, _) => Task.FromResult(CreateIndex("second")),
             TestContext.Current.CancellationToken);
 
@@ -333,6 +599,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         await store.GetOrCreateIndexAsync(
             s_reference,
             forceReindex: false,
+            persistIndex: true,
             (_, _) => Task.FromResult(CreateIndex("first")),
             TestContext.Current.CancellationToken);
         byte[] priorBytes = await File.ReadAllBytesAsync(
@@ -343,6 +610,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             () => store.GetOrCreateIndexAsync(
                 s_reference,
                 forceReindex: true,
+                persistIndex: true,
                 (_, _) => throw new InvalidOperationException("generation failed"),
                 TestContext.Current.CancellationToken));
 
@@ -353,10 +621,13 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
     }
 
     [Theory]
-    [InlineData("overwrite")]
-    [InlineData("remove")]
+    [InlineData("overwrite", true)]
+    [InlineData("overwrite", false)]
+    [InlineData("remove", true)]
+    [InlineData("remove", false)]
     public async Task GetOrCreateIndex_SerializesAgainstPackageMutation(
-        string mutation)
+        string mutation,
+        bool persistIndex)
     {
         using DiskPackageCache generatingCache = CreateCache();
         using DiskPackageCache mutatingCache = CreateCache();
@@ -371,6 +642,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             store.GetOrCreateIndexAsync(
                 s_reference,
                 forceReindex: true,
+                persistIndex,
                 async (_, _) =>
                 {
                     generatorEntered.TrySetResult();
@@ -504,12 +776,13 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
     }
 
     private DiskPackageCache CreateCache(
-        IPackageCacheFileOperations? fileOperations = null) =>
+        IPackageCacheFileOperations? fileOperations = null,
+        PackageInstallLimits? limits = null) =>
         new(
             _cacheRoot,
             logger: null,
             timeProvider: null,
-            new PackageInstallLimits(),
+            limits ?? new PackageInstallLimits(),
             fileOperations ?? SystemPackageCacheFileOperations.Instance,
             NullPackageCacheFaultObserver.Instance);
 
@@ -641,7 +914,11 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             ]
         };
 
-    private sealed class RecordingFileOperations :
+    private static Dictionary<string, byte[]> ReadPayload(string directoryPath) =>
+        Directory.GetFiles(directoryPath, "*", SearchOption.AllDirectories)
+            .ToDictionary(path => path, File.ReadAllBytes, StringComparer.Ordinal);
+
+    internal sealed class RecordingFileOperations :
         IPackageCacheFileOperations
     {
         private readonly IPackageCacheFileOperations _inner =
@@ -652,6 +929,26 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         internal List<string> ReadPaths { get; } = [];
 
         internal List<string> WrittenPaths { get; } = [];
+
+        internal List<string> DeletedPaths { get; } = [];
+
+        internal void Clear()
+        {
+            AtomicDestinations.Clear();
+            ReadPaths.Clear();
+            WrittenPaths.Clear();
+            DeletedPaths.Clear();
+        }
+
+        internal void AssertNoPayloadWrites(string packageDirectory)
+        {
+            string prefix = packageDirectory + Path.DirectorySeparatorChar;
+            WrittenPaths.ShouldNotContain(path => path.StartsWith(prefix, StringComparison.Ordinal));
+            AtomicDestinations.ShouldNotContain(path => path.StartsWith(prefix, StringComparison.Ordinal));
+            AtomicDestinations.ShouldNotContain(path => Path.GetFileName(path) == ".index.json");
+            DeletedPaths.ShouldNotContain(path =>
+                path == packageDirectory || path.StartsWith(prefix, StringComparison.Ordinal));
+        }
 
         public bool DirectoryExists(string path) =>
             _inner.DirectoryExists(path);
@@ -678,11 +975,17 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             string destinationPath) =>
             _inner.MoveFile(sourcePath, destinationPath);
 
-        public void DeleteDirectory(string path, bool recursive) =>
+        public void DeleteDirectory(string path, bool recursive)
+        {
+            DeletedPaths.Add(path);
             _inner.DeleteDirectory(path, recursive);
+        }
 
-        public void DeleteFile(string path) =>
+        public void DeleteFile(string path)
+        {
+            DeletedPaths.Add(path);
             _inner.DeleteFile(path);
+        }
 
         public async ValueTask WriteFileAndFlushAsync(
             string path,
@@ -732,7 +1035,10 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
 
         public void DeleteArtifact(
             string path,
-            PackageCacheArtifactKind artifactKind) =>
+            PackageCacheArtifactKind artifactKind)
+        {
+            DeletedPaths.Add(path);
             _inner.DeleteArtifact(path, artifactKind);
+        }
     }
 }

@@ -29,6 +29,21 @@ public class FhirPackageManagerOptions
     public CorruptCacheBehavior CorruptCacheBehavior { get; set; } = CorruptCacheBehavior.Repair;
 
     /// <summary>
+    /// Preserves distributed package paths and prevents resource-index payload writes.
+    /// Missing, invalid, or forcibly rebuilt indexes are held in memory instead.
+    /// Default: <c>false</c>.
+    /// </summary>
+    /// <remarks>
+    /// Snapshotted at manager construction and applied to all installations,
+    /// dependencies, restores, and index operations. This is a runtime policy,
+    /// not a persistent package flag or a read-only cache: explicit replacement,
+    /// removal, and cache bookkeeping remain available. A later ordinary manager
+    /// may maintain indexes, and existing cache hits are not reconstructed.
+    /// Requires the built-in coordinated cache and read-only managed index builder.
+    /// </remarks>
+    public bool Unmodified { get; set; }
+
+    /// <summary>
     /// Path to the local package cache directory.
     /// When <c>null</c>, the <c>PACKAGE_CACHE_FOLDER</c> environment variable is used
     /// if set; otherwise defaults to <c>~/.fhir/packages</c>.

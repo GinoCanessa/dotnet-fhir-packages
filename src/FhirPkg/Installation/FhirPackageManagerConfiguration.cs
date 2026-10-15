@@ -34,6 +34,7 @@ internal sealed record FhirPackageManagerConfiguration
         {
             InstallLimits = CopyLimits(limits),
             CorruptCacheBehavior = configuredOptions.CorruptCacheBehavior,
+            Unmodified = configuredOptions.Unmodified,
             CachePath = configuredOptions.CachePath,
             Registries = configuredOptions.Registries.Select(CloneEndpoint).ToList(),
             IncludeCiBuilds = configuredOptions.IncludeCiBuilds,
