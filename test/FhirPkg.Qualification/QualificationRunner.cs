@@ -352,7 +352,8 @@ internal sealed class QualificationRunner
             {
                 result.Failure = new QualificationFailure
                 {
-                    Code = "LocalFixtureHashMismatch",
+                    Code = QualificationFailureCodes
+                        .LocalFixtureHashMismatch,
                     ExceptionType =
                         nameof(QualificationInvariantException),
                     Message =
@@ -417,7 +418,8 @@ internal sealed class QualificationRunner
             {
                 result.Failure = new QualificationFailure
                 {
-                    Code = "ImmutableHashMismatch",
+                    Code = QualificationFailureCodes
+                        .ImmutableHashMismatch,
                     ExceptionType =
                         nameof(QualificationInvariantException),
                     Message =
@@ -1417,6 +1419,7 @@ internal sealed class QualificationRunner
 
         return new QualificationFailure
         {
+            Code = QualificationFailureCodes.Classify(exception),
             ExceptionType = exception.GetType().Name,
             Message = _sanitizer.Sanitize(exception.Message)
         };
@@ -1447,8 +1450,10 @@ internal sealed class QualificationRunner
                 return artifact;
             }
 
-            throw new QualificationInvariantException(
-                $"Required artifact '{id}' was unavailable.");
+            Detail(
+                RequiredArtifactUnavailableException.DetailName,
+                id);
+            throw new RequiredArtifactUnavailableException(id);
         }
 
         internal string CreateEmptyCache(string? suffix = null)

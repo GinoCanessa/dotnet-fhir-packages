@@ -13,6 +13,10 @@ internal static class Program
     {
         DateTimeOffset startedUtc = DateTimeOffset.UtcNow;
         string? outputPath = TryGetOption(args, "output");
+        string? summaryPath = TryGetOption(args, "summary");
+        string summaryTitle = QualificationArguments
+            .NormalizeSummaryTitle(
+                TryGetOption(args, "summary-title"));
         string corpusSha256 = new('0', 64);
         bool validationOnly = false;
         QualificationBuildSnapshot build =
@@ -40,6 +44,8 @@ internal static class Program
             QualificationArguments arguments =
                 QualificationArguments.Parse(args);
             outputPath = arguments.OutputPath;
+            summaryPath = arguments.SummaryPath;
+            summaryTitle = arguments.SummaryTitle;
             validationOnly = arguments.ValidateOnly;
             sanitizer = new ReportSanitizer(
             [
@@ -120,18 +126,42 @@ internal static class Program
             }
             catch (Exception writeException)
             {
+                report = CreateFailureReport(
+                    startedUtc,
+                    corpusSha256,
+                    validationOnly,
+                    build,
+                    CreateFailure(
+                        writeException,
+                        sanitizer));
                 string fallback = JsonSerializer.Serialize(
-                    CreateFailureReport(
-                        startedUtc,
-                        corpusSha256,
-                        validationOnly,
-                        build,
-                        CreateFailure(
-                            writeException,
-                            sanitizer)),
+                    report,
                     QualificationJson.SerializerOptions);
                 await Console.Out.WriteLineAsync(fallback)
                     .ConfigureAwait(false);
+            }
+
+            if (!string.IsNullOrWhiteSpace(summaryPath))
+            {
+                try
+                {
+                    await QualificationSummaryWriter.WriteAsync(
+                            report,
+                            summaryTitle,
+                            GetReportFileName(
+                                outputPath,
+                                reportWritten),
+                            summaryPath,
+                            Console.Out,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception summaryException)
+                {
+                    await Console.Error.WriteLineAsync(
+                            $"Warning: the qualification summary was not written: {summaryException.Message}")
+                        .ConfigureAwait(false);
+                }
             }
         }
 
@@ -201,10 +231,18 @@ internal static class Program
 
         return new QualificationFailure
         {
+            Code = QualificationFailureCodes.Classify(exception),
             ExceptionType = exception.GetType().Name,
             Message = sanitizer.Sanitize(exception.Message)
         };
     }
+
+    private static string GetReportFileName(
+        string? outputPath,
+        bool reportWritten) =>
+        reportWritten && !string.IsNullOrWhiteSpace(outputPath)
+            ? Path.GetFileName(outputPath)
+            : "standard output";
 
     private static async Task WriteReportAtomicallyAsync(
         string outputPath,

@@ -6,6 +6,8 @@ namespace FhirPkg.Qualification;
 
 internal sealed record QualificationArguments
 {
+    internal const string DefaultSummaryTitle = "qualification";
+
     private static readonly HashSet<string> s_supportedOptions =
         new(StringComparer.OrdinalIgnoreCase)
         {
@@ -14,6 +16,8 @@ internal sealed record QualificationArguments
             "http-timeout-seconds",
             "output",
             "process-host",
+            "summary",
+            "summary-title",
             "validate-only"
         };
 
@@ -24,6 +28,10 @@ internal sealed record QualificationArguments
     internal required string CorpusPath { get; init; }
 
     internal string? ProcessHostPath { get; init; }
+
+    internal string? SummaryPath { get; init; }
+
+    internal required string SummaryTitle { get; init; }
 
     internal required TimeSpan HttpTimeout { get; init; }
 
@@ -104,10 +112,22 @@ internal sealed record QualificationArguments
                 out string? processHost)
                 ? Path.GetFullPath(processHost)
                 : null,
+            SummaryPath = values.TryGetValue(
+                "summary",
+                out string? summary)
+                ? Path.GetFullPath(summary)
+                : null,
+            SummaryTitle = NormalizeSummaryTitle(
+                values.GetValueOrDefault("summary-title")),
             HttpTimeout = TimeSpan.FromSeconds(timeoutSeconds),
             ValidateOnly = validateOnly
         };
     }
+
+    internal static string NormalizeSummaryTitle(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? DefaultSummaryTitle
+            : value;
 
     private static bool GetBoolean(
         IReadOnlyDictionary<string, string> values,
