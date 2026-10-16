@@ -461,8 +461,15 @@ public class DiskPackageCache :
             }
 
             if (options.SkipIfArchiveUnchanged
+                && !options.Unmodified
                 && initialInspection.State
-                    == PackageCacheInspectionState.Valid)
+                    == PackageCacheInspectionState.Valid
+                && string.Equals(
+                    initialInspection.ContentPath,
+                    Path.Combine(
+                        initialInspection.TargetPath,
+                        PackageSubdirectory),
+                    StringComparison.Ordinal))
             {
                 CacheMetadataEntry? existingEntry =
                     await _metadataStore.GetEntryAsync(cacheKey, ct)
@@ -509,7 +516,7 @@ public class DiskPackageCache :
             string stagingDirectory = Path.Combine(
                 acquiredContent.OperationDirectory,
                 "expanded");
-            string stagedContentPath;
+            long sizeBytes;
             try
             {
                 await using FileStream archiveStream =
@@ -522,6 +529,7 @@ public class DiskPackageCache :
                             reference.FhirDirective,
                             ct)
                         .ConfigureAwait(false);
+                sizeBytes = metrics.ExpandedBytes;
                 _logger.LogDebug(
                     "Extracted {EntryCount} entries and {ExpandedBytes} bytes for {Directive}.",
                     metrics.EntryCount,
@@ -537,7 +545,7 @@ public class DiskPackageCache :
                         reference,
                         "Package archive inventory was not produced.");
                 PackageArchiveLayoutResult layout =
-                    TarballExtractor.ValidateAndNormalizePackageStructure(
+                    PackageArchiveContentLocator.Locate(
                         stagingDirectory,
                         inventory,
                         reference.FhirDirective);
@@ -557,7 +565,14 @@ public class DiskPackageCache :
                         reference.FhirDirective);
                 }
 
-                stagedContentPath = layout.ContentPath;
+                if (layout.Layout == PackageArchiveLayout.Legacy
+                    && !options.Unmodified)
+                {
+                    PackageStructureNormalizer.WrapLegacyRoot(
+                        stagingDirectory,
+                        _fileOperations,
+                        ct);
+                }
             }
             catch (PackageInstallException)
             {
@@ -572,7 +587,6 @@ public class DiskPackageCache :
                 throw InvalidArchive(reference, exception);
             }
 
-            long sizeBytes = CalculateDirectorySize(stagedContentPath);
             CacheMetadataEntry entry = new()
             {
                 DownloadDateTime =
@@ -707,7 +721,7 @@ public class DiskPackageCache :
                 "package import",
                 PackageProgressPhase.Extracting);
             PackageIdentityValidationResult identity;
-            string stagedContentPath;
+            long sizeBytes;
             try
             {
                 await using FileStream archiveStream =
@@ -720,6 +734,7 @@ public class DiskPackageCache :
                             "package import",
                             cancellationToken)
                         .ConfigureAwait(false);
+                sizeBytes = metrics.ExpandedBytes;
                 PackageArchiveInventory inventory = metrics.Inventory
                     ?? throw new PackageInstallException(
                         PackageInstallErrorCode.InvalidArchive,
@@ -730,7 +745,7 @@ public class DiskPackageCache :
                     "package import",
                     PackageProgressPhase.Validating);
                 PackageArchiveLayoutResult layout =
-                    TarballExtractor.ValidateAndNormalizePackageStructure(
+                    PackageArchiveContentLocator.Locate(
                         stagingDirectory,
                         inventory,
                         "package import");
@@ -739,7 +754,14 @@ public class DiskPackageCache :
                         "package import",
                         cancellationToken)
                     .ConfigureAwait(false);
-                stagedContentPath = layout.ContentPath;
+                if (layout.Layout == PackageArchiveLayout.Legacy
+                    && !options.Unmodified)
+                {
+                    PackageStructureNormalizer.WrapLegacyRoot(
+                        stagingDirectory,
+                        _fileOperations,
+                        cancellationToken);
+                }
             }
             catch (PackageInstallException)
             {
@@ -802,7 +824,6 @@ public class DiskPackageCache :
                     cacheKey.DisplayReference.Name,
                     PackageProgressPhase.Repairing);
             }
-            long sizeBytes = CalculateDirectorySize(stagedContentPath);
             CacheMetadataEntry entry = new()
             {
                 DownloadDateTime =
@@ -1092,6 +1113,7 @@ public class DiskPackageCache :
     async Task<PackageIndex?> IPackageCacheIndexStore.GetOrCreateIndexAsync(
         PackageReference reference,
         bool forceReindex,
+        bool persistIndex,
         Func<PackageRecord, CancellationToken, Task<PackageIndex>> generator,
         CancellationToken cancellationToken,
         Action<PackageRecord, PackageIndex>? indexReady)
@@ -1155,6 +1177,33 @@ public class DiskPackageCache :
 
         string expectedTargetPath = inspection.TargetPath;
         string expectedContentPath = inspection.ContentPath!;
+        if (!persistIndex)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            PackageCacheInspection currentInspection =
+                await _validator.InspectAsync(
+                        cacheKey,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            EnsureIndexCommitTargetIsUnchanged(
+                cacheKey,
+                currentInspection,
+                expectedTargetPath,
+                expectedContentPath);
+            EnsureGeneratedIndexIsValid(
+                generatedIndex,
+                currentInspection.ContentPath!);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            indexReady?.Invoke(
+                package with
+                {
+                    Index = generatedIndex,
+                },
+                generatedIndex);
+            return generatedIndex;
+        }
+
         string indexPath = Path.Combine(
             expectedContentPath,
             IndexFileName);
@@ -1991,21 +2040,6 @@ public class DiskPackageCache :
     {
         lock (_mutationSubscriptionsLock)
             _mutationSubscriptions.Remove(subscriptionId);
-    }
-
-    private static long CalculateDirectorySize(string path)
-    {
-        long total = 0;
-        foreach (FileInfo file in new DirectoryInfo(path)
-            .EnumerateFiles("*", SearchOption.AllDirectories))
-        {
-            checked
-            {
-                total += file.Length;
-            }
-        }
-
-        return total;
     }
 
     private static PackageInstallException InvalidArchive(

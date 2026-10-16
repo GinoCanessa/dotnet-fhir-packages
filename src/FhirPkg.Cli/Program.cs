@@ -44,6 +44,12 @@ internal static class Program
             Recursive = true
         };
 
+        Option<bool?> unmodifiedOption = new Option<bool?>("--unmodified")
+        {
+            Description = "Preserve distributed package paths and keep generated resource indexes in memory.",
+            Recursive = true
+        };
+
         Option<bool> verboseOption = new Option<bool>("--verbose", "-v")
         {
             Description = "Enable verbose output.",
@@ -78,6 +84,7 @@ internal static class Program
         };
 
         rootCommand.Add(cachePathOption);
+        rootCommand.Add(unmodifiedOption);
         rootCommand.Add(verboseOption);
         rootCommand.Add(quietOption);
         rootCommand.Add(noColorOption);
@@ -86,6 +93,7 @@ internal static class Program
 
         // Store option references so command handlers can retrieve them
         GlobalOptionsBinder.CachePathOption = cachePathOption;
+        GlobalOptionsBinder.UnmodifiedOption = unmodifiedOption;
         GlobalOptionsBinder.VerboseOption = verboseOption;
         GlobalOptionsBinder.QuietOption = quietOption;
         GlobalOptionsBinder.NoColorOption = noColorOption;
@@ -157,6 +165,9 @@ internal sealed record GlobalOptions
     /// <summary>Custom package cache directory, or <c>null</c> for the default.</summary>
     public string? CachePath { get; init; }
 
+    /// <summary>Whether to preserve package payloads, or <c>null</c> to use configuration defaults.</summary>
+    public bool? Unmodified { get; init; }
+
     /// <summary>Whether verbose output is enabled.</summary>
     public bool Verbose { get; init; }
 
@@ -175,6 +186,9 @@ internal sealed record GlobalOptions
     /// requests.
     /// </summary>
     public string? GitHubToken { get; init; }
+
+    /// <summary>Optional config loader override for isolated command tests; <c>null</c> restores file loading.</summary>
+    internal static Func<ConfigFile?>? ConfigLoaderOverride { get; set; }
 
     /// <summary>
     /// Builds a <see cref="FhirPackageManagerOptions"/> instance by merging global CLI flags
@@ -198,6 +212,11 @@ internal sealed record GlobalOptions
             options.CachePath = CachePath;
         }
 
+        if (Unmodified is not null)
+        {
+            options.Unmodified = Unmodified.Value;
+        }
+
         if (GitHubToken is not null)
         {
             options.GitHubToken = GitHubToken;
@@ -208,6 +227,11 @@ internal sealed record GlobalOptions
 
     private static ConfigFile? loadConfigFile()
     {
+        if (ConfigLoaderOverride is Func<ConfigFile?> loader)
+        {
+            return loader();
+        }
+
         string[] candidates =
         [
             Path.Combine(Directory.GetCurrentDirectory(), ".fhir-pkg.json"),
@@ -245,6 +269,11 @@ internal sealed record GlobalOptions
         if (config.CachePath is not null)
         {
             target.CachePath = config.CachePath;
+        }
+
+        if (config.Unmodified is not null)
+        {
+            target.Unmodified = config.Unmodified.Value;
         }
 
         if (config.HttpTimeout is > 0)
@@ -294,6 +323,9 @@ internal sealed class ConfigFile
     /// <summary>Custom package cache path.</summary>
     public string? CachePath { get; set; }
 
+    /// <summary>Whether to preserve distributed payloads and avoid resource-index writes.</summary>
+    public bool? Unmodified { get; set; }
+
     /// <summary>HTTP timeout in seconds.</summary>
     public int? HttpTimeout { get; set; }
 
@@ -336,6 +368,7 @@ internal sealed class ConfigRegistry
 internal static class GlobalOptionsBinder
 {
     private static Option<string?>? _cachePathOption;
+    private static Option<bool?>? _unmodifiedOption;
     private static Option<bool>? _verboseOption;
     private static Option<bool>? _quietOption;
     private static Option<bool>? _noColorOption;
@@ -347,6 +380,13 @@ internal static class GlobalOptionsBinder
     {
         get => _cachePathOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
         set => _cachePathOption = value;
+    }
+
+    /// <summary>The --unmodified option.</summary>
+    public static Option<bool?> UnmodifiedOption
+    {
+        get => _unmodifiedOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _unmodifiedOption = value;
     }
 
     /// <summary>The --verbose / -v option.</summary>
@@ -407,6 +447,7 @@ internal static class ParseResultExtensions
         return new GlobalOptions
         {
             CachePath = parseResult.GetValue(GlobalOptionsBinder.CachePathOption),
+            Unmodified = parseResult.GetValue(GlobalOptionsBinder.UnmodifiedOption),
             Verbose = parseResult.GetValue(GlobalOptionsBinder.VerboseOption),
             Quiet = parseResult.GetValue(GlobalOptionsBinder.QuietOption),
             NoColor = noColor,

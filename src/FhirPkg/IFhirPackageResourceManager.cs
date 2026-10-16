@@ -8,11 +8,19 @@ namespace FhirPkg;
 
 /// <summary>
 /// Optional package-resource capability implemented by managers that support
-/// durable package indexes and resource reads.
+/// package indexes and resource reads.
 /// </summary>
+/// <remarks>
+/// With <see cref="FhirPackageManagerOptions.Unmodified"/>, managers reuse valid
+/// distributed indexes or build validated indexes in memory without payload writes.
+/// Forced reindexing also stays in memory; transient indexes last only for that manager.
+/// </remarks>
 public interface IFhirPackageResourceManager
 {
-    /// <summary>Loads or generates the resource index for one cached package.</summary>
+    /// <summary>
+    /// Loads or generates the resource index for one cached package, persisting
+    /// generated indexes only when the manager's runtime policy permits it.
+    /// </summary>
     Task<PackageIndex?> IndexPackageAsync(
         PackageReference reference,
         IndexingOptions? options = null,

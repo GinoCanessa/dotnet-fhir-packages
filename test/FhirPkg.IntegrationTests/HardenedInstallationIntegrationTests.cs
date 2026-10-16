@@ -41,77 +41,144 @@ public sealed class HardenedInstallationIntegrationTests
     private static readonly PackageReference s_coreReference =
         new("hl7.fhir.r4.core", "4.0.1");
 
-    [Fact]
-    public async Task ManagerSourceModes_InstallThroughOneValidatedContract()
+    public static TheoryData<bool, bool, string> SourceLayoutModes
+    {
+        get
+        {
+            TheoryData<bool, bool, string> cases = [];
+            foreach (bool rootLayout in new[] { false, true })
+            {
+                foreach (bool unmodified in new[] { false, true })
+                {
+                    foreach (string state in new[] { "valid", "missing", "invalid", "unusable", "directory" })
+                        cases.Add(rootLayout, unmodified, state);
+                }
+            }
+
+            return cases;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(SourceLayoutModes))]
+    public async Task ManagerSourceModes_InstallThroughOneValidatedContract(
+        bool rootLayout,
+        bool unmodified,
+        string indexState)
     {
         using TestWorkspace workspace = new();
-        using FhirPackageManager manager = new(
-            new FhirPackageManagerOptions
+        using FhirPackageManager manager = CreateSourceManager(workspace.CachePath, unmodified);
+        using DiskPackageCache cache = new(workspace.CachePath);
+        foreach (string sourceMode in new[] { "expected.stream", "import.stream", "expected.uri", "import.uri" })
+        {
+            PackageReference reference = new($"source.{sourceMode}", "1.0.0");
+            using MemoryStream archive = CreatePreservationArchive(reference, rootLayout, indexState, "source");
+            byte[] original = archive.ToArray();
+            ArchivePayload payload = await ReadArchivePayloadAsync(original);
+            PackageSourceInstallOptions options = new()
             {
-                CachePath = workspace.CachePath,
-                IncludeCiBuilds = false,
-                IncludeHl7WebsiteFallback = false
-            });
+                ExpectedSha256 = Convert.ToHexString(SHA256.HashData(original)).ToLowerInvariant(),
+                ExpectedSha1 = Convert.ToHexString(SHA1.HashData(original)).ToLowerInvariant(),
+            };
 
-        await using MemoryStream expectedStream =
-            CreateArchive("source.expected.stream", "1.0.0");
-        PackageRecord expectedStreamRecord =
-            await manager.InstallAsync(
-                new PackageReference(
-                    "source.expected.stream",
-                    "1.0.0"),
-                expectedStream,
-                options: null,
-                TestContext.Current.CancellationToken);
+            PackageRecord record = await InstallSourceAsync(manager, reference, sourceMode, original, options);
 
-        await using MemoryStream importStream =
-            CreateArchive("source.import.stream", "1.0.0");
-        PackageRecord importStreamRecord =
-            await manager.ImportAsync(
-                importStream,
-                options: null,
-                TestContext.Current.CancellationToken);
+            AssertSourcePayload(record, reference, payload, rootLayout, unmodified,
+                allowDerivedIndex: !unmodified && indexState is not "valid" and not "directory");
+            CacheMetadataEntry metadata = (await cache.GetMetadataAsync(
+                TestContext.Current.CancellationToken)).Packages[reference.FhirDirective];
+            metadata.ArchiveSha256.ShouldBe(options.ExpectedSha256);
+            metadata.SizeBytes.ShouldBe(payload.Files.Values.Sum(bytes => bytes.LongLength));
+            metadata.ContentGeneration.ShouldNotBeNullOrWhiteSpace();
+            string canonical = $"https://example.test/{reference.Name}/resource";
+            if (!unmodified && indexState == "directory")
+            {
+                record.Index.ShouldBeNull();
+                await Should.ThrowAsync<IOException>(() => manager.FindByCanonicalUrlAsync(
+                    canonical, reference.FhirDirective, TestContext.Current.CancellationToken));
+                await Should.ThrowAsync<IOException>(() => manager.IndexPackageAsync(
+                    reference, new IndexingOptions { ForceReindex = true },
+                    TestContext.Current.CancellationToken));
+            }
+            else
+            {
+                record.Index.ShouldNotBeNull();
+                ResourceInfo resource = (await manager.FindByCanonicalUrlAsync(
+                    canonical, reference.FhirDirective, TestContext.Current.CancellationToken))
+                    .ShouldNotBeNull();
+                resource.PackageName.ShouldBe(reference.Name);
+                resource.PackageVersion.ShouldBe(reference.Version);
+                resource.FilePath.ShouldBe("resource.json");
+                (await manager.ReadResourceAsync(resource, TestContext.Current.CancellationToken))!
+                    ["id"]!.GetValue<string>().ShouldBe("source");
+                (await manager.FindResourcesAsync(
+                    new ResourceSearchCriteria { PackageScope = reference.FhirDirective },
+                    TestContext.Current.CancellationToken)).ShouldHaveSingleItem();
+                PackageIndex forced = (await manager.IndexPackageAsync(
+                    reference, new IndexingOptions { ForceReindex = true },
+                    TestContext.Current.CancellationToken)).ShouldNotBeNull();
+                forced.Files.ShouldHaveSingleItem().Filename.ShouldBe("resource.json");
+            }
 
-        byte[] expectedUriArchive =
-            CreateArchive("source.expected.uri", "1.0.0").ToArray();
-        await using SingleResponseHttpServer expectedServer =
-            await SingleResponseHttpServer.StartAsync(
-                expectedUriArchive,
-                TestContext.Current.CancellationToken);
-        PackageRecord expectedUriRecord =
-            await manager.InstallAsync(
-                new PackageReference(
-                    "source.expected.uri",
-                    "1.0.0"),
-                expectedServer.Uri,
-                options: null,
-                TestContext.Current.CancellationToken);
+            AssertSourcePayload(record, reference, payload, rootLayout, unmodified,
+                allowDerivedIndex: !unmodified && indexState != "directory");
+            PackageIndex? onDisk = await cache.GetIndexAsync(reference, TestContext.Current.CancellationToken);
+            if ((!unmodified && indexState != "directory") || indexState == "valid")
+                onDisk.ShouldNotBeNull();
+            else
+                onDisk.ShouldBeNull();
+            (await cache.GetMetadataAsync(TestContext.Current.CancellationToken))
+                .Packages[reference.FhirDirective].ShouldBe(metadata);
+            AssertSourceOperationArtifactsClean(workspace.CachePath);
+        }
 
-        byte[] importUriArchive =
-            CreateArchive("source.import.uri", "1.0.0").ToArray();
-        await using SingleResponseHttpServer importServer =
-            await SingleResponseHttpServer.StartAsync(
-                importUriArchive,
-                TestContext.Current.CancellationToken);
-        PackageRecord importUriRecord =
-            await manager.ImportAsync(
-                importServer.Uri,
-                options: null,
-                TestContext.Current.CancellationToken);
+        (await cache.ListPackagesAsync(ct: TestContext.Current.CancellationToken)).Count.ShouldBe(4);
+    }
 
-        expectedStreamRecord.Reference.Name.ShouldBe(
-            "source.expected.stream");
-        importStreamRecord.Reference.Name.ShouldBe(
-            "source.import.stream");
-        expectedUriRecord.Reference.Name.ShouldBe(
-            "source.expected.uri");
-        importUriRecord.Reference.Name.ShouldBe(
-            "source.import.uri");
-        IReadOnlyList<PackageRecord> cached =
-            await manager.ListCachedAsync(
-                cancellationToken:
-                    TestContext.Current.CancellationToken);
-        cached.Count.ShouldBe(4);
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ManagerSourceModes_ChecksumFailure_PreservesPriorTreeAndCallerStream(
+        bool rootLayout,
+        bool unmodified)
+    {
+        using TestWorkspace workspace = new();
+        using FhirPackageManager manager = CreateSourceManager(workspace.CachePath, unmodified);
+        PackageReference reference = new("checksum.package", "1.0.0");
+        using MemoryStream initial = CreatePreservationArchive(reference, rootLayout, "valid", "old");
+        byte[] original = initial.ToArray();
+        ArchivePayload payload = await ReadArchivePayloadAsync(original);
+        PackageRecord prior = await manager.InstallAsync(
+            reference, initial, options: null, TestContext.Current.CancellationToken);
+        initial.CanRead.ShouldBeTrue();
+        AssertSourcePayload(prior, reference, payload, rootLayout, unmodified, allowDerivedIndex: false);
+        byte[] metadataBefore = File.ReadAllBytes(Path.Combine(workspace.CachePath, "packages.ini"));
+        using MemoryStream replacement = CreatePreservationArchive(reference, rootLayout, "valid", "new");
+        byte[] replacementBytes = replacement.ToArray();
+
+        foreach (string sourceMode in new[] { "expected.stream", "import.stream", "expected.uri", "import.uri" })
+        {
+            foreach (bool sha256 in new[] { false, true })
+            {
+                PackageSourceInstallOptions options = new()
+                {
+                    OverwriteExisting = true,
+                    ExpectedSha256 = sha256 ? new string('0', 64) : null,
+                    ExpectedSha1 = sha256 ? null : new string('0', 40),
+                };
+                PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(
+                    () => InstallSourceAsync(manager, reference, sourceMode, replacementBytes, options));
+                exception.ErrorCode.ShouldBe(PackageInstallErrorCode.ChecksumMismatch);
+                exception.Stage.ShouldBe(PackageInstallStage.ChecksumValidation);
+
+                // No SDK read may recover or clean a failed operation before these assertions.
+                AssertSourcePayload(prior, reference, payload, rootLayout, unmodified, allowDerivedIndex: false);
+                File.ReadAllBytes(Path.Combine(workspace.CachePath, "packages.ini")).ShouldBe(metadataBefore);
+                AssertSourceOperationArtifactsClean(workspace.CachePath);
+            }
+        }
     }
 
     [Fact]
@@ -639,6 +706,194 @@ public sealed class HardenedInstallationIntegrationTests
             .ShouldBe(ExitCodes.DependencyResolutionFail);
     }
 
+    private static FhirPackageManager CreateSourceManager(string cachePath, bool unmodified) =>
+        new(new FhirPackageManagerOptions
+        {
+            CachePath = cachePath,
+            Unmodified = unmodified,
+            IncludeCiBuilds = false,
+            IncludeHl7WebsiteFallback = false,
+            Registries = [],
+        });
+
+    private static async Task<PackageRecord> InstallSourceAsync(
+        FhirPackageManager manager,
+        PackageReference reference,
+        string sourceMode,
+        byte[] archive,
+        PackageSourceInstallOptions options)
+    {
+        bool import = sourceMode.StartsWith("import", StringComparison.Ordinal);
+        if (sourceMode.EndsWith("stream", StringComparison.Ordinal))
+        {
+            using MemoryStream source = new([42, 43, 44, .. archive]);
+            source.Position = 3;
+            try
+            {
+                return import
+                    ? await manager.ImportAsync(source, options, TestContext.Current.CancellationToken)
+                    : await manager.InstallAsync(reference, source, options, TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                source.CanRead.ShouldBeTrue("The supplied stream remains caller-owned, including on failure.");
+                source.Position.ShouldBe(source.Length);
+                source.Position = 3;
+                source.ReadByte().ShouldBe(archive[0]);
+            }
+        }
+
+        await using SingleResponseHttpServer server = await SingleResponseHttpServer.StartAsync(
+            archive, TestContext.Current.CancellationToken);
+        return import
+            ? await manager.ImportAsync(server.Uri, options, TestContext.Current.CancellationToken)
+            : await manager.InstallAsync(reference, server.Uri, options, TestContext.Current.CancellationToken);
+    }
+
+    private sealed record ArchivePayload(
+        IReadOnlyDictionary<string, byte[]> Files,
+        IReadOnlySet<string> Directories);
+
+    private static async Task<ArchivePayload> ReadArchivePayloadAsync(byte[] archiveBytes)
+    {
+        Dictionary<string, byte[]> files = new(StringComparer.Ordinal);
+        HashSet<string> directories = new(StringComparer.Ordinal);
+        using MemoryStream archive = new(archiveBytes);
+        await using GZipStream gzip = new(archive, CompressionMode.Decompress);
+        await using TarReader reader = new(gzip);
+        while (await reader.GetNextEntryAsync(
+            cancellationToken: TestContext.Current.CancellationToken) is TarEntry entry)
+        {
+            string path = entry.Name.TrimEnd('/');
+            string[] segments = path.Split('/');
+            int directoryDepth = entry.EntryType == TarEntryType.Directory
+                ? segments.Length
+                : segments.Length - 1;
+            for (int depth = 1; depth <= directoryDepth; depth++)
+                directories.Add(string.Join("/", segments.Take(depth)));
+            if (entry.EntryType == TarEntryType.Directory)
+                continue;
+
+            entry.EntryType.ShouldBe(TarEntryType.RegularFile);
+            using MemoryStream content = new();
+            await entry.DataStream!.CopyToAsync(content, TestContext.Current.CancellationToken);
+            files.Add(path, content.ToArray());
+        }
+
+        return new ArchivePayload(files, directories);
+    }
+
+    private static void AssertSourcePayload(
+        PackageRecord record,
+        PackageReference reference,
+        ArchivePayload payload,
+        bool rootLayout,
+        bool unmodified,
+        bool allowDerivedIndex)
+    {
+        if (unmodified)
+            allowDerivedIndex.ShouldBeFalse();
+        record.Reference.ShouldBe(reference);
+        record.Manifest.Name.ShouldBe(reference.Name);
+        record.Manifest.Version.ShouldBe(reference.Version);
+        record.ContentPath.ShouldBe(rootLayout && unmodified
+            ? record.DirectoryPath
+            : Path.Combine(record.DirectoryPath, "package"));
+        record.SizeBytes.ShouldBe(payload.Files.Values.Sum(bytes => bytes.LongLength));
+        string wrapper = rootLayout && !unmodified ? "package/" : string.Empty;
+        Dictionary<string, byte[]> expected = payload.Files.ToDictionary(
+            file => wrapper + file.Key, file => file.Value, StringComparer.Ordinal);
+        HashSet<string> directories = payload.Directories
+            .Select(path => wrapper + path).ToHashSet(StringComparer.Ordinal);
+        if (wrapper.Length != 0)
+            directories.Add("package");
+        string indexPath = Path.GetRelativePath(
+            record.DirectoryPath, Path.Combine(record.ContentPath, ".index.json")).Replace('\\', '/');
+        IEnumerable<string> expectedFiles = allowDerivedIndex
+            ? expected.Keys.Append(indexPath).Distinct(StringComparer.Ordinal)
+            : expected.Keys;
+        Directory.GetFiles(record.DirectoryPath, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(record.DirectoryPath, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(expectedFiles.OrderBy(path => path, StringComparer.Ordinal));
+        Directory.GetDirectories(record.DirectoryPath, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(record.DirectoryPath, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(directories.OrderBy(path => path, StringComparer.Ordinal));
+        foreach ((string path, byte[] bytes) in expected)
+        {
+            if (!allowDerivedIndex || path != indexPath)
+                File.ReadAllBytes(Path.Combine(record.DirectoryPath, path)).ShouldBe(bytes, path);
+        }
+    }
+
+    private static void AssertSourceOperationArtifactsClean(string cachePath)
+    {
+        foreach (string name in new[] { "staging", "transactions", "backup", "quarantine" })
+        {
+            string path = Path.Combine(cachePath, ".fhirpkg", name);
+            if (Directory.Exists(path))
+                Directory.GetFileSystemEntries(path).ShouldBeEmpty();
+        }
+    }
+
+    private static MemoryStream CreatePreservationArchive(
+        PackageReference reference,
+        bool rootLayout,
+        string indexState,
+        string generation)
+    {
+        string prefix = rootLayout ? string.Empty : "package/";
+        string canonical = $"https://example.test/{reference.Name}/resource";
+        MemoryStream archive = new();
+        using (GZipStream gzip = new(archive, CompressionLevel.Fastest, leaveOpen: true))
+        using (TarWriter writer = new(gzip, TarEntryFormat.Pax))
+        {
+            WriteEntry(writer, $"{prefix}package.json",
+                $$"""{"name":"{{reference.Name}}","version":"{{reference.Version}}","description":"{{generation}}"}""");
+            WriteEntry(writer, $"{prefix}resource.json",
+                $$"""{"resourceType":"StructureDefinition","id":"{{generation}}","url":"{{canonical}}","kind":"resource","derivation":"constraint","type":"Patient"}""");
+            WriteEntry(writer, "README.txt", $"{generation} distributed root payload");
+            WriteEntry(writer, "packages.ini", $"{generation} distributed metadata");
+            WriteEntry(writer, ".fhirpkg/payload.bin", [0, 128, 255, 13, 10]);
+            WriteEntry(writer, $"unknown/{generation}-source.yaml", "../other/sentinel.txt");
+            WriteEntry(writer, "unknown/package.json", "{opaque ancillary manifest");
+            WriteEntry(writer, "unknown/resource.json",
+                $$"""{"resourceType":"Patient","id":"unknown","url":"{{canonical}}/unknown"}""");
+            WriteEntry(writer, "other/sentinel.txt", $"{generation} sibling");
+            WriteEntry(writer, "other/.index.json", $"{generation} ancillary index");
+            WriteEntry(writer, "package/other/sentinel.txt", $"{generation} content subtree");
+            WriteEntry(writer, "package/other/.index.json", $"{generation} content ancillary index");
+            writer.WriteEntry(new PaxTarEntry(TarEntryType.Directory, "unknown/empty/"));
+            writer.WriteEntry(new PaxTarEntry(TarEntryType.Directory, $"{prefix}content/empty/"));
+            if (!rootLayout)
+                WriteEntry(writer, ".index.json", "opaque root index");
+            if (indexState == "directory")
+                WriteEntry(writer, $"{prefix}.index.json/payload.txt", "never delete this directory");
+            else if (indexState != "missing")
+            {
+                string index = indexState switch
+                {
+                    "valid" => $$"""
+                        {
+                          "publisher-extension": "retain formatting and bytes",
+                          "files": [ { "filename": "resource.json", "resourceType": "StructureDefinition",
+                            "id": "{{generation}}", "url": "{{canonical}}" } ],
+                          "index-version": 2
+                        }
+                        """,
+                    "invalid" => "{unusable JSON",
+                    "unusable" => """{"index-version":2,"files":[{"filename":"missing.json","resourceType":"Patient"}]}""",
+                    _ => throw new ArgumentException("Unknown index fixture state.", nameof(indexState)),
+                };
+                WriteEntry(writer, $"{prefix}.index.json", index);
+            }
+        }
+
+        archive.Position = 0;
+        return archive;
+    }
+
     private static FhirPackageManager CreateCoreManager(string cachePath) =>
         new(new FhirPackageManagerOptions
         {
@@ -931,18 +1186,12 @@ public sealed class HardenedInstallationIntegrationTests
         {
             files.Keys.Any(path => path.StartsWith(root + "/", StringComparison.Ordinal))
                 .ShouldBeTrue($"The retained {root}/ tree must contain payloads.");
-            string destination = "package/" + root;
-            allPaths.Any(path =>
-                string.Equals(path, destination, StringComparison.OrdinalIgnoreCase)
-                || path.StartsWith(destination + "/", StringComparison.OrdinalIgnoreCase))
-                .ShouldBeFalse($"Ancillary destination {destination} must be unoccupied.");
         }
 
         TestContext.Current.TestOutputHelper?.WriteLine(
             $"Inspected complete inventory: {entryCount} entries, {files.Count} files, " +
             $"{files.Values.Sum(bytes => bytes.LongLength)} expanded bytes; " +
-            $"roots: {string.Join(", ", expectedRoots)}; one exact manifest; " +
-            "all prospective ancillary destinations unoccupied.");
+            $"roots: {string.Join(", ", expectedRoots)}; one exact manifest.");
         return new CoreArchiveInventory(files, directories);
     }
 
@@ -956,16 +1205,12 @@ public sealed class HardenedInstallationIntegrationTests
         record.Manifest.Version.ShouldBe(s_coreReference.Version);
         record.DirectoryPath.ShouldBe(Path.Combine(cachePath, s_coreReference.FhirDirective));
         record.ContentPath.ShouldBe(Path.Combine(record.DirectoryPath, "package"));
-        Directory.EnumerateFileSystemEntries(record.DirectoryPath)
-            .Select(Path.GetFileName).ShouldHaveSingleItem().ShouldBe("package");
         record.SizeBytes.ShouldBe(inventory.Files.Values.Sum(bytes => bytes.LongLength));
 
-        foreach (string directory in inventory.Directories)
-        {
-            Directory.Exists(Path.Combine(
-                record.DirectoryPath,
-                NormalizeCoreArchivePath(directory))).ShouldBeTrue(directory);
-        }
+        Directory.EnumerateDirectories(record.DirectoryPath, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(record.DirectoryPath, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(inventory.Directories.OrderBy(path => path, StringComparer.Ordinal));
 
         foreach (KeyValuePair<string, byte[]> file in inventory.Files)
         {
@@ -976,13 +1221,13 @@ public sealed class HardenedInstallationIntegrationTests
             }
 
             byte[] installedBytes = await File.ReadAllBytesAsync(
-                Path.Combine(record.DirectoryPath, NormalizeCoreArchivePath(file.Key)),
+                Path.Combine(record.DirectoryPath, file.Key),
                 TestContext.Current.CancellationToken);
             installedBytes.SequenceEqual(file.Value).ShouldBeTrue(
                 $"Original payload changed: {file.Key}");
         }
 
-        string[] expectedFiles = inventory.Files.Keys.Select(NormalizeCoreArchivePath)
+        string[] expectedFiles = inventory.Files.Keys
             .Append("package/.index.json")
             .Distinct(StringComparer.Ordinal)
             .OrderBy(path => path, StringComparer.Ordinal)
@@ -1073,11 +1318,6 @@ public sealed class HardenedInstallationIntegrationTests
             || normalized.StartsWith("package/other/", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string NormalizeCoreArchivePath(string path) =>
-        path == "package" || path.StartsWith("package/", StringComparison.Ordinal)
-            ? path
-            : "package/" + path;
-
     private sealed record CoreArchiveInventory(
         IReadOnlyDictionary<string, byte[]> Files,
         IReadOnlySet<string> Directories);
@@ -1162,14 +1402,19 @@ public sealed class HardenedInstallationIntegrationTests
     private static void WriteEntry(
         TarWriter writer,
         string path,
-        string content)
+        string content) =>
+        WriteEntry(writer, path, Encoding.UTF8.GetBytes(content));
+
+    private static void WriteEntry(
+        TarWriter writer,
+        string path,
+        byte[] content)
     {
-        byte[] bytes = Encoding.UTF8.GetBytes(content);
         writer.WriteEntry(new PaxTarEntry(
             TarEntryType.RegularFile,
             path)
         {
-            DataStream = new MemoryStream(bytes)
+            DataStream = new MemoryStream(content)
         });
     }
 

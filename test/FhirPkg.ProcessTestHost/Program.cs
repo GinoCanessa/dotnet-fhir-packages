@@ -158,6 +158,7 @@ internal static class Program
                 new InstallCacheOptions
                 {
                     OverwriteExisting = arguments.Overwrite,
+                    Unmodified = arguments.Unmodified,
                     Progress = new FileProgressReporter(
                         arguments.ProgressPath)
                 },
@@ -188,6 +189,7 @@ internal static class Program
                 new InstallCacheOptions
                 {
                     OverwriteExisting = arguments.Overwrite,
+                    Unmodified = arguments.Unmodified,
                     Progress = new FileProgressReporter(
                         arguments.ProgressPath)
                 },
@@ -225,6 +227,7 @@ internal static class Program
                 new FhirPackageManagerOptions
                 {
                     CachePath = arguments.CachePath,
+                    Unmodified = arguments.Unmodified,
                     ResourceCacheSize = 0
                 },
                 contentionObserver);
@@ -254,6 +257,7 @@ internal static class Program
             new FhirPackageManagerOptions
             {
                 CachePath = arguments.CachePath,
+                Unmodified = arguments.Unmodified,
                 IncludeCiBuilds = false,
                 IncludeHl7WebsiteFallback = false,
                 Registries = [],
@@ -483,6 +487,7 @@ internal sealed record HostArguments
     internal string? PauseFault { get; init; }
     internal int? CancelAfterMilliseconds { get; init; }
     internal bool Overwrite { get; init; }
+    internal bool Unmodified { get; init; }
 
     internal static HostArguments Parse(string[] args)
     {
@@ -504,7 +509,11 @@ internal sealed record HostArguments
             if (string.Equals(
                 key,
                 "overwrite",
-                StringComparison.OrdinalIgnoreCase))
+                StringComparison.OrdinalIgnoreCase)
+                || string.Equals(
+                    key,
+                    "unmodified",
+                    StringComparison.OrdinalIgnoreCase))
             {
                 values[key] = null;
                 continue;
@@ -545,7 +554,8 @@ internal sealed record HostArguments
             ResultPath = GetOptional(values, "result"),
             PauseFault = GetOptional(values, "pause-fault"),
             CancelAfterMilliseconds = cancelAfter,
-            Overwrite = values.ContainsKey("overwrite")
+            Overwrite = values.ContainsKey("overwrite"),
+            Unmodified = values.ContainsKey("unmodified")
         };
     }
 

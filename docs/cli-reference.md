@@ -9,6 +9,7 @@ For installation instructions and a quick-start guide, see the
 ## Table of Contents
 
 - [Global Options](#global-options)
+- [Unmodified Packages](#unmodified-packages)
 - [Commands](#commands)
   - [install](#install)
   - [restore](#restore)
@@ -34,6 +35,7 @@ command-specific logic runs.
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--package-cache-folder <path>` | — | `string` | `PACKAGE_CACHE_FOLDER` env var, or `~/.fhir/packages` | Override the local FHIR package cache directory. |
+| `--unmodified [true\|false]` | — | `bool` | `unmodified` config key, else `false` | Preserve distributed package paths and avoid resource-index writes. |
 | `--verbose` | `-v` | `bool` | `FHIR_PKG_VERBOSE` env var | Enable verbose / debug output. |
 | `--quiet` | `-q` | `bool` | `false` | Suppress all non-essential output. Only errors are shown. |
 | `--no-color` | — | `bool` | `NO_COLOR` env var | Disable ANSI colored output. |
@@ -41,6 +43,53 @@ command-specific logic runs.
 | `--github-token <token>` | — | `string` | `githubToken` config key, else unauthenticated | GitHub token used **only** for the `api.github.com` repository lookups behind canonical CI build repository selection. Never sent to a package registry, and never echoed in output. |
 | `--help` | `-h` | — | — | Show help for the command. |
 | `--version` | — | — | — | Show the tool version. |
+
+`--unmodified` is recursive: it works before or after any command. A bare flag
+or `--unmodified true` enables it; `--unmodified false` disables it. When
+omitted, the `unmodified` config key applies, with an effective default of
+`false`. There is no environment-variable equivalent.
+
+---
+
+## Unmodified Packages
+
+The manager snapshots the effective setting for the lifetime of one CLI
+invocation. It covers all manager-owned installs, dependencies, restore, and
+index operations, not just the root package.
+
+The active resource index is `.index.json` in the selected content directory:
+normally `package/`, or the identity root for preserved root-layout packages.
+
+| Archive | Mode | Installed layout | Active resource index |
+|---------|------|------------------|-----------------------|
+| Standard (`package/package.json`) | Ordinary | Complete archive at the cache identity root; safe siblings stay in place | Reuse valid index; create or replace missing, invalid, or forced index in `package/` |
+| Standard | Unmodified | Same distributed layout | Reuse valid index or build only in memory |
+| Root-layout (`package.json`) | Ordinary | Entire archive wrapped once beneath `package/`, preserving relative relationships | Ordinary index maintenance in `package/` |
+| Root-layout | Unmodified | Complete archive at the identity root, without a wrapper | Reuse valid root index or build only in memory |
+
+Unmodified mode leaves missing or unusable index targets untouched. Even
+forced recomputation stays in memory; it never grants permission to overwrite
+an index file or an occupied index directory. These transient indexes last
+only for the invocation.
+
+An unchanged cache hit retains its existing generation and does **not** claim
+to reconstruct the original archive's layout or bytes. To reconstruct from
+the source under another mode, use `install --overwrite` (not `--force`):
+
+```bash
+fhir-pkg install example.package#1.0.0 --unmodified --overwrite \
+  --package-cache-folder ./unmodified-cache
+```
+
+**Compatibility:** Older FhirPkg versions and external FHIR tools may not
+recognize preserved root-layout entries and may classify them as corrupt. Use
+a dedicated cache when mixing unmodified mode with such tools. This setting
+does not freeze a shared cache or persist a protection flag; a later ordinary
+invocation may maintain indexes, and other tools remain free to modify it.
+
+Unmodified mode protects payloads from automatic transformation, not from
+explicit whole-package operations. Staging, cache bookkeeping, and recovery
+continue; `install --overwrite`, `remove`, and `clean` remain available.
 
 ---
 
@@ -81,7 +130,7 @@ hl7.fhir.us.core#current$main   # CI build for a branch
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--with-dependencies` | `-d` | `bool` | `false` | Also install transitive dependencies declared in each package's manifest. |
-| `--overwrite` | — | `bool` | `false` | Re-download packages already in the cache. An unchanged mutable CI archive is reported as refreshed. |
+| `--overwrite` | — | `bool` | `false` | Reacquire packages already in the cache; use to reconstruct from the source under another mode. An unchanged mutable CI archive may be reported as refreshed. |
 | `--fhir-version <release>` | `-f` | `string` | — | Preferred FHIR release when a package publishes multiple versions. Accepted values: `R4`, `R4B`, `R5`, `R6`. |
 | `--pre-release` | — | `bool` | `true` | Include pre-release versions when resolving wildcards, ranges, or `latest`. |
 | `--no-pre-release` | — | `bool` | `false` | Exclude pre-release versions. Takes precedence over `--pre-release`. |
@@ -127,6 +176,9 @@ With `--with-dependencies`, the root package is committed before its active
 dependency closure is installed. If any requested dependency fails, the command
 returns exit code `6`, lists each failed child directive, and reports the root
 cache path as committed partial state.
+
+The global [`--unmodified`](#unmodified-packages) policy applies to the root
+and every installed dependency. There is no separate per-package mode.
 
 #### Output
 
@@ -238,6 +290,9 @@ versions of one package, both versions and both transitive subgraphs remain in
 the result. `HighestWins` and `FirstWins` select only the preferred entry in the
 name-keyed projection. `Error` uses the first entry for that projection and
 also records a conflict failure; it does not prune either version.
+
+The global [`--unmodified`](#unmodified-packages) setting also governs every
+dependency installation and index operation performed by restore.
 
 > **Compatibility:** Pre-existing `fhirpkg.lock.json` files are ignored and
 > left untouched.
@@ -755,6 +810,7 @@ the two files are never merged:
 ```json
 {
   "cachePath": "/path/to/cache",
+  "unmodified": false,
   "httpTimeout": 60,
   "includeCiBuilds": true,
   "verifyChecksums": true,
@@ -772,6 +828,7 @@ the two files are never merged:
 | Field | Type | Description |
 |-------|------|-------------|
 | `cachePath` | `string` | Override the default cache directory. |
+| `unmodified` | `bool` | Default payload policy for the invocation; omitted or `null` means ordinary mode (`false`). Explicit `--unmodified true`/`false` overrides it; a bare flag means `true`. |
 | `httpTimeout` | `int` | HTTP timeout in seconds. |
 | `includeCiBuilds` | `bool` | Whether to include the CI build registry. |
 | `verifyChecksums` | `bool` | Whether to verify SHA-1 checksums on download. |
@@ -780,6 +837,11 @@ the two files are never merged:
 | `registries[].url` | `string` | Registry base URL. |
 | `registries[].type` | `string` | Registry type: `FhirNpm`, `FhirCiBuild`, `FhirHttp`, `Npm`. |
 | `registries[].auth` | `string` | Authorization header value. |
+
+For example, `"unmodified": true` applies when the flag is absent, but
+`--unmodified false` overrides it. Conversely, a bare `--unmodified` overrides
+`"unmodified": false`. The key has no environment-variable equivalent and is
+not stored against installed packages.
 
 ---
 

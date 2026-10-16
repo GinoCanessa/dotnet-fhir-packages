@@ -53,8 +53,12 @@ Each package version occupies its own directory within the cache, named with the
 - FhirPkg uses a reversible lowercase-safe encoding when identity characters
   are unsafe for portable paths/INI keys; `PackageRecord.Reference` preserves
   the requested display identity
-- All package contents reside within a `package/` subdirectory
-- Only `.json` files at the `package/` level are treated as FHIR resources (not subdirectories)
+- Standard archives retain safe root files and sibling trees beside `package/`;
+  the selected content directory remains `package/`
+- Ordinary root-layout installs wrap the complete archive once in `package/`;
+  unmodified root-layout installs use the identity root as the content directory
+- Only top-level `.json` files in the selected content directory are scanned
+  for FHIR resources (not sibling trees or subdirectories)
 - CI builds use `current` as the version component (e.g., `hl7.fhir.us.core#current`)
 
 ## Cache Metadata (`packages.ini`)
@@ -83,13 +87,19 @@ hl7.fhir.us.core#6.1.0 = 1048576
 |---------|----------|
 | `[cache]` | Cache format version |
 | `[packages]` | Directive → download datetime (`YYYYMMDDHHmmss`) |
-| `[package-sizes]` | Directive → expanded size in bytes |
+| `[package-sizes]` | Directive → whole archive's expanded file bytes, including siblings and supplied indexes |
 | `[package-source-publication-dates]` | Mutable-source publication timestamp |
 | `[package-archive-sha256]` | SHA-256 of the installed compressed archive |
 | `[package-content-generations]` | Content-generation counter for atomic replacement |
 
 FhirPkg writes `packages.ini` atomically under the cache-wide mutation lock and
 preserves unrelated/unknown sections.
+
+`PackageRecord.SizeBytes` uses that original expanded-archive measurement;
+later derived index creation or replacement does not recalculate it. The
+bookkeeping here belongs to the **cache root**. Distributed `packages.ini` or
+`.fhirpkg` entries inside a package target are ordinary payload, not control
+state or persistent protection markers.
 
 Project restore resolution state is not part of the cache. Each restore reads
 the current manifest and resolves the live registry/cache graph, while the
@@ -162,7 +172,8 @@ sequenceDiagram
     Client->>Cache: Acquire identity lease
     Client->>Stage: Bounded copy + incremental hashes
     Client->>Stage: Bounded extraction and portable-path validation
-    Client->>Stage: Validate complete layout, manifest, and identity
+    Client->>Stage: Locate authoritative content; validate manifest and identity
+    Client->>Stage: Wrap entire root-layout archive only in ordinary mode
     Client->>Cache: Acquire short global mutation lease
     Client->>Cache: Write durable journal
     Client->>Cache: Same-volume generation rename/promotion
@@ -172,29 +183,88 @@ sequenceDiagram
 
 ### Package Normalization
 
-Standard incoming archives must contain exactly one regular
-`package/package.json`. Content normally resides under `package/`, but optional
-lowercase `openapi/` and `other/` directory trees may also appear beside it.
-These root names are exact and case-sensitive; directories implied by their
-file paths are supported without explicit directory entries. Arbitrary sibling
-roots, root files, and additional manifests are not accepted.
+Installation separates safe extraction, read-only content discovery, identity
+validation, and mode-dependent preparation. Authority is the exact regular-file
+slot `package/package.json` or root `package.json`. Both regular candidates in
+one archive are rejected, even if identical; an invalid selected manifest does
+not trigger fallback to an arbitrary nested manifest. Other safe manifests,
+including malformed ancillary JSON, are opaque payload.
 
-Only after the complete archive passes validation and every ancillary
-destination is checked for occupancy are these trees relocated to
-`package/openapi/` and `package/other/`. Existing destinations conflict even
-when empty or spelled with different case; directories are never merged and
-files are never overwritten. Manifest, resource, and ancillary payload bytes
-are preserved without rewriting content or references. Relocation does not
-guarantee that ancillary cross-tree relative links retain their original
-meaning.
+| Archive / mode | Identity-directory payload | Selected content directory |
+|----------------|----------------------------|----------------------------|
+| Standard / ordinary | Complete distributed archive, including all safe siblings and root files | `package/` |
+| Standard / unmodified | Same distributed archive | `package/` |
+| Root-layout / ordinary | Complete archive wrapped once beneath `package/` | `package/` |
+| Root-layout / unmodified | Complete archive without a wrapper | Identity root |
 
-All installed content still resides under `package/`. The narrowly defined
-legacy layout remains supported only when there is one root `package.json`,
-no `package/` subtree or wrapper directory, and no mixed/second manifest.
-Legacy normalization also occurs only after the complete archive shape has
-passed validation.
+Standard `openapi/`, `other/`, arbitrary sibling roots, root files, empty
+directories, and ancillary indexes remain at their original relative paths.
+There is no ancillary relocation or merge, even when a same-named directory
+also exists inside `package/`. Ordinary root wrapping moves **all** payload as
+one tree, including an incidental `package` file/subtree, preserving internal
+relationships while providing the standard representation expected by tools.
+The wrapper is prepared wholly within the owned operation before journaling.
+
+`PackageRecord.DirectoryPath` is the complete identity root.
+`PackageRecord.ContentPath` is the selected content directory, and may equal
+`DirectoryPath` for a preserved root. Use `DirectoryPath` to access known
+standard siblings. SDK content-file and resource reads remain contained in
+`ContentPath`; `../` is not permitted as a way to reach those siblings.
+
+`FhirPackageManagerOptions.Unmodified` and `InstallCacheOptions.Unmodified`
+are optional booleans defaulting to `false`. The manager snapshots its value at
+construction for every source route, import, batch/dependency installation,
+restore, and eager/lazy/forced index operation. The low-level cache option
+controls one direct install/import invocation. The CLI supports `--unmodified`
+and the `unmodified` configuration key.
+
+This is a runtime payload policy, not a read-only cache or a per-package
+protection flag. Acquisition, extraction, staging, cache-root metadata/journals,
+recovery, and explicit whole-package overwrite, removal, and clean remain
+available. A later ordinary process can maintain an index even in a raw root.
+A cache hit returns its existing generation without reconstructing historical
+paths/index bytes. To reinstall from a source under another mode, explicitly
+use SDK `OverwriteExisting` or CLI `install --overwrite`, not `install --force`.
+
+**Compatibility warning:** older SDKs and external tools may reject preserved
+root-layout entries as corrupt or modify them. The mode does not restrain other
+processes/tools. Prefer a **dedicated cache** when using raw roots alongside
+such consumers.
+
+Native filesystem Unicode behavior still applies. Extraction writes exact safe
+spelling and checks both exact/canonical limits while rejecting canonical
+case/Unicode collisions; filesystems that normalize names can still change
+visible spelling. Fidelity tests compare actual enumerated names and bytes
+against independent direct-file controls and report native limitations, not
+silently normalize both expected and actual strings.
+
+The standalone `TarballExtractor.NormalizePackageStructure` remains an
+explicitly mutating, narrow compatibility utility with its existing optional
+lowercase `openapi/` / `other/` allowlist and occupied-destination rejection.
+Installation no longer invokes that policy. Publish identity discovery and
+standard-only NPM validation retain their compatibility bridge unchanged.
 
 ### Index Generation
+
+FhirPkg ordinary managers reuse a usable schema-v2 active `.index.json` unless
+forced, and atomically generate/replace a missing, unusable, or forced index
+under identity/generation coordination. The active target is in `ContentPath`,
+not necessarily `package/`. Unmodified managers reuse valid publisher bytes or
+build and register a validated index in memory; missing/unusable targets remain
+untouched, even for `ForceReindex`. No payload temporary file is written.
+An occupied `.index.json` directory is never deleted to make room for a file:
+ordinary persistence fails, whereas unmodified indexing can remain in memory.
+Ancillary indexes elsewhere are never active-index maintenance targets.
+
+`DiskPackageCache.GetIndexAsync` reports only usable on-disk indexes, not a
+manager's transient state. Unmodified fresh processes may rebuild in memory;
+ordinary later processes may persist. Explicit/lazy indexing failures surface
+to callers, while eager indexing failures warn without undoing installation.
+Unmodified manager construction rejects unsupported injected caches/indexers
+early, before source reads or mutating callbacks (`UnsupportedCacheCapability`
+/ `PolicyValidation` for caches, `NotSupportedException` for indexers).
+Ordinary custom-collaborator support is unchanged; no public capability
+framework is added.
 
 Implementations may generate their own resource indexes on installation:
 
@@ -207,7 +277,7 @@ Implementations may generate their own resource indexes on installation:
 Clients discover resources within cached packages by:
 
 1. **Index-based** (preferred): Read `.index.json` or `.firely.index.json` for a pre-built catalog
-2. **Directory scan**: List all `.json` files in the `package/` directory (excluding subdirectories)
+2. **Directory scan**: List top-level `.json` files in the selected content directory (excluding subdirectories)
 3. **Parse and classify**: Read each JSON file to determine its `resourceType` and metadata
 
 ## Cache Eviction
@@ -229,7 +299,8 @@ instances, and processes:
 - a separate global lock covers only promotion, metadata, remove, and clear
   mutations;
 - known-identity waiters revalidate after locking and return the winner without
-  reading their source unless overwrite was requested;
+  reading their source unless overwrite was requested, even with different
+  runtime modes;
 - discovery imports may each perform bounded staging before identity is known,
   then converge after locking;
 - process termination releases OS ownership; the next identity owner recovers

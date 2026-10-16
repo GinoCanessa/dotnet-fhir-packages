@@ -13,10 +13,17 @@ public record PackageRecord
     /// <summary>The package identity (name and version).</summary>
     public required PackageReference Reference { get; init; }
 
-    /// <summary>Full path to the package root directory (containing the package/ subfolder).</summary>
+    /// <summary>
+    /// Full path to the cache identity root, including any distributed siblings
+    /// outside the selected content directory.
+    /// </summary>
     public required string DirectoryPath { get; init; }
 
-    /// <summary>Full path to the package content directory (the package/ subfolder).</summary>
+    /// <summary>
+    /// Full path to the selected package content directory: normally the
+    /// <c>package/</c> subfolder, or <see cref="DirectoryPath"/> itself for a
+    /// preserved root-layout package.
+    /// </summary>
     public required string ContentPath { get; init; }
 
     /// <summary>The deserialized package.json manifest.</summary>
@@ -31,7 +38,10 @@ public record PackageRecord
     /// <summary>When the package was installed into the cache.</summary>
     public DateTimeOffset? InstalledAt { get; init; }
 
-    /// <summary>Expanded size in bytes on disk.</summary>
+    /// <summary>
+    /// Expanded bytes from the complete installed archive, including ancillary
+    /// files and any supplied index. Later index generation does not recompute it.
+    /// </summary>
     public long? SizeBytes { get; init; }
 
     internal string? ContentGeneration { get; init; }

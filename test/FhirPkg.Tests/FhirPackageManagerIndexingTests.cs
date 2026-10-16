@@ -11,10 +11,12 @@ using FhirPkg.Resolution;
 using FhirPkg.Tests.Support;
 using FhirPkg.Utilities;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Shouldly;
 using Xunit;
+using RecordingFileOperations = FhirPkg.Tests.Cache.DiskPackageCacheIndexTests.RecordingFileOperations;
 
 namespace FhirPkg.Tests;
 
@@ -23,6 +25,241 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
     private readonly string _cacheRoot = Path.Combine(
         AppContext.BaseDirectory,
         $"fhir-manager-resources-{Guid.NewGuid():N}");
+
+    public static TheoryData<bool, bool, string, string> IndexModes
+    {
+        get
+        {
+            TheoryData<bool, bool, string, string> cases = [];
+            foreach (bool unmodified in new[] { false, true })
+            {
+                foreach (bool rootLayout in new[] { false, true })
+                {
+                    foreach (string operation in new[] { "eager", "lazy", "forced" })
+                    {
+                        foreach (string state in new[] { "valid", "missing", "invalid", "directory" })
+                            cases.Add(unmodified, rootLayout, operation, state);
+                    }
+                }
+            }
+
+            return cases;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(IndexModes))]
+    public async Task ResourceIndex_ModeMatrix_SearchesReadsAndPreservesPayload(
+        bool unmodified,
+        bool rootLayout,
+        string operation,
+        string state)
+    {
+        PackageReference reference = new("example.package", "1.0.0");
+        string prefix = rootLayout ? string.Empty : "package/";
+        List<ArbitraryTarEntry> entries =
+        [
+            ArbitraryTarBuilder.File(
+                $"{prefix}package.json",
+                """{"name":"example.package","version":"1.0.0"}"""),
+            ArbitraryTarBuilder.File(
+                $"{prefix}patient.json",
+                CreateResourceJson("Patient", "generated", "https://example.test/generated")),
+            ArbitraryTarBuilder.File("other/.index.json", "opaque ancillary index"),
+            ArbitraryTarBuilder.File("other/package.json", "opaque ancillary manifest"),
+            ArbitraryTarBuilder.Directory("empty/"),
+        ];
+        if (!rootLayout)
+            entries.Add(ArbitraryTarBuilder.File(".index.json", "opaque root index"));
+        if (state is "valid" or "invalid")
+        {
+            entries.Add(ArbitraryTarBuilder.File(
+                $"{prefix}.index.json",
+                state == "valid"
+                    ? """
+                      { "files" : [ { "filename" : "patient.json", "resourceType" : "Patient",
+                        "id" : "publisher", "url" : "https://example.test/publisher" } ],
+                        "index-version" : 2, "publisher-extension" : "retain me" }
+                      """
+                    : "unusable publisher index"));
+        }
+        else if (state == "directory")
+        {
+            entries.Add(ArbitraryTarBuilder.File(
+                $"{prefix}.index.json/payload.txt",
+                "occupied index directory"));
+        }
+
+        RecordingFileOperations fileOperations = new();
+        using DiskPackageCache cache = CreateCache(fileOperations);
+        RecordingLogger logger = new();
+        using FhirPackageManager manager = CreateManager(
+            cache,
+            new PackageIndexer(NullLogger<PackageIndexer>.Instance),
+            memoryCache: new MemoryResourceCache(10),
+            options: new FhirPackageManagerOptions { Unmodified = unmodified },
+            logger: logger);
+        IFhirPackageManager compatibilitySurface = manager;
+        using MemoryStream archive = ArbitraryTarBuilder.Create([.. entries]);
+        PackageRecord installed = operation == "eager"
+            ? await manager.InstallAsync(
+                reference, archive, options: null, TestContext.Current.CancellationToken)
+            : await cache.InstallAsync(
+                reference,
+                archive,
+                new InstallCacheOptions { Unmodified = unmodified },
+                TestContext.Current.CancellationToken);
+        string indexPath = Path.Combine(installed.ContentPath, ".index.json");
+        bool persistenceFails = !unmodified && state == "directory";
+        if (persistenceFails)
+        {
+            if (operation == "eager")
+            {
+                installed.Index.ShouldBeNull();
+                logger.Warnings.ShouldContain(message =>
+                    message.Contains("was installed", StringComparison.Ordinal));
+            }
+            else if (operation == "lazy")
+            {
+                await Should.ThrowAsync<IOException>(() => manager.FindResourcesAsync(
+                    new ResourceSearchCriteria { PackageScope = reference.FhirDirective },
+                    TestContext.Current.CancellationToken));
+            }
+            else
+            {
+                await Should.ThrowAsync<IOException>(() => compatibilitySurface.IndexPackageAsync(
+                    reference,
+                    new IndexingOptions { ForceReindex = true },
+                    TestContext.Current.CancellationToken));
+            }
+
+            (await cache.IsInstalledAsync(reference, TestContext.Current.CancellationToken))
+                .ShouldBeTrue();
+            Directory.Exists(indexPath).ShouldBeTrue();
+            fileOperations.DeletedPaths.ShouldNotContain(indexPath);
+        }
+        else
+        {
+            if (operation == "forced")
+            {
+                PackageIndex? forced = await compatibilitySurface.IndexPackageAsync(
+                    reference,
+                    new IndexingOptions { ForceReindex = true },
+                    TestContext.Current.CancellationToken);
+                forced!.Files.Single().Id.ShouldBe("generated");
+            }
+
+            string expectedId = state == "valid" && operation != "forced"
+                ? "publisher"
+                : "generated";
+            IReadOnlyList<ResourceInfo> resources = await manager.FindResourcesAsync(
+                new ResourceSearchCriteria { PackageScope = reference.FhirDirective },
+                TestContext.Current.CancellationToken);
+            ResourceInfo resource = resources.ShouldHaveSingleItem();
+            resource.Id.ShouldBe(expectedId);
+            resource.PackageName.ShouldBe(reference.Name);
+            resource.PackageVersion.ShouldBe(reference.Version);
+            resource.FilePath.ShouldBe("patient.json");
+            (await compatibilitySurface.FindByCanonicalUrlAsync(
+                $"https://example.test/{expectedId}",
+                reference.FhirDirective,
+                TestContext.Current.CancellationToken)).ShouldBe(resource);
+            (await compatibilitySurface.FindByResourceTypeAsync(
+                "Patient", reference.FhirDirective, TestContext.Current.CancellationToken))
+                .ShouldHaveSingleItem().ShouldBe(resource);
+            (await compatibilitySurface.ReadResourceAsync(
+                resource, TestContext.Current.CancellationToken))!["id"]!
+                .GetValue<string>().ShouldBe("generated");
+            logger.Warnings.ShouldBeEmpty();
+        }
+
+        bool generatedOnDisk = !unmodified && !persistenceFails
+            && (state != "valid" || operation == "forced");
+        Dictionary<string, byte[]> expectedFiles = entries
+            .Where(entry => entry.Content is not null)
+            .ToDictionary(
+                entry => Path.Combine(
+                    installed.DirectoryPath,
+                    rootLayout && !unmodified ? "package" : string.Empty,
+                    entry.Name.Replace('/', Path.DirectorySeparatorChar)),
+                entry => entry.Content!,
+                StringComparer.Ordinal);
+        foreach ((string path, byte[] bytes) in expectedFiles)
+        {
+            if (!generatedOnDisk || path != indexPath)
+                (await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken))
+                    .ShouldBe(bytes);
+        }
+        Directory.GetFiles(installed.DirectoryPath, "*", SearchOption.AllDirectories)
+            .ShouldBe(
+                generatedOnDisk
+                    ? expectedFiles.Keys.Append(indexPath).Distinct()
+                    : expectedFiles.Keys,
+                ignoreOrder: true);
+        Directory.Exists(Path.Combine(
+            installed.DirectoryPath,
+            rootLayout && !unmodified ? "package" : string.Empty,
+            "empty")).ShouldBeTrue();
+        if (unmodified)
+            fileOperations.AssertNoPayloadWrites(installed.DirectoryPath);
+        PackageIndex? onDisk = await cache.GetIndexAsync(
+            reference, TestContext.Current.CancellationToken);
+        if (generatedOnDisk)
+            onDisk!.Files.Single().Id.ShouldBe("generated");
+        else if (state == "valid")
+            onDisk!.Files.Single().Id.ShouldBe("publisher");
+        else
+            onDisk.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Unmodified_IsRuntimeOnly_NormalReopenMayPersist(bool rootLayout)
+    {
+        PackageReference reference = new("@scope/example.package", "1.0.0");
+        using DiskPackageCache installingCache = CreateCache();
+        PackageRecord installed = await InstallPackageAsync(
+            installingCache,
+            reference,
+            "patient.json",
+            "Patient",
+            "runtime",
+            "https://example.test/runtime",
+            rootLayout);
+        string indexPath = Path.Combine(installed.ContentPath, ".index.json");
+        byte[] metadataBefore = await File.ReadAllBytesAsync(
+            Path.Combine(_cacheRoot, "packages.ini"), TestContext.Current.CancellationToken);
+        for (int restart = 0; restart < 3; restart++)
+        {
+            bool unmodified = restart < 2;
+            RecordingFileOperations fileOperations = new();
+            using DiskPackageCache cache = CreateCache(fileOperations);
+            using FhirPackageManager manager = CreateManager(
+                cache,
+                new PackageIndexer(NullLogger<PackageIndexer>.Instance),
+                options: new FhirPackageManagerOptions { Unmodified = unmodified });
+            IFhirPackageManager compatibilitySurface = manager;
+
+            ResourceInfo resource = (await compatibilitySurface.FindResourcesAsync(
+                new ResourceSearchCriteria { PackageScope = reference.FhirDirective },
+                TestContext.Current.CancellationToken)).ShouldHaveSingleItem();
+            resource.PackageName.ShouldBe(reference.Name);
+            resource.PackageVersion.ShouldBe(reference.Version);
+            resource.FilePath.ShouldBe("patient.json");
+            (await compatibilitySurface.ReadResourceAsync(
+                resource, TestContext.Current.CancellationToken))!["id"]!
+                .GetValue<string>().ShouldBe("runtime");
+            File.Exists(indexPath).ShouldBe(!unmodified);
+            if (unmodified)
+                fileOperations.AssertNoPayloadWrites(installed.DirectoryPath);
+            else
+                fileOperations.AtomicDestinations.ShouldContain(indexPath);
+            (await File.ReadAllBytesAsync(
+                Path.Combine(_cacheRoot, "packages.ini"), TestContext.Current.CancellationToken))
+                .ShouldBe(metadataBefore);
+        }
+    }
 
     [Fact]
     public async Task FhirPackageManagerResource_ExplicitIndexPersistsSearchesAndReads()
@@ -126,8 +363,10 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
         File.Exists(GetIndexPath(first)).ShouldBeFalse();
     }
 
-    [Fact]
-    public async Task ResourceIndex_ForceReindexReplacesDurableIndex()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResourceIndex_ForceReindexInvalidatesResourceCache(bool unmodified)
     {
         PackageReference reference = new(
             "example.package",
@@ -146,7 +385,8 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
                 cache,
                 new PackageIndexer(
                     NullLogger<PackageIndexer>.Instance),
-                new MemoryResourceCache(10));
+                new MemoryResourceCache(10),
+                new FhirPackageManagerOptions { Unmodified = unmodified });
         _ = await manager.IndexPackageAsync(
             reference,
             cancellationToken:
@@ -189,13 +429,26 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
                 TestContext.Current.CancellationToken);
 
         reindexed!.Files.Single().Id.ShouldBe("after");
-        persisted!.Files.Single().Id.ShouldBe("after");
+        if (unmodified)
+            persisted.ShouldBeNull();
+        else
+            persisted!.Files.Single().Id.ShouldBe("after");
+        (await manager.FindByCanonicalUrlAsync(
+            "https://example.test/Patient/resource",
+            reference.FhirDirective,
+            TestContext.Current.CancellationToken))!.Id.ShouldBe("after");
         refreshed!["id"]!.GetValue<string>()
             .ShouldBe("after");
     }
 
-    [Fact]
-    public async Task ResourceCache_MutationInvalidatesOnlyAffectedPackage()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ResourceCache_MutationInvalidatesOnlyAffectedPackage(
+        bool unmodified,
+        bool rootLayout)
     {
         PackageReference first = new(
             "first.package",
@@ -211,7 +464,8 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
             "resource.json",
             "Patient",
             "first-old",
-            "https://example.test/first");
+            "https://example.test/first",
+            rootLayout);
         PackageRecord secondRecord =
             await InstallPackageAsync(
                 cache,
@@ -226,7 +480,8 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
                 cache,
                 new PackageIndexer(
                     NullLogger<PackageIndexer>.Instance),
-                memoryCache);
+                memoryCache,
+                new FhirPackageManagerOptions { Unmodified = unmodified });
         ResourceInfo firstResource =
             (await manager.FindByCanonicalUrlAsync(
                 "https://example.test/first",
@@ -249,7 +504,8 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
             "resource.json",
             "Patient",
             "first-new",
-            "https://example.test/first");
+            "https://example.test/first",
+            rootLayout);
         _ = await mutatingCache.InstallAsync(
             first,
             replacement,
@@ -257,6 +513,7 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
             {
                 OverwriteExisting = true,
                 VerifyChecksum = false,
+                Unmodified = rootLayout,
             },
             TestContext.Current.CancellationToken);
         ResourceInfo refreshedInfo =
@@ -421,8 +678,10 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
             .ShouldBeNull();
     }
 
-    [Fact]
-    public async Task ResourceIndex_ConcurrentOverwriteCannotResurrectRegistration()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResourceIndex_ConcurrentOverwriteCannotResurrectRegistration(bool unmodified)
     {
         PackageReference reference = new(
             "example.package",
@@ -439,7 +698,8 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
         using FhirPackageManager manager =
             CreateManager(
                 cache,
-                indexer);
+                indexer,
+                options: new FhirPackageManagerOptions { Unmodified = unmodified });
         Task<PackageIndex?> indexingTask =
             manager.IndexPackageAsync(
                 reference,
@@ -855,8 +1115,10 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
         indexer.CallCount.ShouldBe(1);
     }
 
-    [Fact]
-    public async Task FhirPackageManagerIndexing_EagerIndexReturnsCurrentGeneration()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FhirPackageManagerIndexing_EagerIndexReturnsCurrentGeneration(bool unmodified)
     {
         PackageReference reference = new(
             "example.package",
@@ -867,7 +1129,8 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
             CreateManager(
                 cache,
                 new PackageIndexer(
-                    NullLogger<PackageIndexer>.Instance));
+                    NullLogger<PackageIndexer>.Instance),
+                options: new FhirPackageManagerOptions { Unmodified = unmodified });
         using MemoryStream initial = CreateArchive(
             reference,
             "patient.json",
@@ -961,15 +1224,22 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
             Directory.Delete(_cacheRoot, recursive: true);
     }
 
-    private DiskPackageCache CreateCache() =>
-        new(_cacheRoot);
+    private DiskPackageCache CreateCache(IPackageCacheFileOperations? fileOperations = null) =>
+        new(
+            _cacheRoot,
+            logger: null,
+            timeProvider: null,
+            new PackageInstallLimits(),
+            fileOperations ?? SystemPackageCacheFileOperations.Instance,
+            NullPackageCacheFaultObserver.Instance);
 
     private FhirPackageManager CreateManager(
         IPackageCache cache,
         IPackageIndexer indexer,
         IRegistryClient? registry = null,
         MemoryResourceCache? memoryCache = null,
-        FhirPackageManagerOptions? options = null) =>
+        FhirPackageManagerOptions? options = null,
+        ILogger<FhirPackageManager>? logger = null) =>
         new(
             cache,
             registry ?? new Mock<IRegistryClient>().Object,
@@ -977,7 +1247,7 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
             new Mock<IDependencyResolver>().Object,
             indexer,
             options ?? new FhirPackageManagerOptions(),
-            NullLogger<FhirPackageManager>.Instance,
+            logger ?? NullLogger<FhirPackageManager>.Instance,
             memoryCache);
 
     private FhirPackageManager CreateManager(
@@ -998,20 +1268,23 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
         string fileName,
         string resourceType,
         string id,
-        string canonicalUrl)
+        string canonicalUrl,
+        bool rootLayout = false)
     {
         using MemoryStream archive = CreateArchive(
             reference,
             fileName,
             resourceType,
             id,
-            canonicalUrl);
+            canonicalUrl,
+            rootLayout);
         return await cache.InstallAsync(
             reference,
             archive,
             new InstallCacheOptions
             {
                 VerifyChecksum = false,
+                Unmodified = rootLayout,
             },
             TestContext.Current.CancellationToken);
     }
@@ -1021,14 +1294,15 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
         string fileName,
         string resourceType,
         string id,
-        string canonicalUrl) =>
+        string canonicalUrl,
+        bool rootLayout = false) =>
         ArbitraryTarBuilder.Create(
         [
             ArbitraryTarBuilder.File(
-                "package/package.json",
+                rootLayout ? "package.json" : "package/package.json",
                 $$"""{"name":"{{reference.Name}}","version":"{{reference.Version}}"}"""),
             ArbitraryTarBuilder.File(
-                $"package/{fileName}",
+                rootLayout ? fileName : $"package/{fileName}",
                 CreateResourceJson(
                     resourceType,
                     id,
@@ -1091,6 +1365,28 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
         public void Report(
             PackageProgress value) =>
             report(value);
+    }
+
+    private sealed class RecordingLogger : ILogger<FhirPackageManager>
+    {
+        internal List<string> Warnings { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull =>
+            null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+                Warnings.Add(formatter(state, exception));
+        }
     }
 
     private sealed class AlwaysFailingPackageIndexer :

@@ -7,8 +7,8 @@ using FhirPkg.Installation;
 namespace FhirPkg.Cache;
 
 /// <summary>
-/// Extracts .tgz (gzip-compressed tar) package archives and normalizes
-/// the resulting directory structure for FHIR package cache storage.
+/// Extracts .tgz (gzip-compressed tar) package archives and provides an explicit
+/// compatibility transformation for extracted package structures.
 /// </summary>
 /// <remarks>
 /// FHIR packages are distributed as npm-style .tgz tarballs. The expected
@@ -16,6 +16,8 @@ namespace FhirPkg.Cache;
 /// all resource files and the package.json manifest.
 /// <see cref="NormalizePackageStructure"/> accepts that standard layout or one
 /// unambiguous legacy root layout and rejects all other shapes.
+/// Cache installation uses a separate content-location and layout-preservation
+/// policy rather than this explicitly requested compatibility transformation.
 /// </remarks>
 public static class TarballExtractor
 {
@@ -96,8 +98,12 @@ public static class TarballExtractor
                 entry.Name,
                 isDirectory,
                 directive);
+            portablePath.ValidateExtractionSpelling(directive);
 
-            if (portablePath.CanonicalPath.Length > limits.MaxArchivePathLength)
+            int pathLength = Math.Max(
+                portablePath.CanonicalPath.Length,
+                portablePath.ExactSpelling.Length);
+            if (pathLength > limits.MaxArchivePathLength)
             {
                 throw ArchivePathLengthLimitExceeded(
                     directive,
@@ -109,7 +115,7 @@ public static class TarballExtractor
 
             maximumPathLength = Math.Max(
                 maximumPathLength,
-                portablePath.CanonicalPath.Length);
+                pathLength);
             maximumDepth = Math.Max(maximumDepth, portablePath.Depth);
 
             inventory.Add(
@@ -123,7 +129,7 @@ public static class TarballExtractor
                 Path.Combine(
                 [
                     fullDestination,
-                    .. portablePath.Segments
+                    .. portablePath.ExactSegments
                 ]));
             string relativePath = Path.GetRelativePath(fullDestination, targetPath);
 
@@ -343,17 +349,22 @@ public static class TarballExtractor
             PackageArchiveInventory.FromFileSystem(
                 extractedPath,
                 directive: null);
-        _ = PackageArchiveLayoutValidator.ValidateAndNormalize(
+        _ = PackageStructureNormalizer.ValidateAndNormalize(
             extractedPath,
             inventory,
             directive: null);
     }
 
+    /// <summary>
+    /// Retains the compatibility transformation and original-layout result used
+    /// by publish identity discovery and standard-only NPM publication validation.
+    /// Cache installation and import use the read-only content locator instead.
+    /// </summary>
     internal static PackageArchiveLayoutResult ValidateAndNormalizePackageStructure(
         string extractedPath,
         PackageArchiveInventory inventory,
         string? directive) =>
-        PackageArchiveLayoutValidator.ValidateAndNormalize(
+        PackageStructureNormalizer.ValidateAndNormalize(
             extractedPath,
             inventory,
             directive);
@@ -430,7 +441,7 @@ public static class TarballExtractor
         new PackageInstallException(
             PackageInstallErrorCode.ArchivePathLengthLimitExceeded,
             PackageInstallStage.ArchiveValidation,
-            $"Package archive path exceeds the normalized length limit of {limit}.",
+            $"Package archive path exceeds the length limit of {limit} in canonical or exact spelling.",
             directive);
 
     private static PackageInstallException ArchiveDepthLimitExceeded(

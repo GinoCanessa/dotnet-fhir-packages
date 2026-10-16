@@ -77,6 +77,7 @@ These options apply to **every** command:
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--package-cache-folder` | — | string | `PACKAGE_CACHE_FOLDER` env var or `~/.fhir/packages` | Local FHIR package cache directory |
+| `--unmodified [true\|false]` | — | bool | `unmodified` config key, else `false` | Preserve distributed package paths and avoid resource-index writes |
 | `--verbose` | `-v` | bool | `FHIR_PKG_VERBOSE` env var | Enable verbose/debug output |
 | `--quiet` | `-q` | bool | `false` | Suppress all non-essential output |
 | `--no-color` | — | bool | `NO_COLOR` env var | Disable colored output |
@@ -84,6 +85,39 @@ These options apply to **every** command:
 | `--github-token` | — | string | `githubToken` config key, else unauthenticated | GitHub token used **only** for the `api.github.com` repository lookups behind canonical CI build repository selection. Never sent to a package registry, and never echoed in output. |
 | `--help` | `-h` | — | — | Show help |
 | `--version` | — | — | — | Show version |
+
+## Unmodified Packages
+
+Use `--unmodified` (or `--unmodified true`) before or after a command to enable
+payload preservation. Omit it to inherit the `unmodified` config key, which
+defaults to `false`; `--unmodified false` overrides a configured `true`. There
+is no environment variable for this setting.
+
+The effective value is snapshotted for one CLI invocation, including install
+dependencies, restore, and all indexing. Valid resource indexes are reused.
+With unmodified mode, missing, invalid, or forcibly rebuilt indexes are held
+only in memory; distributed index files and directories remain untouched.
+
+| Archive | Mode | Installed layout | Active resource index |
+|---------|------|------------------|-----------------------|
+| Standard (`package/package.json`) | Ordinary | Complete archive at the cache identity root; safe siblings stay in place | Reuse valid index; persist missing, invalid, or forced replacements in `package/` |
+| Standard | Unmodified | Same distributed layout | Reuse valid index or build only in memory |
+| Root-layout (`package.json`) | Ordinary | Entire archive wrapped once beneath `package/` | Ordinary index maintenance in `package/` |
+| Root-layout | Unmodified | Complete archive at the identity root, without a wrapper | Reuse valid root index or build only in memory |
+
+A cache hit keeps the existing generation; changing the flag does **not**
+recover original paths or index bytes. To reconstruct from the source under
+another mode, explicitly reinstall with `install --overwrite` (not `--force`).
+
+**Shared-cache warning:** Older FhirPkg versions and other tools may not
+understand preserved root-layout entries and may treat them as corrupt. Use a
+dedicated `--package-cache-folder` with unmodified mode when sharing with such
+tools. No package protection flag is persisted: later ordinary runs and other
+tools can still change the cache.
+
+This is payload protection, not a read-only cache. Cache bookkeeping and
+recovery continue, and explicit whole-package overwrite, `remove`, and `clean`
+operations are not blocked.
 
 ## Commands
 
@@ -154,6 +188,7 @@ Example `.fhir-pkg.json`:
 ```json
 {
   "cachePath": "/custom/cache/path",
+  "unmodified": false,
   "httpTimeout": 60,
   "includeCiBuilds": false,
   "verifyChecksums": true,
@@ -167,6 +202,11 @@ Example `.fhir-pkg.json`:
   ]
 }
 ```
+
+`unmodified` sets the invocation's default payload policy. A bare `--unmodified`
+enables it; an explicit `--unmodified false` disables it even when the config
+contains `true`. Omitting both uses ordinary mode. See
+[Unmodified Packages](#unmodified-packages) for layout and shared-cache limits.
 
 `githubToken` supplies the GitHub token for the `api.github.com` repository
 lookups behind canonical CI build selection. It is overridden by

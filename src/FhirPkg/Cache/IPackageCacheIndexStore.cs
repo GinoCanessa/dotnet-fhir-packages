@@ -16,6 +16,7 @@ internal interface IPackageCacheIndexStore
     Task<PackageIndex?> GetOrCreateIndexAsync(
         PackageReference reference,
         bool forceReindex,
+        bool persistIndex,
         Func<PackageRecord, CancellationToken, Task<PackageIndex>> generator,
         CancellationToken cancellationToken = default,
         Action<PackageRecord, PackageIndex>? indexReady = null);

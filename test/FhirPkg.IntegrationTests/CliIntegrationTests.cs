@@ -1,6 +1,12 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Diagnostics;
+using System.Formats.Tar;
+using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using FhirPkg.Cache;
 using FhirPkg.Cli.Commands;
@@ -29,16 +35,19 @@ public class CliIntegrationTests : IntegrationTestBase
         return await RunCliRaw(allArgs);
     }
 
-    private async Task<(int ExitCode, string StdOut, string StdErr)> RunCliRaw(string allArgs)
+    private async Task<(int ExitCode, string StdOut, string StdErr)> RunCliRaw(
+        string allArgs,
+        string? workingDirectory = null)
     {
         using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(_timeoutSeconds));
 
-        Process process = new Process
+        using Process process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = "dotnet",
                 Arguments = $"\"{CliAssemblyPath}\" {allArgs}",
+                WorkingDirectory = workingDirectory ?? string.Empty,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -140,6 +149,161 @@ public class CliIntegrationTests : IntegrationTestBase
 
         exitCode.ShouldBe(0);
         stdout.ShouldContain("fhir-pkg");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("install")]
+    [InlineData("restore")]
+    [InlineData("list")]
+    [InlineData("remove")]
+    [InlineData("clean")]
+    [InlineData("search")]
+    [InlineData("info")]
+    [InlineData("resolve")]
+    [InlineData("publish")]
+    public async Task UnmodifiedOption_AppearsInRecursiveHelp(string command)
+    {
+        string workingDirectory = await CreateIsolatedWorkingDirectoryAsync();
+
+        (int exitCode, string stdout, string stderr) =
+            await RunIsolatedCli(workingDirectory, command, "--help");
+
+        exitCode.ShouldBe(0, stderr);
+        stdout.ShouldContain("--unmodified");
+    }
+
+    public static TheoryData<bool, bool, string> ArchiveModes
+    {
+        get
+        {
+            TheoryData<bool, bool, string> cases = [];
+            foreach (bool rootLayout in new[] { false, true })
+            {
+                foreach (bool unmodified in new[] { false, true })
+                {
+                    foreach (string indexState in new[] { "missing", "invalid", "valid", "occupied" })
+                        cases.Add(rootLayout, unmodified, indexState);
+                }
+            }
+
+            return cases;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(ArchiveModes))]
+    public async Task Install_LayoutAndMode_PreserveArchiveAndIndexPolicy(
+        bool rootLayout,
+        bool unmodified,
+        string indexState)
+    {
+        CliArchiveFixture fixture = CreateCliArchive(rootLayout, indexState);
+        await using SyntheticPackageServer server = new(fixture);
+        string workingDirectory = await CreateIsolatedWorkingDirectoryAsync(server.Uri);
+        string[] modeArguments = unmodified ? ["--unmodified"] : [];
+
+        (int exitCode, string stdout, string stderr) = await RunIsolatedCli(
+            workingDirectory, ["install", fixture.Reference.FhirDirective, "--json", .. modeArguments]);
+
+        AssertInstallJson(exitCode, stdout, stderr, fixture.Reference);
+        await AssertInstalledArchiveAsync(fixture, unmodified);
+        server.ArchiveRequests.ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData(true, "", true)]
+    [InlineData(true, "--unmodified false", false)]
+    [InlineData(false, "--unmodified", true)]
+    public async Task UnmodifiedConfig_CommandLineOverridesOnlyWhenSpecified(
+        bool configured,
+        string optionArguments,
+        bool expected)
+    {
+        CliArchiveFixture fixture = CreateCliArchive(rootLayout: true, "missing");
+        await using SyntheticPackageServer server = new(fixture);
+        string workingDirectory = await CreateIsolatedWorkingDirectoryAsync(server.Uri, configured);
+        string[] optionTokens = optionArguments.Split(
+            ' ', StringSplitOptions.RemoveEmptyEntries);
+
+        (int exitCode, string stdout, string stderr) = await RunIsolatedCli(
+            workingDirectory, ["install", fixture.Reference.FhirDirective, "--json", .. optionTokens]);
+
+        AssertInstallJson(exitCode, stdout, stderr, fixture.Reference);
+        await AssertInstalledArchiveAsync(fixture, expected);
+        server.ArchiveRequests.ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Install_UnmodifiedOverwrite_ReconstructsSameSourceOnlyWhenRequested(
+        bool rootLayout,
+        bool initiallyUnmodified)
+    {
+        CliArchiveFixture fixture = CreateCliArchive(rootLayout, "missing");
+        await using SyntheticPackageServer server = new(fixture);
+        string workingDirectory = await CreateIsolatedWorkingDirectoryAsync(server.Uri);
+        string initialMode = initiallyUnmodified ? "true" : "false";
+        string replacementMode = initiallyUnmodified ? "false" : "true";
+
+        (int firstExitCode, string firstOutput, string firstError) = await RunIsolatedCli(
+            workingDirectory, "install", fixture.Reference.FhirDirective,
+            "--unmodified", initialMode, "--json");
+        AssertInstallJson(firstExitCode, firstOutput, firstError, fixture.Reference);
+        PackageRecord original = await AssertInstalledArchiveAsync(fixture, initiallyUnmodified);
+        Dictionary<string, byte[]> originalFiles = ReadPayload(original.DirectoryPath);
+        string[] originalDirectories = ReadDirectories(original.DirectoryPath);
+        original.ContentGeneration.ShouldNotBeNull();
+        server.ArchiveRequests.ShouldBe(1);
+
+        (int hitExitCode, string hitOutput, string hitError) = await RunIsolatedCli(
+            workingDirectory, "install", fixture.Reference.FhirDirective,
+            "--unmodified", replacementMode, "--json");
+        AssertInstallJson(hitExitCode, hitOutput, hitError, fixture.Reference);
+        PackageRecord hit = await AssertInstalledArchiveAsync(fixture, initiallyUnmodified);
+        hit.ContentGeneration.ShouldBe(original.ContentGeneration);
+        Dictionary<string, byte[]> hitFiles = ReadPayload(hit.DirectoryPath);
+        hitFiles.Keys.ShouldBe(originalFiles.Keys, ignoreOrder: true);
+        foreach ((string path, byte[] bytes) in originalFiles)
+            hitFiles[path].ShouldBe(bytes);
+        ReadDirectories(hit.DirectoryPath).ShouldBe(originalDirectories, ignoreOrder: true);
+        server.ArchiveRequests.ShouldBe(1, "a cache hit must not claim source reconstruction");
+
+        (int overwriteExitCode, string overwriteOutput, string overwriteError) =
+            await RunIsolatedCli(
+                workingDirectory, "install", fixture.Reference.FhirDirective,
+                "--unmodified", replacementMode, "--overwrite", "--json");
+        AssertInstallJson(overwriteExitCode, overwriteOutput, overwriteError, fixture.Reference);
+        PackageRecord replacement = await AssertInstalledArchiveAsync(fixture, !initiallyUnmodified);
+        replacement.ContentGeneration.ShouldNotBe(original.ContentGeneration);
+        server.ArchiveRequests.ShouldBe(2, "--overwrite must reacquire the same synthetic archive");
+    }
+
+    [Theory]
+    [InlineData("remove")]
+    [InlineData("clean")]
+    public async Task Unmodified_ExplicitRemoveAndCleanRemainAvailable(string command)
+    {
+        CliArchiveFixture fixture = CreateCliArchive(rootLayout: true, "occupied");
+        await using SyntheticPackageServer server = new(fixture);
+        string workingDirectory = await CreateIsolatedWorkingDirectoryAsync(server.Uri);
+        (int installExitCode, string installOutput, string installError) = await RunIsolatedCli(
+            workingDirectory, "install", fixture.Reference.FhirDirective, "--unmodified", "--json");
+        AssertInstallJson(installExitCode, installOutput, installError, fixture.Reference);
+        PackageRecord installed = await AssertInstalledArchiveAsync(fixture, unmodified: true);
+        string[] operands = command == "remove" ? [fixture.Reference.FhirDirective] : [];
+
+        (int exitCode, string stdout, string stderr) = await RunIsolatedCli(
+            workingDirectory, [command, .. operands, "--unmodified", "--force", "--json"]);
+
+        exitCode.ShouldBe(0, stderr);
+        using JsonDocument document = JsonDocument.Parse(stdout);
+        document.RootElement.GetProperty("success").GetBoolean().ShouldBeTrue();
+        Directory.Exists(installed.DirectoryPath).ShouldBeFalse();
+        server.ArchiveRequests.ShouldBe(1);
     }
 
     [Fact]
@@ -528,6 +692,336 @@ public class CliIntegrationTests : IntegrationTestBase
         (await ListCachedVersionsAsync(
                 "clean.refresh"))
             .ShouldBe(["1.0.0"]);
+    }
+
+    private string IsolatedCachePath => Path.Combine(TempCacheDir, "cli-cache");
+
+    private Task<(int ExitCode, string StdOut, string StdErr)> RunIsolatedCli(
+        string workingDirectory,
+        params string[] args)
+    {
+        string allArgs = string.Join(" ", args)
+            + $" --package-cache-folder \"{IsolatedCachePath}\" --verbose false --no-color";
+        return RunCliRaw(allArgs, workingDirectory);
+    }
+
+    private async Task<string> CreateIsolatedWorkingDirectoryAsync(
+        Uri? registryUri = null,
+        bool? unmodified = null)
+    {
+        string workingDirectory = Path.Combine(TempCacheDir, "cli-work");
+        Directory.CreateDirectory(workingDirectory);
+        Dictionary<string, object> config = new()
+        {
+            ["includeCiBuilds"] = false,
+        };
+        if (registryUri is not null)
+        {
+            config["registries"] = new[]
+            {
+                new { url = registryUri.AbsoluteUri, type = "FhirNpm" },
+            };
+        }
+        if (unmodified is not null)
+            config["unmodified"] = unmodified.Value;
+
+        // Every child has a valid local config, so loading cannot fall through to home.
+        await File.WriteAllTextAsync(
+            Path.Combine(workingDirectory, ".fhir-pkg.json"),
+            JsonSerializer.Serialize(config),
+            TestContext.Current.CancellationToken);
+        return workingDirectory;
+    }
+
+    private void AssertInstallJson(
+        int exitCode,
+        string stdout,
+        string stderr,
+        PackageReference reference)
+    {
+        exitCode.ShouldBe(0, $"{stderr}{Environment.NewLine}{stdout}");
+        using JsonDocument document = JsonDocument.Parse(stdout);
+        JsonElement root = document.RootElement;
+        JsonElement result = root.GetProperty("results").EnumerateArray().ShouldHaveSingleItem();
+        result.GetProperty("directive").GetString().ShouldBe(reference.FhirDirective);
+        // Exact directives retain this coarse status even on an unchanged cache hit.
+        result.GetProperty("status").GetString().ShouldBe("Installed");
+        result.GetProperty("dependencyFailures").GetArrayLength().ShouldBe(0);
+        result.TryGetProperty("errorMessage", out _).ShouldBeFalse();
+        result.TryGetProperty("disposition", out _).ShouldBeFalse();
+        result.TryGetProperty("previousManifestDate", out _).ShouldBeFalse();
+        result.TryGetProperty("manifestDate", out _).ShouldBeFalse();
+        JsonElement package = result.GetProperty("package");
+        package.GetProperty("name").GetString().ShouldBe(reference.Name);
+        package.GetProperty("version").GetString().ShouldBe(reference.Version);
+        package.GetProperty("directoryPath").GetString().ShouldBe(
+            PackageCacheKey.Create(reference).GetPackageDirectoryPath(IsolatedCachePath));
+        JsonElement summary = root.GetProperty("summary");
+        summary.GetProperty("total").GetInt32().ShouldBe(1);
+        summary.GetProperty("installed").GetInt32().ShouldBe(1);
+        summary.GetProperty("alreadyCached").GetInt32().ShouldBe(0);
+        summary.GetProperty("failed").GetInt32().ShouldBe(0);
+        JsonElement dispositions = summary.GetProperty("dispositions");
+        dispositions.GetProperty("installed").GetInt32().ShouldBe(1);
+        dispositions.GetProperty("updated").GetInt32().ShouldBe(0);
+        dispositions.GetProperty("alreadyCurrent").GetInt32().ShouldBe(0);
+        dispositions.GetProperty("refreshed").GetInt32().ShouldBe(0);
+    }
+
+    private static CliArchiveFixture CreateCliArchive(bool rootLayout, string indexState)
+    {
+        PackageReference reference = new("cli.unmodified", "1.0.0");
+        string prefix = rootLayout ? string.Empty : "package/";
+        Dictionary<string, byte[]> files = new(StringComparer.Ordinal)
+        {
+            [$"{prefix}package.json"] = Encoding.UTF8.GetBytes(
+                """{"name":"cli.unmodified","version":"1.0.0","fhirVersions":["4.0.1"]}"""),
+            [$"{prefix}patient.json"] = Encoding.UTF8.GetBytes(
+                "{\r\n  \"resourceType\": \"Patient\", \"id\": \"cli-patient\"\r\n}\r\n"),
+            ["openapi/spec.json"] = Encoding.UTF8.GetBytes("""{"$ref":"../other/schema.json"}"""),
+            ["other/schema.json"] = Encoding.UTF8.GetBytes("""{"title":"opaque schema"}"""),
+            ["other/package.json"] = Encoding.UTF8.GetBytes("{ malformed ancillary manifest"),
+            ["other/.index.json"] = Encoding.UTF8.GetBytes("opaque ancillary index"),
+            ["unknown/nested/binary.bin"] = [0x00, 0xff, 0x10, 0x80, 0x0d, 0x0a],
+            ["packages.ini"] = Encoding.UTF8.GetBytes("distributed payload, not cache metadata\r\n"),
+            [".fhirpkg/payload.bin"] = [0xff, 0x00, 0x12],
+            ["readme.txt"] = Encoding.UTF8.GetBytes("distributed root readme"),
+            ["package/readme.txt"] = Encoding.UTF8.GetBytes("distributed package child"),
+        };
+        List<string> directories = ["empty/", "openapi/empty/", "other/explicit/"];
+        if (!rootLayout)
+        {
+            files[".index.json"] = Encoding.UTF8.GetBytes("opaque root index");
+            files["package/openapi/spec.json"] = Encoding.UTF8.GetBytes("distinct content-relative file");
+        }
+        switch (indexState)
+        {
+            case "missing":
+                break;
+            case "invalid":
+                files[$"{prefix}.index.json"] = Encoding.UTF8.GetBytes("{ invalid publisher index\r\n");
+                break;
+            case "valid":
+                files[$"{prefix}.index.json"] = Encoding.UTF8.GetBytes(
+                    "{\r\n  \"index-version\" : 2,\r\n  \"files\" : [\r\n"
+                    + "    { \"filename\" : \"patient.json\", \"resourceType\" : \"Patient\", \"id\" : \"cli-patient\" }\r\n"
+                    + "  ]\r\n}\r\n");
+                break;
+            case "occupied":
+                directories.Add($"{prefix}.index.json/");
+                files[$"{prefix}.index.json/distributed.bin"] = [0x12, 0x34, 0x00, 0xff];
+                break;
+            default:
+                throw new ArgumentException($"Unknown index fixture '{indexState}'.", nameof(indexState));
+        }
+
+        using MemoryStream archive = new();
+        using (GZipStream gzip = new(archive, CompressionLevel.Fastest, leaveOpen: true))
+        using (TarWriter writer = new(gzip, TarEntryFormat.Pax, leaveOpen: true))
+        {
+            foreach (string directory in directories)
+                writer.WriteEntry(new PaxTarEntry(TarEntryType.Directory, directory));
+            foreach ((string path, byte[] bytes) in files)
+            {
+                using MemoryStream content = new(bytes, writable: false);
+                writer.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, path)
+                {
+                    DataStream = content,
+                });
+            }
+        }
+
+        return new CliArchiveFixture(reference, rootLayout, indexState, files, directories, archive.ToArray());
+    }
+
+    private async Task<PackageRecord> AssertInstalledArchiveAsync(
+        CliArchiveFixture fixture,
+        bool unmodified)
+    {
+        string directoryPath = PackageCacheKey.Create(fixture.Reference)
+            .GetPackageDirectoryPath(IsolatedCachePath);
+        string wrapper = fixture.RootLayout && !unmodified ? "package/" : string.Empty;
+        Dictionary<string, byte[]> expectedFiles = fixture.Files.ToDictionary(
+            entry => wrapper + entry.Key, entry => entry.Value, StringComparer.Ordinal);
+        HashSet<string> expectedDirectories = new(StringComparer.Ordinal);
+        foreach (string path in expectedFiles.Keys)
+            AddArchiveDirectories(expectedDirectories, path, includePath: false);
+        foreach (string path in fixture.Directories)
+            AddArchiveDirectories(expectedDirectories, wrapper + path.TrimEnd('/'), includePath: true);
+        string activeIndexPath = fixture.RootLayout && unmodified ? ".index.json" : "package/.index.json";
+        bool rebuiltIndex = !unmodified && fixture.IndexState is "missing" or "invalid";
+        HashSet<string> expectedFilePaths = new(expectedFiles.Keys, StringComparer.Ordinal);
+        if (rebuiltIndex)
+            expectedFilePaths.Add(activeIndexPath);
+
+        Dictionary<string, byte[]> actualFiles = ReadPayload(directoryPath);
+        actualFiles.Keys.ShouldBe(expectedFilePaths, ignoreOrder: true);
+        foreach ((string path, byte[] bytes) in expectedFiles)
+        {
+            if (rebuiltIndex && path == activeIndexPath)
+                continue;
+            actualFiles[path].ShouldBe(bytes, path);
+        }
+        ReadDirectories(directoryPath).ShouldBe(expectedDirectories, ignoreOrder: true);
+
+        using DiskPackageCache cache = new(IsolatedCachePath);
+        PackageRecord? record = await cache.GetPackageAsync(
+            fixture.Reference, TestContext.Current.CancellationToken);
+        record.ShouldNotBeNull();
+        record.DirectoryPath.ShouldBe(directoryPath);
+        record.ContentPath.ShouldBe(fixture.RootLayout && unmodified
+            ? directoryPath
+            : Path.Combine(directoryPath, "package"));
+        record.SizeBytes.ShouldBe(fixture.Files.Values.Sum(bytes => (long)bytes.Length));
+        if (rebuiltIndex || fixture.IndexState == "valid")
+        {
+            record.Index.ShouldNotBeNull();
+            ResourceIndexEntry resource = record.Index.Files.ShouldHaveSingleItem();
+            resource.Filename.ShouldBe("patient.json");
+            resource.Id.ShouldBe("cli-patient");
+        }
+        else
+        {
+            // A fresh reader exposes only usable on-disk indexes, not the child's transient index.
+            record.Index.ShouldBeNull();
+        }
+
+        return record;
+    }
+
+    private static void AddArchiveDirectories(HashSet<string> directories, string path, bool includePath)
+    {
+        string[] segments = path.Split('/');
+        int count = includePath ? segments.Length : segments.Length - 1;
+        for (int length = 1; length <= count; length++)
+            directories.Add(string.Join('/', segments.Take(length)));
+    }
+
+    private static Dictionary<string, byte[]> ReadPayload(string directoryPath) =>
+        Directory.GetFiles(directoryPath, "*", SearchOption.AllDirectories)
+            .ToDictionary(
+                path => Path.GetRelativePath(directoryPath, path).Replace('\\', '/'),
+                File.ReadAllBytes,
+                StringComparer.Ordinal);
+
+    private static string[] ReadDirectories(string directoryPath) =>
+        Directory.GetDirectories(directoryPath, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(directoryPath, path).Replace('\\', '/'))
+            .ToArray();
+
+    private sealed record CliArchiveFixture(
+        PackageReference Reference,
+        bool RootLayout,
+        string IndexState,
+        IReadOnlyDictionary<string, byte[]> Files,
+        IReadOnlyList<string> Directories,
+        byte[] ArchiveBytes);
+
+    // The real CLI accepts directives, so serve local synthetic bytes through its
+    // existing registry transport rather than adding a tarball-path command route.
+    private sealed class SyntheticPackageServer : IAsyncDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _shutdown =
+            CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        private readonly byte[] _archive;
+        private readonly byte[] _listing;
+        private readonly string _listingPath;
+        private readonly Task _serverTask;
+        private int _archiveRequests;
+
+        internal SyntheticPackageServer(CliArchiveFixture fixture)
+        {
+            _archive = fixture.ArchiveBytes;
+            _listingPath = $"/{fixture.Reference.Name}";
+            _listener.Start();
+            int port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            Uri = new Uri($"http://127.0.0.1:{port}/");
+            _listing = JsonSerializer.SerializeToUtf8Bytes(new PackageListing
+            {
+                PackageId = fixture.Reference.Name,
+                Versions = new Dictionary<string, PackageVersionInfo>
+                {
+                    [fixture.Reference.Version!] = new()
+                    {
+                        Name = fixture.Reference.Name,
+                        Version = fixture.Reference.Version!,
+                        Distribution = new NpmDistribution(
+                            ShaSum: Convert.ToHexString(SHA1.HashData(_archive)).ToLowerInvariant(),
+                            TarballUrl: new Uri(Uri, "package.tgz").AbsoluteUri),
+                    },
+                },
+            });
+            _serverTask = ServeAsync();
+        }
+
+        internal Uri Uri { get; }
+
+        internal int ArchiveRequests => Volatile.Read(ref _archiveRequests);
+
+        private async Task ServeAsync()
+        {
+            CancellationToken cancellationToken = _shutdown.Token;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                using TcpClient client = await _listener.AcceptTcpClientAsync(cancellationToken);
+                await using NetworkStream stream = client.GetStream();
+                using StreamReader reader = new(stream, Encoding.ASCII, leaveOpen: true);
+                string? request = await reader.ReadLineAsync(cancellationToken);
+                while (!string.IsNullOrEmpty(await reader.ReadLineAsync(cancellationToken)))
+                {
+                }
+
+                string? path = request?.Split(' ').ElementAtOrDefault(1);
+                byte[] body;
+                string contentType;
+                string status = "200 OK";
+                if (path == _listingPath)
+                {
+                    body = _listing;
+                    contentType = "application/json";
+                }
+                else if (path == "/package.tgz")
+                {
+                    Interlocked.Increment(ref _archiveRequests);
+                    body = _archive;
+                    contentType = "application/gzip";
+                }
+                else
+                {
+                    body = [];
+                    contentType = "text/plain";
+                    status = "404 Not Found";
+                }
+
+                byte[] headers = Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 {status}\r\nContent-Type: {contentType}\r\n"
+                    + $"Content-Length: {body.Length}\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(headers, cancellationToken);
+                await stream.WriteAsync(body, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _shutdown.Cancel();
+            _listener.Stop();
+            try
+            {
+                await _serverTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+            {
+            }
+            catch (SocketException) when (_shutdown.IsCancellationRequested)
+            {
+            }
+            finally
+            {
+                _shutdown.Dispose();
+            }
+        }
     }
 
     private async Task SeedCachedPackageAsync(

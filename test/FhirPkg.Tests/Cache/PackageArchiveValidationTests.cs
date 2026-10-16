@@ -28,12 +28,325 @@ public class PackageArchiveValidationTests : IDisposable
         AppContext.BaseDirectory,
         $"archive-validation-{Guid.NewGuid():N}");
 
+    public static TheoryData<bool, bool, bool> LayoutModes =>
+        new()
+        {
+            { false, false, false },
+            { false, false, true },
+            { false, true, false },
+            { false, true, true },
+            { true, false, false },
+            { true, false, true },
+            { true, true, false },
+            { true, true, true }
+        };
+
+    public static IEnumerable<object[]> IncidentalPackageCases()
+    {
+        foreach (string shape in new[]
+        {
+            "file",
+            "empty-directory",
+            "subtree",
+            "wrong-case-manifest",
+            "wrong-case-directory",
+            "manifest-directory"
+        })
+        {
+            foreach (bool import in new[] { false, true })
+            {
+                foreach (bool unmodified in new[] { false, true })
+                    yield return [shape, import, unmodified];
+            }
+        }
+    }
+
+    public static IEnumerable<object[]> SameHashInstallCases()
+    {
+        foreach (string version in new[] { "1.0.0", "current", "current$main", "dev" })
+        {
+            foreach (bool legacyLayout in new[] { false, true })
+            {
+                foreach (bool initiallyUnmodified in new[] { false, true })
+                {
+                    foreach (bool unmodified in new[] { false, true })
+                        yield return [version, legacyLayout, initiallyUnmodified, unmodified];
+                }
+            }
+        }
+    }
+
+    public static IEnumerable<object[]> InvalidLayoutCases()
+    {
+        foreach (InvalidLayout layout in Enum.GetValues<InvalidLayout>())
+        {
+            foreach (bool import in new[] { false, true })
+            {
+                foreach (bool unmodified in new[] { false, true })
+                    yield return [layout, import, unmodified];
+            }
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_testRoot))
             Directory.Delete(_testRoot, recursive: true);
 
         GC.SuppressFinalize(this);
+    }
+
+    [Fact]
+    public void InstallCacheOptions_Unmodified_DefaultsToFalse()
+    {
+        new InstallCacheOptions().Unmodified.ShouldBeFalse();
+    }
+
+    [Theory]
+    [MemberData(nameof(LayoutModes))]
+    public async Task InstallAndImport_LayoutModes_PreserveCompleteArchive(
+        bool import,
+        bool legacyLayout,
+        bool unmodified)
+    {
+        ArbitraryTarEntry[] entries = CreatePreservationEntries(legacyLayout);
+        using MemoryStream archive = ArbitraryTarBuilder.Create(entries);
+        PackageReference reference = new("example.package", "1.0.0");
+
+        PackageRecord record = await InstallSucceedsAsync(
+            archive,
+            reference,
+            import: import,
+            unmodified: unmodified);
+
+        archive.CanRead.ShouldBeTrue();
+        archive.Position.ShouldBe(archive.Length);
+        record.Index.ShouldNotBeNull();
+        record.Index.Files.ShouldHaveSingleItem().Filename.ShouldBe(PatientFileName);
+        await AssertInstalledContentAsync(
+            record,
+            reference,
+            entries,
+            legacyLayout,
+            unmodified);
+
+        string archiveRoot = legacyLayout && !unmodified
+            ? record.ContentPath
+            : record.DirectoryPath;
+        string relativeReference = await File.ReadAllTextAsync(
+            Path.Combine(archiveRoot, "references.txt"),
+            TestContext.Current.CancellationToken);
+        (await File.ReadAllTextAsync(
+            Path.Combine(archiveRoot, relativeReference),
+            TestContext.Current.CancellationToken)).ShouldBe(PatientResource);
+        string ancillaryReference = await File.ReadAllTextAsync(
+            Path.Combine(archiveRoot, "openapi", "reference.txt"),
+            TestContext.Current.CancellationToken);
+        (await File.ReadAllBytesAsync(
+            Path.Combine(archiveRoot, "openapi", ancillaryReference),
+            TestContext.Current.CancellationToken))
+            .ShouldBe(entries.Single(entry => entry.Name == "other/data.bin").Content!);
+    }
+
+    [Theory]
+    [MemberData(nameof(IncidentalPackageCases))]
+    public async Task InstallAndImport_LegacyIncidentalPackageEntry_IsPreserved(
+        string shape,
+        bool import,
+        bool unmodified)
+    {
+        ArbitraryTarEntry incidental = shape switch
+        {
+            "file" => ArbitraryTarBuilder.File("package", "incidental file"),
+            "empty-directory" => ArbitraryTarBuilder.Directory("package/"),
+            "subtree" => ArbitraryTarBuilder.File(
+                "package/nested/package.json", "{opaque"),
+            "wrong-case-manifest" => ArbitraryTarBuilder.File(
+                "package/Package.json", "{opaque"),
+            "wrong-case-directory" => ArbitraryTarBuilder.File(
+                "Package/package.json", "{opaque"),
+            "manifest-directory" => ArbitraryTarBuilder.Directory(
+                "package/package.json/"),
+            _ => throw new ArgumentOutOfRangeException(nameof(shape), shape, null)
+        };
+        ArbitraryTarEntry[] entries =
+        [
+            ArbitraryTarBuilder.File("package.json", Manifest),
+            ArbitraryTarBuilder.File(PatientFileName, PatientResource),
+            incidental
+        ];
+        using MemoryStream archive = ArbitraryTarBuilder.Create(entries);
+        PackageReference reference = new("example.package", "1.0.0");
+
+        PackageRecord record = await InstallSucceedsAsync(
+            archive,
+            reference,
+            import: import,
+            unmodified: unmodified);
+
+        await AssertInstalledContentAsync(
+            record,
+            reference,
+            entries,
+            legacyLayout: true,
+            unmodified: unmodified);
+    }
+
+    [Theory]
+    [MemberData(nameof(SameHashInstallCases))]
+    public async Task InstallAsync_SameHashOverwrite_OnlyOrdinaryStandardContentMaySkip(
+        string version,
+        bool legacyLayout,
+        bool initiallyUnmodified,
+        bool unmodified)
+    {
+        PackageReference reference = new("example.package", version);
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        ArbitraryTarEntry[] entries = CreatePreservationEntries(legacyLayout);
+        using MemoryStream archive = ArbitraryTarBuilder.Create(entries);
+        byte[] archiveBytes = archive.ToArray();
+        string cacheRoot = Path.Combine(_testRoot, "same-hash");
+        using DiskPackageCache cache = CreateCache(cacheRoot);
+        PackageRecord prior = await InstallSucceedsAsync(
+            archive,
+            reference,
+            existingCache: cache,
+            unmodified: initiallyUnmodified);
+        await File.WriteAllTextAsync(
+            Path.Combine(prior.ContentPath, "local-only.txt"),
+            "not distributed",
+            TestContext.Current.CancellationToken);
+        Dictionary<string, string?> priorTree = await SnapshotTreeAsync(prior.DirectoryPath);
+        CacheMetadataEntry priorMetadata = (await cache.GetMetadataAsync(
+            TestContext.Current.CancellationToken)).Packages[cacheKey.MetadataKey];
+        using MemoryStream replacement = new(archiveBytes);
+        InstallCacheOptions options = new()
+        {
+            OverwriteExisting = true,
+            SkipIfArchiveUnchanged = true,
+            Unmodified = unmodified,
+            SourcePublicationDate = new DateTimeOffset(2026, 10, 15, 12, 0, 0, TimeSpan.Zero)
+        };
+
+        PackageRecord record = await cache.InstallAsync(
+            reference,
+            replacement,
+            options,
+            TestContext.Current.CancellationToken);
+
+        AssertNoStagingOperations(cacheRoot);
+        replacement.CanRead.ShouldBeTrue();
+        replacement.Position.ShouldBe(replacement.Length);
+        CacheMetadataEntry metadata = (await cache.GetMetadataAsync(
+            TestContext.Current.CancellationToken)).Packages[cacheKey.MetadataKey];
+        metadata.ArchiveSha256.ShouldBe(priorMetadata.ArchiveSha256);
+        metadata.SizeBytes.ShouldBe(priorMetadata.SizeBytes);
+        metadata.SourcePublicationDate.ShouldBe(options.SourcePublicationDate);
+        bool shouldSkip = !unmodified && (!legacyLayout || !initiallyUnmodified);
+        if (shouldSkip)
+        {
+            options.InstallOutcome.Effect.ShouldBe(PackageCacheInstallEffect.Unchanged);
+            metadata.ContentGeneration.ShouldBe(priorMetadata.ContentGeneration);
+            record.ContentPath.ShouldBe(prior.ContentPath);
+            AssertSameTree(priorTree, await SnapshotTreeAsync(record.DirectoryPath));
+        }
+        else
+        {
+            options.InstallOutcome.Effect.ShouldBe(PackageCacheInstallEffect.Replaced);
+            metadata.ContentGeneration.ShouldNotBe(priorMetadata.ContentGeneration);
+            await AssertInstalledContentAsync(
+                record,
+                reference,
+                entries,
+                legacyLayout,
+                unmodified,
+                manifestVersion: "1.0.0");
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ImportAsync_SameHashLegacyOverwrite_ReconstructsRequestedMode(
+        bool initiallyUnmodified)
+    {
+        ArbitraryTarEntry[] entries = CreatePreservationEntries(legacyLayout: true);
+        using MemoryStream original = ArbitraryTarBuilder.Create(entries);
+        string cacheRoot = Path.Combine(_testRoot, "import-overwrite");
+        using DiskPackageCache cache = CreateCache(cacheRoot);
+        PackageRecord prior = await InstallSucceedsAsync(
+            original,
+            existingCache: cache,
+            import: true,
+            unmodified: initiallyUnmodified);
+        CacheMetadataEntry priorMetadata = (await cache.GetMetadataAsync(
+            TestContext.Current.CancellationToken))
+            .Packages[PackageCacheKey.Create(prior.Reference).MetadataKey];
+        using MemoryStream replacement = new(original.ToArray());
+
+        PackageRecord record = await cache.ImportAsync(
+            replacement,
+            new InstallCacheOptions
+            {
+                OverwriteExisting = true,
+                SkipIfArchiveUnchanged = true,
+                Unmodified = !initiallyUnmodified
+            },
+            TestContext.Current.CancellationToken);
+
+        AssertNoStagingOperations(cacheRoot);
+        replacement.CanRead.ShouldBeTrue();
+        CacheMetadataEntry metadata = (await cache.GetMetadataAsync(
+            TestContext.Current.CancellationToken))
+            .Packages[PackageCacheKey.Create(record.Reference).MetadataKey];
+        metadata.ArchiveSha256.ShouldBe(priorMetadata.ArchiveSha256);
+        metadata.ContentGeneration.ShouldNotBe(priorMetadata.ContentGeneration);
+        await AssertInstalledContentAsync(
+            record,
+            prior.Reference,
+            entries,
+            legacyLayout: true,
+            unmodified: !initiallyUnmodified);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ImportAsync_CacheHit_DoesNotConvertExistingGeneration(
+        bool initiallyUnmodified)
+    {
+        ArbitraryTarEntry[] entries = CreatePreservationEntries(legacyLayout: true);
+        using MemoryStream original = ArbitraryTarBuilder.Create(entries);
+        string cacheRoot = Path.Combine(_testRoot, "import-hit");
+        using DiskPackageCache cache = CreateCache(cacheRoot);
+        PackageRecord prior = await InstallSucceedsAsync(
+            original,
+            existingCache: cache,
+            import: true,
+            unmodified: initiallyUnmodified);
+        byte[] priorMetadata = await File.ReadAllBytesAsync(
+            Path.Combine(cacheRoot, "packages.ini"),
+            TestContext.Current.CancellationToken);
+        using MemoryStream replacement = new(original.ToArray());
+
+        PackageRecord record = await cache.ImportAsync(
+            replacement,
+            new InstallCacheOptions { Unmodified = !initiallyUnmodified },
+            TestContext.Current.CancellationToken);
+
+        AssertNoStagingOperations(cacheRoot);
+        replacement.CanRead.ShouldBeTrue();
+        replacement.Position.ShouldBe(replacement.Length);
+        record.ContentPath.ShouldBe(prior.ContentPath);
+        (await File.ReadAllBytesAsync(
+            Path.Combine(cacheRoot, "packages.ini"),
+            TestContext.Current.CancellationToken)).ShouldBe(priorMetadata);
+        await AssertInstalledContentAsync(
+            record,
+            prior.Reference,
+            entries,
+            legacyLayout: true,
+            unmodified: initiallyUnmodified);
     }
 
     [Fact]
@@ -51,7 +364,7 @@ public class PackageArchiveValidationTests : IDisposable
     }
 
     [Fact]
-    public async Task InstallAsync_LegacyRootLayout_IsValidatedThenNormalized()
+    public async Task InstallAsync_LegacyRootLayout_IsValidatedThenWrapped()
     {
         using MemoryStream archive = ArbitraryTarBuilder.Create(
             ArbitraryTarBuilder.File("package.json", Manifest),
@@ -108,7 +421,7 @@ public class PackageArchiveValidationTests : IDisposable
     [InlineData("example.package", "1.0.0", true, false)]
     [InlineData("example.package", "1.0.0", false, true)]
     [InlineData("example.package", "1.0.0", true, true)]
-    public async Task InstallAsync_AncillaryRoots_AreNormalized(
+    public async Task InstallAsync_AncillaryRoots_ArePreserved(
         string name,
         string version,
         bool includeOpenApi,
@@ -125,7 +438,7 @@ public class PackageArchiveValidationTests : IDisposable
 
         PackageRecord record = await InstallSucceedsAsync(archive, reference);
 
-        await AssertNormalizedContentAsync(record, reference, entries);
+        await AssertInstalledContentAsync(record, reference, entries);
     }
 
     [Theory]
@@ -167,7 +480,7 @@ public class PackageArchiveValidationTests : IDisposable
 
         PackageRecord record = await InstallSucceedsAsync(archive, reference);
 
-        await AssertNormalizedContentAsync(record, reference, entries);
+        await AssertInstalledContentAsync(record, reference, entries);
     }
 
     [Theory]
@@ -181,29 +494,30 @@ public class PackageArchiveValidationTests : IDisposable
     [InlineData("Other/", true)]
     [InlineData("OpenApi/nested/file.json", false)]
     [InlineData("Other/nested/file.json", false)]
-    public async Task InstallAsync_UnsupportedAncillaryLayout_IsRejectedBeforePromotion(
-        string unsupportedPath,
+    public async Task InstallAsync_ArbitraryAncillaryLayout_IsPreserved(
+        string ancillaryPath,
         bool isDirectory)
     {
-        string unsupportedRoot = unsupportedPath.Split('/')[0];
+        string ancillaryRoot = ancillaryPath.Split('/')[0];
         ArbitraryTarEntry[] acceptedEntries = CreateAncillaryEntries(
             includeOpenApi: !string.Equals(
-                unsupportedRoot,
+                ancillaryRoot,
                 "openapi",
                 StringComparison.OrdinalIgnoreCase),
             includeOther: !string.Equals(
-                unsupportedRoot,
+                ancillaryRoot,
                 "other",
                 StringComparison.OrdinalIgnoreCase));
-        ArbitraryTarEntry unsupportedEntry = isDirectory
-            ? ArbitraryTarBuilder.Directory(unsupportedPath)
-            : ArbitraryTarBuilder.File(unsupportedPath, OtherResource);
-        using MemoryStream archive = ArbitraryTarBuilder.Create(
-            [.. acceptedEntries, unsupportedEntry]);
+        ArbitraryTarEntry ancillaryEntry = isDirectory
+            ? ArbitraryTarBuilder.Directory(ancillaryPath)
+            : ArbitraryTarBuilder.File(ancillaryPath, OtherResource);
+        ArbitraryTarEntry[] entries = [.. acceptedEntries, ancillaryEntry];
+        using MemoryStream archive = ArbitraryTarBuilder.Create(entries);
+        PackageReference reference = new("example.package", "1.0.0");
 
-        PackageInstallException exception = await InstallFailsAsync(archive);
+        PackageRecord record = await InstallSucceedsAsync(archive, reference);
 
-        AssertArchiveFailure(exception);
+        await AssertInstalledContentAsync(record, reference, entries);
     }
 
     [Theory]
@@ -213,18 +527,20 @@ public class PackageArchiveValidationTests : IDisposable
     [InlineData("other/nested/Package.json")]
     [InlineData("openapi/PACKAGE.JSON")]
     [InlineData("other/PACKAGE.JSON")]
-    public async Task InstallAsync_AncillarySecondManifest_IsRejectedBeforePromotion(
+    public async Task InstallAsync_AncillaryManifest_IsOpaquePreservedPayload(
         string manifestPath)
     {
-        using MemoryStream archive = ArbitraryTarBuilder.Create(
+        ArbitraryTarEntry[] entries =
         [
             .. CreateAncillaryEntries(),
-            ArbitraryTarBuilder.File(manifestPath, Manifest)
-        ]);
+            ArbitraryTarBuilder.File(manifestPath, "{not package manifest JSON")
+        ];
+        using MemoryStream archive = ArbitraryTarBuilder.Create(entries);
+        PackageReference reference = new("example.package", "1.0.0");
 
-        PackageInstallException exception = await InstallFailsAsync(archive);
+        PackageRecord record = await InstallSucceedsAsync(archive, reference);
 
-        AssertArchiveFailure(exception);
+        await AssertInstalledContentAsync(record, reference, entries);
     }
 
     [Theory]
@@ -240,7 +556,7 @@ public class PackageArchiveValidationTests : IDisposable
     [InlineData("other", "Other", AncillaryDestinationOccupancy.File)]
     [InlineData("other", "Other", AncillaryDestinationOccupancy.EmptyDirectory)]
     [InlineData("other", "Other", AncillaryDestinationOccupancy.ImplicitDirectory)]
-    public async Task InstallAsync_AncillaryDestinationOccupied_IsRejectedBeforePromotion(
+    public async Task InstallAsync_CoincidentAncillaryAndContentPaths_ArePreserved(
         string ancillaryRoot,
         string destinationSegment,
         AncillaryDestinationOccupancy occupancy)
@@ -256,14 +572,19 @@ public class PackageArchiveValidationTests : IDisposable
                 ArbitraryTarBuilder.File($"{destinationPath}/existing.json", PatientResource),
             _ => throw new ArgumentOutOfRangeException(nameof(occupancy), occupancy, null)
         };
-        using MemoryStream archive = ArbitraryTarBuilder.Create(
-            [.. CreateAncillaryEntries(), occupiedEntry]);
+        ArbitraryTarEntry[] entries =
+        [
+            .. CreateAncillaryEntries(
+                includeOpenApi: ancillaryRoot == "openapi",
+                includeOther: ancillaryRoot == "other"),
+            occupiedEntry
+        ];
+        using MemoryStream archive = ArbitraryTarBuilder.Create(entries);
+        PackageReference reference = new("example.package", "1.0.0");
 
-        PackageInstallException exception = await InstallFailsAsync(archive);
+        PackageRecord record = await InstallSucceedsAsync(archive, reference);
 
-        AssertArchiveFailure(exception);
-        exception.Message.ShouldContain("normalization destination");
-        exception.Message.ShouldContain($"package/{ancillaryRoot}");
+        await AssertInstalledContentAsync(record, reference, entries);
     }
 
     [Theory]
@@ -312,7 +633,7 @@ public class PackageArchiveValidationTests : IDisposable
         Dictionary<string, string?> before = await SnapshotTreeAsync(extractedPath);
 
         PackageInstallException exception = Should.Throw<PackageInstallException>(
-            () => PackageArchiveLayoutValidator.ValidateAndNormalize(
+            () => PackageStructureNormalizer.ValidateAndNormalize(
                 extractedPath,
                 inventory,
                 "example.package#1.0.0"));
@@ -322,6 +643,14 @@ public class PackageArchiveValidationTests : IDisposable
         exception.Message.ShouldContain($"package/{conflictingRoot}");
         Dictionary<string, string?> after = await SnapshotTreeAsync(extractedPath);
         AssertSameTree(before, after);
+
+        PackageInstallException compatibilityException = Should.Throw<PackageInstallException>(
+            () => TarballExtractor.NormalizePackageStructure(extractedPath));
+
+        AssertArchiveFailure(compatibilityException);
+        compatibilityException.Message.ShouldContain("normalization destination");
+        compatibilityException.Message.ShouldContain($"package/{conflictingRoot}");
+        AssertSameTree(before, await SnapshotTreeAsync(extractedPath));
     }
 
     [Fact]
@@ -360,6 +689,186 @@ public class PackageArchiveValidationTests : IDisposable
         Dictionary<string, string?> repeated = await SnapshotTreeAsync(extractedPath);
         AssertSameTree(normalized, repeated);
         Directory.Exists(Path.Combine(extractedPath, "package", "package")).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task NormalizePackageStructure_LegacyLayout_IsIdempotent()
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package.json", Manifest),
+            ArbitraryTarBuilder.File("README.md", "readme"),
+            ArbitraryTarBuilder.File("resources/cafe\u0301.json", OtherResource),
+            ArbitraryTarBuilder.Directory("empty/"));
+        string extractedPath = Path.Combine(_testRoot, "normalize-legacy");
+        await TarballExtractor.ExtractAsync(
+            archive,
+            extractedPath,
+            TestContext.Current.CancellationToken);
+        Dictionary<string, string?> before = await SnapshotTreeAsync(extractedPath);
+        Dictionary<string, string?> expected = before.ToDictionary(
+            entry => $"package/{entry.Key}",
+            entry => entry.Value,
+            StringComparer.Ordinal);
+        expected.Add("package", null);
+
+        TarballExtractor.NormalizePackageStructure(extractedPath);
+
+        Dictionary<string, string?> normalized = await SnapshotTreeAsync(extractedPath);
+        AssertSameTree(expected, normalized);
+        Directory.EnumerateFileSystemEntries(extractedPath)
+            .Select(Path.GetFileName)
+            .ShouldBe(["package"]);
+
+        TarballExtractor.NormalizePackageStructure(extractedPath);
+
+        AssertSameTree(normalized, await SnapshotTreeAsync(extractedPath));
+        Directory.Exists(Path.Combine(extractedPath, "package", "package")).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ValidateAndNormalizePackageStructure_PreservesOriginalLayoutAndNormalizedPaths(
+        bool standardLayout)
+    {
+        string prefix = standardLayout ? "package/" : "";
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File($"{prefix}package.json", Manifest),
+            ArbitraryTarBuilder.File($"{prefix}resource.json", PatientResource));
+        string extractedPath = Path.Combine(_testRoot, "compatibility");
+        ArchiveExtractionMetrics metrics = await TarballExtractor.ExtractAsync(
+            archive,
+            extractedPath,
+            new PackageInstallLimits(),
+            "example.package#1.0.0",
+            TestContext.Current.CancellationToken);
+        PackageArchiveInventory? inventory = metrics.Inventory;
+        inventory.ShouldNotBeNull();
+        Dictionary<string, string?> before = await SnapshotTreeAsync(extractedPath);
+        Dictionary<string, string?> expected = standardLayout
+            ? before
+            : before.ToDictionary(
+                entry => $"package/{entry.Key}",
+                entry => entry.Value,
+                StringComparer.Ordinal);
+        if (!standardLayout)
+            expected.Add("package", null);
+
+        PackageArchiveLayoutResult result = TarballExtractor.ValidateAndNormalizePackageStructure(
+            extractedPath,
+            inventory,
+            "example.package#1.0.0");
+
+        result.Layout.ShouldBe(
+            standardLayout ? PackageArchiveLayout.Standard : PackageArchiveLayout.Legacy);
+        result.ContentPath.ShouldBe(Path.Combine(extractedPath, "package"));
+        result.ManifestPath.ShouldBe(Path.Combine(extractedPath, "package", "package.json"));
+        AssertSameTree(expected, await SnapshotTreeAsync(extractedPath));
+    }
+
+    [Theory]
+    [InlineData("unknown/", true)]
+    [InlineData("unknown/nested/file.json", false)]
+    [InlineData("unknown.txt", false)]
+    [InlineData("README.md", false)]
+    [InlineData("openapi", false)]
+    [InlineData("other", false)]
+    [InlineData("OpenApi/", true)]
+    [InlineData("Other/", true)]
+    [InlineData("OpenApi/nested/file.json", false)]
+    [InlineData("Other/nested/file.json", false)]
+    public async Task NormalizePackageStructure_UnsupportedAncillaryLayout_DoesNotMutate(
+        string unsupportedPath,
+        bool isDirectory)
+    {
+        string unsupportedRoot = unsupportedPath.Split('/')[0];
+        ArbitraryTarEntry unsupportedEntry = isDirectory
+            ? ArbitraryTarBuilder.Directory(unsupportedPath)
+            : ArbitraryTarBuilder.File(unsupportedPath, OtherResource);
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+        [
+            .. CreateAncillaryEntries(
+                includeOpenApi: !string.Equals(
+                    unsupportedRoot,
+                    "openapi",
+                    StringComparison.OrdinalIgnoreCase),
+                includeOther: !string.Equals(
+                    unsupportedRoot,
+                    "other",
+                    StringComparison.OrdinalIgnoreCase)),
+            unsupportedEntry
+        ]);
+
+        await AssertNormalizationFailsWithoutMutationAsync(archive);
+    }
+
+    [Theory]
+    [InlineData("openapi/package.json")]
+    [InlineData("other/package.json")]
+    [InlineData("openapi/nested/Package.json")]
+    [InlineData("other/nested/Package.json")]
+    [InlineData("openapi/PACKAGE.JSON")]
+    [InlineData("other/PACKAGE.JSON")]
+    public async Task NormalizePackageStructure_AncillarySecondManifest_DoesNotMutate(
+        string manifestPath)
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+        [
+            .. CreateAncillaryEntries(),
+            ArbitraryTarBuilder.File(manifestPath, Manifest)
+        ]);
+
+        await AssertNormalizationFailsWithoutMutationAsync(archive);
+    }
+
+    [Theory]
+    [InlineData(InvalidLayout.WrapperRoot)]
+    [InlineData(InvalidLayout.MissingManifest)]
+    [InlineData(InvalidLayout.ManifestWrongCase)]
+    [InlineData(InvalidLayout.PackageDirectoryWrongCase)]
+    [InlineData(InvalidLayout.RootManifestWrongCase)]
+    [InlineData(InvalidLayout.ManifestDirectory)]
+    [InlineData(InvalidLayout.RootManifestDirectory)]
+    [InlineData(InvalidLayout.DualManifest)]
+    public async Task NormalizePackageStructure_InvalidLayout_DoesNotMutate(
+        InvalidLayout invalidLayout)
+    {
+        using MemoryStream archive = CreateInvalidLayoutArchive(invalidLayout);
+
+        await AssertNormalizationFailsWithoutMutationAsync(archive);
+    }
+
+    [Theory]
+    [InlineData(CompatibilityLayout.StandardRootFile)]
+    [InlineData(CompatibilityLayout.LegacyWithPackageTree)]
+    [InlineData(CompatibilityLayout.NestedManifest)]
+    public async Task NormalizePackageStructure_CompatibilityOnlyRestrictions_DoNotMutate(
+        CompatibilityLayout layout)
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            CreateCompatibilityEntries(layout));
+
+        await AssertNormalizationFailsWithoutMutationAsync(archive);
+    }
+
+    [Theory]
+    [InlineData(CompatibilityLayout.StandardRootFile)]
+    [InlineData(CompatibilityLayout.LegacyWithPackageTree)]
+    [InlineData(CompatibilityLayout.NestedManifest)]
+    public async Task InstallAsync_LayoutsRejectedOnlyByExplicitNormalizer_ArePreserved(
+        CompatibilityLayout layout)
+    {
+        ArbitraryTarEntry[] entries = CreateCompatibilityEntries(layout);
+        using MemoryStream archive = ArbitraryTarBuilder.Create(entries);
+        PackageReference reference = new("example.package", "1.0.0");
+
+        PackageRecord record = await InstallSucceedsAsync(archive, reference);
+
+        await AssertInstalledContentAsync(
+            record,
+            reference,
+            entries,
+            legacyLayout: layout == CompatibilityLayout.LegacyWithPackageTree);
     }
 
     [Theory]
@@ -464,32 +973,30 @@ public class PackageArchiveValidationTests : IDisposable
     }
 
     [Theory]
-    [InlineData("openapi", true)]
-    [InlineData("other", true)]
-    [InlineData("openapi", false)]
-    [InlineData("other", false)]
-    public async Task InstallAsync_InvalidAncillaryReplacement_PreservesPriorGeneration(
-        string ancillaryRoot,
-        bool destinationConflict)
+    [MemberData(nameof(LayoutModes))]
+    public async Task InstallAndImport_InvalidReplacement_PreservesCompletePriorGeneration(
+        bool import,
+        bool legacyLayout,
+        bool unmodified)
     {
         string cacheRoot = Path.Combine(_testRoot, "replacement-cache");
         PackageReference reference = new PackageReference("example.package", "1.0.0");
         PackageRecord priorRecord;
         CacheMetadataEntry priorMetadata;
         Dictionary<string, string?> priorTree;
+        byte[] priorMetadataBytes;
+        ArbitraryTarEntry[] originalEntries = CreatePreservationEntries(legacyLayout);
         using (DiskPackageCache cache = CreateCache(cacheRoot))
-        using (MemoryStream original = ArbitraryTarBuilder.Create(
-        [
-            .. CreateAncillaryEntries(includeOpenApi: false, includeOther: false),
-            ArbitraryTarBuilder.File("package/prior-only.txt", "prior generation")
-        ]))
+        using (MemoryStream original = ArbitraryTarBuilder.Create(originalEntries))
         {
             string originalHash = Convert.ToHexString(SHA256.HashData(original.ToArray()))
                 .ToLowerInvariant();
             await InstallSucceedsAsync(
                 original,
                 reference,
-                existingCache: cache);
+                existingCache: cache,
+                import: import,
+                unmodified: unmodified);
             // Compare persisted generations, including second-precision metadata timestamps.
             PackageRecord? persistedRecord = await cache.GetPackageAsync(
                 reference,
@@ -502,39 +1009,87 @@ public class PackageArchiveValidationTests : IDisposable
             priorMetadata.ArchiveSha256.ShouldBe(originalHash);
             priorMetadata.ContentGeneration.ShouldNotBeNullOrEmpty();
             priorTree = await SnapshotTreeAsync(priorRecord.DirectoryPath);
-
-            ArbitraryTarEntry[] invalidEntries = destinationConflict
-                ? [ArbitraryTarBuilder.File($"package/{ancillaryRoot}/existing.json", OtherResource)]
-                : CreateUnsafeAncillaryEntries(ancillaryRoot, UnsafeAncillaryEntry.Traversal);
-            ArbitraryTarEntry[] replacementEntries = CreateAncillaryEntries()
-                .Select(entry => entry.Name == $"package/{PatientFileName}"
-                    ? ArbitraryTarBuilder.File(
-                        entry.Name,
-                        PatientResource.Replace("\"active\"", "\"draft\""))
-                    : entry)
-                .ToArray();
-            using MemoryStream replacement = ArbitraryTarBuilder.Create(
-                [.. replacementEntries, .. invalidEntries]);
-
-            PackageInstallException exception = await InstallFailsAsync(
-                replacement,
-                reference,
-                existingCache: cache,
-                overwriteExisting: true);
-
-            AssertArchiveFailure(exception);
-            if (destinationConflict)
-                exception.Message.ShouldContain("normalization destination");
-            replacement.Position.ShouldBe(replacement.Length);
-            (await cache.GetFileContentAsync(
-                reference,
-                PatientFileName,
-                TestContext.Current.CancellationToken)).ShouldBe(PatientResource);
-            CacheMetadata retainedMetadata = await cache.GetMetadataAsync(
+            priorMetadataBytes = await File.ReadAllBytesAsync(
+                Path.Combine(cacheRoot, "packages.ini"),
                 TestContext.Current.CancellationToken);
-            retainedMetadata.Packages[PackageCacheKey.Create(reference).MetadataKey]
-                .ShouldBe(priorMetadata);
-            AssertSameTree(priorTree, await SnapshotTreeAsync(priorRecord.DirectoryPath));
+
+            foreach (string failure in new[] { "traversal", "dual", "malformed", "identity" })
+            {
+                string prefix = legacyLayout ? "" : "package/";
+                string manifest = failure switch
+                {
+                    "malformed" => "{not-json",
+                    "identity" => """{"name":" ","version":"1.0.0"}""",
+                    _ => Manifest
+                };
+                List<ArbitraryTarEntry> replacementEntries =
+                [
+                    ArbitraryTarBuilder.File($"{prefix}package.json", manifest),
+                    ArbitraryTarBuilder.File(
+                        $"{prefix}{PatientFileName}",
+                        PatientResource.Replace("\"active\"", "\"draft\"")),
+                    ArbitraryTarBuilder.File("replacement-only.txt", "new generation"),
+                    ArbitraryTarBuilder.File("openapi/new.txt", "new ancillary"),
+                    ArbitraryTarBuilder.File("nested/package.json", Manifest)
+                ];
+                if (failure == "dual")
+                {
+                    replacementEntries.Add(ArbitraryTarBuilder.File(
+                        legacyLayout ? "package/package.json" : "package.json",
+                        Manifest));
+                }
+                else if (failure == "traversal")
+                {
+                    replacementEntries.AddRange(CreateUnsafeAncillaryEntries(
+                        "other",
+                        UnsafeAncillaryEntry.Traversal));
+                }
+                using MemoryStream replacement = ArbitraryTarBuilder.Create(
+                    replacementEntries.ToArray());
+                InstallCacheOptions options = new()
+                {
+                    OverwriteExisting = true,
+                    Unmodified = unmodified
+                };
+
+                PackageInstallException exception =
+                    await Should.ThrowAsync<PackageInstallException>(
+                        () => import
+                            ? cache.ImportAsync(
+                                replacement,
+                                options,
+                                TestContext.Current.CancellationToken)
+                            : cache.InstallAsync(
+                                reference,
+                                replacement,
+                                options,
+                                TestContext.Current.CancellationToken));
+
+                // Inspect raw state before any cache reader could recover a transaction.
+                AssertNoStagingOperations(cacheRoot);
+                string transactionsRoot = Path.Combine(cacheRoot, ".fhirpkg", "transactions");
+                if (Directory.Exists(transactionsRoot))
+                    Directory.EnumerateFileSystemEntries(transactionsRoot).ShouldBeEmpty();
+                AssertSameTree(priorTree, await SnapshotTreeAsync(priorRecord.DirectoryPath));
+                (await File.ReadAllBytesAsync(
+                    Path.Combine(cacheRoot, "packages.ini"),
+                    TestContext.Current.CancellationToken)).ShouldBe(priorMetadataBytes);
+                if (failure == "identity")
+                {
+                    exception.ErrorCode.ShouldBe(PackageInstallErrorCode.InvalidPackageIdentity);
+                    exception.Stage.ShouldBe(PackageInstallStage.IdentityValidation);
+                }
+                else
+                {
+                    AssertArchiveFailure(exception);
+                }
+                replacement.CanRead.ShouldBeTrue();
+                replacement.Position.ShouldBe(replacement.Length);
+                CacheMetadata retainedMetadata = await cache.GetMetadataAsync(
+                    TestContext.Current.CancellationToken);
+                retainedMetadata.Packages[PackageCacheKey.Create(reference).MetadataKey]
+                    .ShouldBe(priorMetadata);
+            }
         }
 
         using DiskPackageCache reopened = CreateCache(cacheRoot);
@@ -552,10 +1107,6 @@ public class PackageArchiveValidationTests : IDisposable
             reference,
             PatientFileName,
             TestContext.Current.CancellationToken)).ShouldBe(PatientResource);
-        (await reopened.GetFileContentAsync(
-            reference,
-            "prior-only.txt",
-            TestContext.Current.CancellationToken)).ShouldBe("prior generation");
         CacheMetadata reopenedMetadata = await reopened.GetMetadataAsync(
             TestContext.Current.CancellationToken);
         CacheMetadataEntry retainedEntry =
@@ -564,6 +1115,12 @@ public class PackageArchiveValidationTests : IDisposable
         retainedEntry.ContentGeneration.ShouldBe(priorMetadata.ContentGeneration);
         retainedEntry.ShouldBe(priorMetadata);
         AssertSameTree(priorTree, await SnapshotTreeAsync(retained.DirectoryPath));
+        await AssertInstalledContentAsync(
+            retained,
+            reference,
+            originalEntries,
+            legacyLayout,
+            unmodified);
         File.Exists(Path.Combine(cacheRoot, "escaped.txt")).ShouldBeFalse();
         AssertNoStagingOperations(cacheRoot);
     }
@@ -779,46 +1336,144 @@ public class PackageArchiveValidationTests : IDisposable
     }
 
     [Theory]
-    [InlineData(InvalidLayout.MixedStandardRoot)]
-    [InlineData(InvalidLayout.LegacyWithPackageTree)]
-    [InlineData(InvalidLayout.WrapperRoot)]
-    [InlineData(InvalidLayout.SecondManifest)]
-    [InlineData(InvalidLayout.MissingManifest)]
-    [InlineData(InvalidLayout.ManifestWrongCase)]
-    public async Task InstallAsync_AmbiguousOrInvalidLayout_IsRejectedBeforePromotion(
-        InvalidLayout invalidLayout)
+    [MemberData(nameof(InvalidLayoutCases))]
+    public async Task InstallAndImport_AmbiguousOrInvalidLayout_IsRejectedBeforePromotion(
+        InvalidLayout invalidLayout,
+        bool import,
+        bool unmodified)
     {
         using MemoryStream archive = CreateInvalidLayoutArchive(invalidLayout);
 
-        PackageInstallException exception = await InstallFailsAsync(archive);
+        PackageInstallException exception = await InstallFailsAsync(
+            archive,
+            import: import,
+            unmodified: unmodified);
 
         AssertArchiveFailure(exception);
     }
 
     [Theory]
-    [InlineData("other.package", "1.0.0")]
-    [InlineData("example.package", "2.0.0")]
+    [InlineData("other.package", "1.0.0", false, false)]
+    [InlineData("other.package", "1.0.0", false, true)]
+    [InlineData("other.package", "1.0.0", true, false)]
+    [InlineData("other.package", "1.0.0", true, true)]
+    [InlineData("example.package", "2.0.0", false, false)]
+    [InlineData("example.package", "2.0.0", false, true)]
+    [InlineData("example.package", "2.0.0", true, false)]
+    [InlineData("example.package", "2.0.0", true, true)]
     public async Task InstallAsync_ManifestIdentityMismatch_IsRejectedBeforePromotion(
         string name,
-        string version)
+        string version,
+        bool legacyLayout,
+        bool unmodified)
     {
         string manifest =
             $$"""{"name":"{{name}}","version":"{{version}}"}""";
         using MemoryStream archive = ArbitraryTarBuilder.Create(
-            ArbitraryTarBuilder.File("package/package.json", manifest));
+            ArbitraryTarBuilder.File(
+                legacyLayout ? "package.json" : "package/package.json",
+                manifest),
+            ArbitraryTarBuilder.File("nested/package.json", Manifest));
 
-        PackageInstallException exception = await InstallFailsAsync(archive);
+        PackageInstallException exception = await InstallFailsAsync(
+            archive,
+            unmodified: unmodified);
 
         exception.ErrorCode.ShouldBe(
             PackageInstallErrorCode.InvalidPackageIdentity);
         exception.Stage.ShouldBe(PackageInstallStage.IdentityValidation);
     }
 
+    [Theory]
+    [MemberData(nameof(LayoutModes))]
+    public async Task InstallAndImport_InvalidAuthoritativeManifest_DoesNotUseNestedManifest(
+        bool import,
+        bool legacyLayout,
+        bool unmodified)
+    {
+        (string Manifest, PackageInstallErrorCode ErrorCode)[] cases =
+        [
+            ("{not-json", PackageInstallErrorCode.InvalidArchive),
+            ("null", PackageInstallErrorCode.InvalidArchive),
+            ("[]", PackageInstallErrorCode.InvalidArchive),
+            ("{}", PackageInstallErrorCode.InvalidArchive),
+            ("""{"name":"","version":"1.0.0"}""",
+                PackageInstallErrorCode.InvalidPackageIdentity),
+            ("""{"name":"example.package","version":"current"}""",
+                PackageInstallErrorCode.InvalidPackageIdentity)
+        ];
+        foreach ((string manifest, PackageInstallErrorCode expectedCode) in cases)
+        {
+            using MemoryStream archive = ArbitraryTarBuilder.Create(
+                ArbitraryTarBuilder.File(
+                    legacyLayout ? "package.json" : "package/package.json",
+                    manifest),
+                ArbitraryTarBuilder.File("other/package.json", Manifest),
+                ArbitraryTarBuilder.File("nested/package.json", Manifest));
+
+            PackageInstallException exception = await InstallFailsAsync(
+                archive,
+                import: import,
+                unmodified: unmodified);
+
+            exception.ErrorCode.ShouldBe(expectedCode);
+            exception.Stage.ShouldBe(expectedCode == PackageInstallErrorCode.InvalidArchive
+                ? PackageInstallStage.ArchiveValidation
+                : PackageInstallStage.IdentityValidation);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(LayoutModes))]
+    public async Task InstallAndImport_CancellationBeforePreparation_PreservesPriorTreeAndMetadata(
+        bool import,
+        bool legacyLayout,
+        bool unmodified)
+    {
+        string cacheRoot = Path.Combine(_testRoot, "cancelled-replacement");
+        using DiskPackageCache cache = CreateCache(cacheRoot);
+        using MemoryStream original = ArbitraryTarBuilder.Create(
+            CreatePreservationEntries(legacyLayout));
+        PackageRecord prior = await InstallSucceedsAsync(
+            original,
+            existingCache: cache,
+            import: import,
+            unmodified: unmodified);
+        Dictionary<string, string?> priorTree = await SnapshotTreeAsync(prior.DirectoryPath);
+        byte[] priorMetadata = await File.ReadAllBytesAsync(
+            Path.Combine(cacheRoot, "packages.ini"),
+            TestContext.Current.CancellationToken);
+        using CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        using MemoryStream replacement = new(original.ToArray());
+        InstallCacheOptions options = new()
+        {
+            OverwriteExisting = true,
+            Unmodified = unmodified,
+            Progress = new CancelOnValidationProgress(source)
+        };
+
+        await Should.ThrowAsync<OperationCanceledException>(
+            () => import
+                ? cache.ImportAsync(replacement, options, source.Token)
+                : cache.InstallAsync(prior.Reference, replacement, options, source.Token));
+
+        AssertNoStagingOperations(cacheRoot);
+        replacement.CanRead.ShouldBeTrue();
+        replacement.Position.ShouldBe(replacement.Length);
+        AssertSameTree(priorTree, await SnapshotTreeAsync(prior.DirectoryPath));
+        (await File.ReadAllBytesAsync(
+            Path.Combine(cacheRoot, "packages.ini"),
+            TestContext.Current.CancellationToken)).ShouldBe(priorMetadata);
+    }
+
     private async Task<PackageRecord> InstallSucceedsAsync(
         MemoryStream archive,
         PackageReference? requestedReference = null,
         PackageInstallLimits? limits = null,
-        DiskPackageCache? existingCache = null)
+        DiskPackageCache? existingCache = null,
+        bool import = false,
+        bool unmodified = false)
     {
         using DiskPackageCache? ownedCache = existingCache is null
             ? CreateCache(Path.Combine(_testRoot, Guid.NewGuid().ToString("N")))
@@ -826,15 +1481,24 @@ public class PackageArchiveValidationTests : IDisposable
         DiskPackageCache cache = existingCache ?? ownedCache!;
         try
         {
-            return await cache.InstallAsync(
-                requestedReference ?? new PackageReference("example.package", "1.0.0"),
-                archive,
-                new InstallCacheOptions
-                {
-                    VerifyChecksum = false,
-                    Limits = limits
-                },
-                TestContext.Current.CancellationToken);
+            InstallCacheOptions options = new()
+            {
+                VerifyChecksum = false,
+                Limits = limits,
+                Unmodified = unmodified
+            };
+            PackageRecord record = import
+                ? await cache.ImportAsync(
+                    archive,
+                    options,
+                    TestContext.Current.CancellationToken)
+                : await cache.InstallAsync(
+                    requestedReference ?? new PackageReference("example.package", "1.0.0"),
+                    archive,
+                    options,
+                    TestContext.Current.CancellationToken);
+            AssertNoStagingOperations(cache.CacheDirectory);
+            return record;
         }
         catch (PackageInstallException exception)
         {
@@ -849,7 +1513,9 @@ public class PackageArchiveValidationTests : IDisposable
         PackageReference? requestedReference = null,
         PackageInstallLimits? limits = null,
         DiskPackageCache? existingCache = null,
-        bool overwriteExisting = false)
+        bool overwriteExisting = false,
+        bool import = false,
+        bool unmodified = false)
     {
         using DiskPackageCache? ownedCache = existingCache is null
             ? CreateCache(Path.Combine(_testRoot, Guid.NewGuid().ToString("N")))
@@ -860,19 +1526,26 @@ public class PackageArchiveValidationTests : IDisposable
             "example.package",
             "1.0.0");
         string? priorContentPath = cache.GetPackageContentPath(reference);
+        InstallCacheOptions options = new()
+        {
+            VerifyChecksum = false,
+            Limits = limits,
+            OverwriteExisting = overwriteExisting,
+            Unmodified = unmodified
+        };
 
         PackageInstallException exception =
             await Should.ThrowAsync<PackageInstallException>(
-                () => cache.InstallAsync(
-                    reference,
-                    archive,
-                    new InstallCacheOptions
-                    {
-                        VerifyChecksum = false,
-                        Limits = limits,
-                        OverwriteExisting = overwriteExisting
-                    },
-                    TestContext.Current.CancellationToken));
+                () => import
+                    ? cache.ImportAsync(
+                        archive,
+                        options,
+                        TestContext.Current.CancellationToken)
+                    : cache.InstallAsync(
+                        reference,
+                        archive,
+                        options,
+                        TestContext.Current.CancellationToken));
 
         // Check cleanup before cache reads can perform recovery.
         AssertNoStagingOperations(cacheRoot);
@@ -882,7 +1555,7 @@ public class PackageArchiveValidationTests : IDisposable
         }
         else
         {
-            Directory.Exists(Path.Combine(cacheRoot, reference.CacheDirectoryName))
+            Directory.Exists(PackageCacheKey.Create(reference).GetPackageDirectoryPath(cacheRoot))
                 .ShouldBeFalse();
             cache.GetPackageContentPath(reference).ShouldBeNull();
             (await cache.GetPackageAsync(
@@ -890,6 +1563,7 @@ public class PackageArchiveValidationTests : IDisposable
                 TestContext.Current.CancellationToken)).ShouldBeNull();
         }
         AssertNoStagingOperations(cacheRoot);
+        archive.CanRead.ShouldBeTrue();
         return exception;
     }
 
@@ -926,6 +1600,51 @@ public class PackageArchiveValidationTests : IDisposable
         }
 
         return entries.ToArray();
+    }
+
+    private static ArbitraryTarEntry[] CreatePreservationEntries(bool legacyLayout)
+    {
+        string prefix = legacyLayout ? "" : "package/";
+        return
+        [
+            ArbitraryTarBuilder.File($"{prefix}package.json", Manifest),
+            ArbitraryTarBuilder.File($"{prefix}{PatientFileName}", PatientResource),
+            ArbitraryTarBuilder.File(
+                $"{prefix}.index.json",
+                $$"""
+                { "index-version": 2, "files": [
+                  { "filename": "{{PatientFileName}}", "resourceType": "StructureDefinition",
+                    "id": "Patient", "url": "http://hl7.org/fhir/StructureDefinition/Patient" }
+                ] }
+                """),
+            ArbitraryTarBuilder.File("README.md", "distributed root readme"),
+            ArbitraryTarBuilder.File("package/README.md", "different package readme"),
+            ArbitraryTarBuilder.File("references.txt", $"{prefix}{PatientFileName}"),
+            ArbitraryTarBuilder.File("openapi/reference.txt", "../other/data.bin"),
+            ArbitraryTarBuilder.File("openapi/schema/model.json", OpenApiResource),
+            ArbitraryTarBuilder.File("package/openapi/content.txt", "not a move destination"),
+            ArbitraryTarBuilder.Directory("package/other/empty/"),
+            ArbitraryTarBuilder.File(
+                legacyLayout ? "package/Package.json" : "package/nested/package.json",
+                "{opaque malformed manifest"),
+            ArbitraryTarBuilder.File("other/nested/package.json", "{also opaque"),
+            ArbitraryTarBuilder.File("other/Package.json", "not JSON"),
+            ArbitraryTarBuilder.File("other/.index.json", "{opaque ancillary index"),
+            ArbitraryTarBuilder.File(
+                "other/data.bin",
+                Enumerable.Range(0, 256).Select(value => (byte)value).ToArray()),
+            ArbitraryTarBuilder.Directory("other/empty/"),
+            ArbitraryTarBuilder.File(".fhirpkg/transactions/payload.json", "{payload, not journal"),
+            ArbitraryTarBuilder.File(".fhirpkg/packages.ini", "distributed nested bookkeeping name"),
+            ArbitraryTarBuilder.File("packages.ini", "[packages]\npayload = not cache metadata\n"),
+            ArbitraryTarBuilder.File("docs\\nested\\notes.txt", "UTF-8 café; relative paths stay intact"),
+            ArbitraryTarBuilder.Directory("docs/nested/"),
+            ArbitraryTarBuilder.Directory("package/"),
+            ArbitraryTarBuilder.Directory("empty/"),
+            ArbitraryTarBuilder.Directory("explicit/"),
+            ArbitraryTarBuilder.File("explicit/file.txt", "explicit parent"),
+            ArbitraryTarBuilder.File("empty-file.bin", [])
+        ];
     }
 
     private static ArbitraryTarEntry[] CreateUnsafeAncillaryEntries(
@@ -969,6 +1688,22 @@ public class PackageArchiveValidationTests : IDisposable
             _ => throw new ArgumentOutOfRangeException(nameof(unsafeEntry), unsafeEntry, null)
         };
 
+    private async Task AssertNormalizationFailsWithoutMutationAsync(MemoryStream archive)
+    {
+        string extractedPath = Path.Combine(_testRoot, "normalize-rejected");
+        await TarballExtractor.ExtractAsync(
+            archive,
+            extractedPath,
+            TestContext.Current.CancellationToken);
+        Dictionary<string, string?> before = await SnapshotTreeAsync(extractedPath);
+
+        PackageInstallException exception = Should.Throw<PackageInstallException>(
+            () => TarballExtractor.NormalizePackageStructure(extractedPath));
+
+        AssertArchiveFailure(exception);
+        AssertSameTree(before, await SnapshotTreeAsync(extractedPath));
+    }
+
     private static async Task<Dictionary<string, string?>> SnapshotTreeAsync(string root)
     {
         Dictionary<string, string?> snapshot =
@@ -993,30 +1728,69 @@ public class PackageArchiveValidationTests : IDisposable
 
     private static void AssertSameTree(
         Dictionary<string, string?> expected,
-        Dictionary<string, string?> actual) =>
+        Dictionary<string, string?> actual)
+    {
+        actual.Count.ShouldBe(expected.Count);
+        actual.Count(entry => entry.Value is null)
+            .ShouldBe(expected.Count(entry => entry.Value is null));
+        actual.Count(entry => entry.Value is not null)
+            .ShouldBe(expected.Count(entry => entry.Value is not null));
         actual.OrderBy(entry => entry.Key, StringComparer.Ordinal)
             .ShouldBe(expected.OrderBy(entry => entry.Key, StringComparer.Ordinal));
+    }
 
-    private static async Task AssertNormalizedContentAsync(
+    private static Dictionary<string, string?> ExpectedTree(
+        ArbitraryTarEntry[] entries,
+        bool wrapLegacyRoot)
+    {
+        Dictionary<string, string?> expected = new(StringComparer.Ordinal);
+        if (wrapLegacyRoot)
+            expected.Add("package", null);
+        foreach (ArbitraryTarEntry entry in entries)
+        {
+            string relativePath = entry.Name.Replace('\\', '/').TrimEnd('/');
+            if (wrapLegacyRoot)
+                relativePath = $"package/{relativePath}";
+            string[] segments = relativePath.Split('/');
+            for (int depth = 1; depth < segments.Length; depth++)
+                expected.TryAdd(string.Join("/", segments.Take(depth)), null);
+
+            if (entry.EntryType == TarEntryType.Directory)
+                expected.TryAdd(relativePath, null);
+            else
+                expected.Add(relativePath, Convert.ToBase64String(entry.Content!));
+        }
+
+        return expected;
+    }
+
+    private static async Task AssertInstalledContentAsync(
         PackageRecord record,
         PackageReference reference,
-        ArbitraryTarEntry[] entries)
+        ArbitraryTarEntry[] entries,
+        bool legacyLayout = false,
+        bool unmodified = false,
+        string? manifestVersion = null)
     {
         record.Reference.ShouldBe(reference);
         record.Manifest.Name.ShouldBe(reference.Name);
-        record.Manifest.Version.ShouldBe(reference.Version);
-        Path.GetFileName(record.DirectoryPath).ShouldBe(reference.CacheDirectoryName);
-        record.ContentPath.ShouldBe(Path.Combine(record.DirectoryPath, "package"));
-        Directory.EnumerateFileSystemEntries(record.DirectoryPath)
-            .Select(Path.GetFileName)
-            .ShouldBe(["package"]);
+        record.Manifest.Version.ShouldBe(manifestVersion ?? reference.Version);
+        Path.GetFileName(record.DirectoryPath)
+            .ShouldBe(Path.GetFileName(PackageCacheKey.Create(reference).RelativePath));
+        record.ContentPath.ShouldBe(legacyLayout && unmodified
+            ? record.DirectoryPath
+            : Path.Combine(record.DirectoryPath, "package"));
+        Dictionary<string, string?> expected = ExpectedTree(
+            entries,
+            wrapLegacyRoot: legacyLayout && !unmodified);
+        AssertSameTree(expected, await SnapshotTreeAsync(record.DirectoryPath));
 
         ArbitraryTarEntry[] files = entries
             .Where(entry => entry.EntryType == TarEntryType.RegularFile)
             .ToArray();
         long expectedSize = files.Sum(entry => (long)entry.Content!.Length);
         record.SizeBytes.ShouldBe(expectedSize);
-        Directory.EnumerateFiles(record.ContentPath, "*", SearchOption.AllDirectories)
+        Directory.EnumerateFiles(record.DirectoryPath, "*", SearchOption.AllDirectories)
             .Sum(path => new FileInfo(path).Length)
             .ShouldBe(expectedSize);
 
@@ -1028,53 +1802,92 @@ public class PackageArchiveValidationTests : IDisposable
         reopenedRecord.ShouldNotBeNull();
         reopenedRecord.Reference.ShouldBe(reference);
         reopenedRecord.Manifest.Name.ShouldBe(reference.Name);
-        reopenedRecord.Manifest.Version.ShouldBe(reference.Version);
+        reopenedRecord.Manifest.Version.ShouldBe(manifestVersion ?? reference.Version);
+        reopenedRecord.DirectoryPath.ShouldBe(record.DirectoryPath);
         reopenedRecord.ContentPath.ShouldBe(record.ContentPath);
         reopenedRecord.SizeBytes.ShouldBe(expectedSize);
+        reopened.GetPackageContentPath(reference).ShouldBe(record.ContentPath);
+        CacheMetadata metadata = await reopened.GetMetadataAsync(
+            TestContext.Current.CancellationToken);
+        metadata.Packages[PackageCacheKey.Create(reference).MetadataKey]
+            .SizeBytes.ShouldBe(expectedSize);
 
         foreach (ArbitraryTarEntry file in files)
         {
             string relativePath = file.Name.Replace('\\', '/');
-            if (relativePath.StartsWith("package/", StringComparison.Ordinal))
-                relativePath = relativePath["package/".Length..];
-
+            string archiveRoot = legacyLayout && !unmodified
+                ? record.ContentPath
+                : record.DirectoryPath;
             byte[] content = await File.ReadAllBytesAsync(
-                Path.Combine(record.ContentPath, relativePath),
+                Path.Combine(archiveRoot, relativePath),
                 TestContext.Current.CancellationToken);
             content.ShouldBe(file.Content!);
+
+            if (!legacyLayout)
+            {
+                if (!relativePath.StartsWith("package/", StringComparison.Ordinal))
+                    continue;
+                relativePath = relativePath["package/".Length..];
+            }
+
             (await reopened.GetFileContentAsync(
                 reference,
                 relativePath,
                 TestContext.Current.CancellationToken))
                 .ShouldBe(Encoding.UTF8.GetString(file.Content!));
         }
+        AssertSameTree(expected, await SnapshotTreeAsync(record.DirectoryPath));
     }
 
     private static MemoryStream CreateInvalidLayoutArchive(
         InvalidLayout invalidLayout) =>
         invalidLayout switch
         {
-            InvalidLayout.MixedStandardRoot => ArbitraryTarBuilder.Create(
-                ArbitraryTarBuilder.File("package/package.json", Manifest),
-                ArbitraryTarBuilder.File("README.md", "mixed")),
-            InvalidLayout.LegacyWithPackageTree => ArbitraryTarBuilder.Create(
-                ArbitraryTarBuilder.File("package.json", Manifest),
-                ArbitraryTarBuilder.File("package/file.txt", "mixed")),
             InvalidLayout.WrapperRoot => ArbitraryTarBuilder.Create(
                 ArbitraryTarBuilder.File("wrapper/package.json", Manifest)),
-            InvalidLayout.SecondManifest => ArbitraryTarBuilder.Create(
-                ArbitraryTarBuilder.File("package/package.json", Manifest),
-                ArbitraryTarBuilder.File(
-                    "package/nested/package.json",
-                    Manifest)),
             InvalidLayout.MissingManifest => ArbitraryTarBuilder.Create(
                 ArbitraryTarBuilder.File("package/file.txt", "missing")),
             InvalidLayout.ManifestWrongCase => ArbitraryTarBuilder.Create(
                 ArbitraryTarBuilder.File("package/Package.json", Manifest)),
+            InvalidLayout.PackageDirectoryWrongCase => ArbitraryTarBuilder.Create(
+                ArbitraryTarBuilder.File("Package/package.json", Manifest)),
+            InvalidLayout.RootManifestWrongCase => ArbitraryTarBuilder.Create(
+                ArbitraryTarBuilder.File("Package.json", Manifest)),
+            InvalidLayout.ManifestDirectory => ArbitraryTarBuilder.Create(
+                ArbitraryTarBuilder.Directory("package/package.json/"),
+                ArbitraryTarBuilder.File("other/package.json", Manifest)),
+            InvalidLayout.RootManifestDirectory => ArbitraryTarBuilder.Create(
+                ArbitraryTarBuilder.Directory("package.json/"),
+                ArbitraryTarBuilder.File("other/package.json", Manifest)),
+            InvalidLayout.DualManifest => ArbitraryTarBuilder.Create(
+                ArbitraryTarBuilder.File("package/package.json", Manifest),
+                ArbitraryTarBuilder.File("package.json", Manifest)),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(invalidLayout),
                 invalidLayout,
                 null)
+        };
+
+    private static ArbitraryTarEntry[] CreateCompatibilityEntries(
+        CompatibilityLayout layout) =>
+        layout switch
+        {
+            CompatibilityLayout.StandardRootFile =>
+            [
+                ArbitraryTarBuilder.File("package/package.json", Manifest),
+                ArbitraryTarBuilder.File("README.md", "root file")
+            ],
+            CompatibilityLayout.LegacyWithPackageTree =>
+            [
+                ArbitraryTarBuilder.File("package.json", Manifest),
+                ArbitraryTarBuilder.File("package/file.txt", "incidental subtree")
+            ],
+            CompatibilityLayout.NestedManifest =>
+            [
+                ArbitraryTarBuilder.File("package/package.json", Manifest),
+                ArbitraryTarBuilder.File("package/nested/package.json", "{opaque")
+            ],
+            _ => throw new ArgumentOutOfRangeException(nameof(layout), layout, null)
         };
 
     private static void AssertArchiveFailure(
@@ -1095,12 +1908,21 @@ public class PackageArchiveValidationTests : IDisposable
 
     public enum InvalidLayout
     {
-        MixedStandardRoot,
-        LegacyWithPackageTree,
         WrapperRoot,
-        SecondManifest,
         MissingManifest,
-        ManifestWrongCase
+        ManifestWrongCase,
+        PackageDirectoryWrongCase,
+        RootManifestWrongCase,
+        ManifestDirectory,
+        RootManifestDirectory,
+        DualManifest
+    }
+
+    public enum CompatibilityLayout
+    {
+        StandardRootFile,
+        LegacyWithPackageTree,
+        NestedManifest
     }
 
     public enum AncillaryDirectorySpelling
@@ -1125,5 +1947,15 @@ public class PackageArchiveValidationTests : IDisposable
         Duplicate,
         CaseCollision,
         UnicodeNormalizationCollision
+    }
+
+    private sealed class CancelOnValidationProgress(CancellationTokenSource source) :
+        IProgress<PackageProgress>
+    {
+        public void Report(PackageProgress value)
+        {
+            if (value.Phase == PackageProgressPhase.Validating)
+                source.Cancel();
+        }
     }
 }
