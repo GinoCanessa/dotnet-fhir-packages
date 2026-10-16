@@ -43,6 +43,7 @@ qualification evidence) lives alongside this file under
 - Corrected `PackageRecord.SizeBytes` accounting to include expanded bytes from
   the whole archive, including siblings and publisher-supplied indexes, without
   recounting later derived indexes.
+- Fixed concurrent cache test recording in tests.
 
 ## [2026.901.1609] - 2026-09-01
 
