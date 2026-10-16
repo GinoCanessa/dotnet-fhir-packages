@@ -2706,7 +2706,7 @@ public sealed class FhirPackageManager :
         new PackageInstallException(
             PackageInstallErrorCode.CorruptCache,
             PackageInstallStage.CacheInspection,
-            $"The cache entry for '{cacheKey.MetadataKey}' could not be inspected.",
+            $"The cache entry for '{cacheKey.MetadataKey}' could not be inspected: {exception.Message}",
             cacheKey.DisplayReference.FhirDirective,
             exception);
 

@@ -1,5 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using FhirPkg.Cache;
@@ -952,13 +953,13 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         private readonly IPackageCacheFileOperations _inner =
             SystemPackageCacheFileOperations.Instance;
 
-        internal List<string> AtomicDestinations { get; } = [];
+        internal ConcurrentQueue<string> AtomicDestinations { get; } = new();
 
-        internal List<string> ReadPaths { get; } = [];
+        internal ConcurrentQueue<string> ReadPaths { get; } = new();
 
-        internal List<string> WrittenPaths { get; } = [];
+        internal ConcurrentQueue<string> WrittenPaths { get; } = new();
 
-        internal List<string> DeletedPaths { get; } = [];
+        internal ConcurrentQueue<string> DeletedPaths { get; } = new();
 
         internal void Clear()
         {
@@ -986,7 +987,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
 
         public FileStream OpenRead(string path)
         {
-            ReadPaths.Add(path);
+            ReadPaths.Enqueue(path);
             return _inner.OpenRead(path);
         }
 
@@ -1005,13 +1006,13 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
 
         public void DeleteDirectory(string path, bool recursive)
         {
-            DeletedPaths.Add(path);
+            DeletedPaths.Enqueue(path);
             _inner.DeleteDirectory(path, recursive);
         }
 
         public void DeleteFile(string path)
         {
-            DeletedPaths.Add(path);
+            DeletedPaths.Enqueue(path);
             _inner.DeleteFile(path);
         }
 
@@ -1020,7 +1021,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             ReadOnlyMemory<byte> content,
             CancellationToken cancellationToken)
         {
-            WrittenPaths.Add(path);
+            WrittenPaths.Enqueue(path);
             await _inner.WriteFileAndFlushAsync(
                     path,
                     content,
@@ -1033,7 +1034,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             string destinationPath,
             CancellationToken cancellationToken)
         {
-            AtomicDestinations.Add(destinationPath);
+            AtomicDestinations.Enqueue(destinationPath);
             await _inner.AtomicReplaceFileAsync(
                     sourcePath,
                     destinationPath,
@@ -1065,7 +1066,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             string path,
             PackageCacheArtifactKind artifactKind)
         {
-            DeletedPaths.Add(path);
+            DeletedPaths.Enqueue(path);
             _inner.DeleteArtifact(path, artifactKind);
         }
     }
