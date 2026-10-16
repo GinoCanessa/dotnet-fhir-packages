@@ -10,23 +10,39 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+## [2026.1016.1417] - 2026-10-16
+
 ### Added
-- Added default-false SDK `FhirPackageManagerOptions.Unmodified` and
+- Added opt-in SDK `FhirPackageManagerOptions.Unmodified` and
   `InstallCacheOptions.Unmodified`, CLI `--unmodified`, and the `unmodified`
-  configuration key. The runtime option preserved root-layout payloads without
-  wrapping and reused valid indexes or built them in memory without payload
-  writes, including forced reindexing.
+  configuration key, all defaulting to `false`. The manager setting covered
+  installation, import, dependencies, restore, and resource indexing; the
+  low-level cache setting applied to one install or import call.
+- Added payload-preserving resource indexing for unmodified managers: valid
+  distributed indexes were reused, while missing, unusable, or forcibly rebuilt
+  indexes were held in memory without writing `.index.json`.
+
+### Changed
+- Preserved standard-layout archives at their distributed relative paths
+  instead of relocating ancillary trees beneath `package`. Ordinary root-layout
+  installation wrapped the complete archive once beneath `package` for tooling
+  compatibility; unmodified installation kept it at the cache identity root.
+- Extended cache and resource reads to preserved root-layout entries, where
+  `PackageRecord.ContentPath` could equal `DirectoryPath`. Unmodified mode
+  remained runtime-only, not a persistent package flag or a read-only cache;
+  existing cache hits were not reconstructed, and explicit overwrite was
+  required to reinstall an archive under a different mode.
 
 ### Fixed
-- Accepted safe ancillary roots, root files, and opaque ancillary manifests
-  while preserving standard archives at their distributed relative paths,
-  including `openapi/`, `other/`, and arbitrary sibling trees. Retained bounded
-  extraction, authoritative manifest/identity checks, and whole-generation
-  recovery; ordinary root-layout installs wrapped the complete payload once
-  beneath `package/` for compatibility.
-- Preserved safe archive filename spelling within native filesystem limits and
-  recorded expanded bytes from the whole archive, including siblings and
-  publisher-supplied indexes, without recounting later derived indexes.
+- Accepted arbitrary safe ancillary directories, root files, and opaque
+  ancillary manifests, including siblings beyond `openapi` and `other`.
+  Retained bounded extraction, authoritative manifest and identity validation,
+  ambiguous-manifest rejection, and transactional whole-generation recovery.
+- Preserved safe archive filename spelling within native filesystem limits
+  while retaining portable path-collision and extraction-limit checks.
+- Corrected `PackageRecord.SizeBytes` accounting to include expanded bytes from
+  the whole archive, including siblings and publisher-supplied indexes, without
+  recounting later derived indexes.
 
 ## [2026.901.1609] - 2026-09-01
 
