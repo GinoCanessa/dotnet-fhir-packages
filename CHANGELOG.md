@@ -10,10 +10,23 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+### Added
+- Added default-false SDK `FhirPackageManagerOptions.Unmodified` and
+  `InstallCacheOptions.Unmodified`, CLI `--unmodified`, and the `unmodified`
+  configuration key. The runtime option preserved root-layout payloads without
+  wrapping and reused valid indexes or built them in memory without payload
+  writes, including forced reindexing.
+
 ### Fixed
-- Restored installation of the `hl7.fhir.r4.core#4.0.1` archive variant by
-  safely normalizing only the supported optional lowercase `openapi/` and
-  `other/` roots under `package/`, without relaxing validation.
+- Accepted safe ancillary roots, root files, and opaque ancillary manifests
+  while preserving standard archives at their distributed relative paths,
+  including `openapi/`, `other/`, and arbitrary sibling trees. Retained bounded
+  extraction, authoritative manifest/identity checks, and whole-generation
+  recovery; ordinary root-layout installs wrapped the complete payload once
+  beneath `package/` for compatibility.
+- Preserved safe archive filename spelling within native filesystem limits and
+  recorded expanded bytes from the whole archive, including siblings and
+  publisher-supplied indexes, without recounting later derived indexes.
 
 ## [2026.901.1609] - 2026-09-01
 

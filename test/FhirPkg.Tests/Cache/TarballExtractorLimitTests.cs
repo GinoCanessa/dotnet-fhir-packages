@@ -100,31 +100,13 @@ public class TarballExtractorLimitTests : IDisposable
             [$"package/{directoryName}/{fileName}"] = content,
             [$"package/{otherFileName}"] = otherContent
         };
-        string[] actualFiles = Directory.EnumerateFiles(
-            destination,
-            "*",
-            SearchOption.AllDirectories).ToArray();
-        actualFiles
-            .Select(path => Path.GetRelativePath(destination, path).Replace('\\', '/'))
-            .OrderBy(path => path, StringComparer.Ordinal)
-            .ShouldBe(expectedFiles.Keys.OrderBy(path => path, StringComparer.Ordinal));
         string[] expectedDirectories =
         [
             "package",
             $"package/{directoryName}",
             $"package/{emptyDirectoryName}"
         ];
-        Directory.EnumerateDirectories(destination, "*", SearchOption.AllDirectories)
-            .Select(path => Path.GetRelativePath(destination, path).Replace('\\', '/'))
-            .OrderBy(path => path, StringComparer.Ordinal)
-            .ShouldBe(expectedDirectories.OrderBy(path => path, StringComparer.Ordinal));
-        foreach (string actualFile in actualFiles)
-        {
-            string relativePath = Path.GetRelativePath(destination, actualFile).Replace('\\', '/');
-            (await File.ReadAllBytesAsync(
-                actualFile,
-                TestContext.Current.CancellationToken)).ShouldBe(expectedFiles[relativePath]);
-        }
+        await AssertNativeTreeAsync(destination, expectedFiles, expectedDirectories);
     }
 
     [Theory]
@@ -154,14 +136,10 @@ public class TarballExtractorLimitTests : IDisposable
             directive: null,
             TestContext.Current.CancellationToken);
 
-        string actualFile = Directory.EnumerateFiles(
+        await AssertNativeTreeAsync(
             destination,
-            "*",
-            SearchOption.AllDirectories).Single();
-        Path.GetRelativePath(destination, actualFile).Replace('\\', '/').ShouldBe(entryName);
-        (await File.ReadAllBytesAsync(
-            actualFile,
-            TestContext.Current.CancellationToken)).ShouldBe(content);
+            new Dictionary<string, byte[]> { [entryName] = content },
+            ["folder"]);
         metrics.MaximumPathLength.ShouldBe(entryName.Length);
     }
 
@@ -237,10 +215,11 @@ public class TarballExtractorLimitTests : IDisposable
             ("a.txt", [4]));
         PackageInstallLimits limits = CreateLimits();
         limits.MaxArchivePathLength = maximumLength;
+        string destination = GetDestination();
 
         ArchiveExtractionMetrics metrics = await TarballExtractor.ExtractAsync(
             archive,
-            GetDestination(),
+            destination,
             limits,
             directive: null,
             TestContext.Current.CancellationToken);
@@ -249,6 +228,14 @@ public class TarballExtractorLimitTests : IDisposable
         metrics.EntryCount.ShouldBe(2);
         metrics.ExpandedBytes.ShouldBe(4);
         metrics.LargestEntryBytes.ShouldBe(3);
+        await AssertNativeTreeAsync(
+            destination,
+            new Dictionary<string, byte[]>
+            {
+                [entryName] = [1, 2, 3],
+                ["a.txt"] = [4],
+            },
+            ["folder"]);
     }
 
     [Theory]
@@ -619,6 +606,58 @@ public class TarballExtractorLimitTests : IDisposable
         exception.ErrorCode.ShouldBe(PackageInstallErrorCode.InvalidArchive);
         exception.Stage.ShouldBe(PackageInstallStage.ArchiveValidation);
         exception.InnerException.ShouldBeOfType<InvalidDataException>();
+    }
+
+    private async Task AssertNativeTreeAsync(
+        string destination,
+        IReadOnlyDictionary<string, byte[]> expectedFiles,
+        IReadOnlyCollection<string> expectedDirectories)
+    {
+        string control = Path.Combine(_testRoot, $"native-{Guid.NewGuid():N}");
+        foreach (string directory in expectedDirectories)
+            Directory.CreateDirectory(Path.Combine(control, directory));
+        foreach ((string path, byte[] content) in expectedFiles)
+        {
+            string controlPath = Path.Combine(control, path);
+            await File.WriteAllBytesAsync(
+                controlPath, content, TestContext.Current.CancellationToken);
+            (await File.ReadAllBytesAsync(controlPath, TestContext.Current.CancellationToken))
+                .ShouldBe(content);
+        }
+
+        string[] controlFiles = Directory.GetFiles(control, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(control, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        string[] controlDirectories = Directory.GetDirectories(control, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(control, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        if (!controlFiles.SequenceEqual(expectedFiles.Keys.OrderBy(path => path, StringComparer.Ordinal))
+            || !controlDirectories.SequenceEqual(
+                expectedDirectories.OrderBy(path => path, StringComparer.Ordinal)))
+        {
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                "Native filesystem filename limitation: direct writes did not retain exact " +
+                "Unicode spelling. Extraction must match the independently written names, " +
+                "without normalizing either comparison. Requested files: " +
+                string.Join(", ", expectedFiles.Keys) + "; native files: " +
+                string.Join(", ", controlFiles) + "; requested directories: " +
+                string.Join(", ", expectedDirectories) + "; native directories: " +
+                string.Join(", ", controlDirectories));
+        }
+
+        Directory.GetFiles(destination, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(destination, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal).ShouldBe(controlFiles);
+        Directory.GetDirectories(destination, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(destination, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal).ShouldBe(controlDirectories);
+        foreach (string path in controlFiles)
+        {
+            (await File.ReadAllBytesAsync(
+                Path.Combine(destination, path), TestContext.Current.CancellationToken))
+                .ShouldBe(await File.ReadAllBytesAsync(
+                    Path.Combine(control, path), TestContext.Current.CancellationToken));
+        }
     }
 
     private async Task AssertPathLengthFailureBeforeWriteAsync(

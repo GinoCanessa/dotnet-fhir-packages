@@ -18,8 +18,8 @@ managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
 - **Multi-registry resolution** - queries the primary FHIR registry
   (`packages.fhir.org`), secondary registry, CI builds (`build.fhir.org`), HL7
   website, NPM registries, and custom/private registries with automatic fallback.
-- **Local disk cache** - stores packages in the standard `~/.fhir/packages`
-  layout with validated reads, transactional replacement, crash recovery, and
+- **Local disk cache** - uses the standard content-directory layout by default,
+  with validated reads, transactional replacement, crash recovery, and
   same-identity coordination across SDK processes.
 - **Hardened package sources** - safely installs expected-identity or
   manifest-discovered packages from caller-owned streams and absolute
@@ -33,6 +33,8 @@ managing [FHIR packages](https://registry.fhir.org/) from multiple registries.
   ranges, CI builds, and branch-specific builds.
 - **Resource indexing** - indexes FHIR resources inside packages with fast lookup
   by resource type, canonical URL, or StructureDefinition flavor.
+- **Unmodified mode** - optionally preserves root-layout archives without a
+  wrapper and uses in-memory indexes rather than writing package payloads.
 - **Publish** - publish package tarballs to a registry.
 - **Async & DI-ready** - fully async with `CancellationToken` support and
   first-class `IServiceCollection` integration.
@@ -111,8 +113,8 @@ var results = await manager.SearchAsync(
 // Resolve without downloading
 var resolved = await manager.ResolveAsync("hl7.fhir.us.core#latest");
 
-// Search cached package resources. Missing indexes are generated and persisted
-// lazily; newly installed packages are indexed eagerly.
+// Search cached package resources. Ordinary managers persist missing indexes
+// lazily; unmodified managers build them in memory. New installs are indexed eagerly.
 ResourceInfo? profile = await manager.FindByCanonicalUrlAsync(
     "http://hl7.org/fhir/StructureDefinition/Patient",
     "hl7.fhir.r4.core#4.0.1");
@@ -157,13 +159,54 @@ that coordination boundary.
 
 Resource indexes are derivative cache data. The manager validates existing
 schema-v2 `.index.json` files, regenerates missing or invalid indexes under the
-package identity lease, and atomically persists them before making them
-searchable. Indexing failures from explicit or lazy queries are surfaced and
+package identity lease, and ordinarily persists them atomically before making
+them searchable. Unmodified managers reuse valid indexes or register validated
+in-memory indexes without writing payload files, even with `ForceReindex`.
+Indexing failures from explicit or lazy queries are surfaced and
 can be retried; eager post-install indexing failures are logged without
 changing installation success. Parsed resources use an identity-aware LRU
 cache controlled by `ResourceCacheSize` and `ResourceCacheSafeMode`. Custom
 `IPackageCache` implementations without the SDK's generation-aware read
 capability bypass parsed-resource caching.
+
+### Archive Layout and Unmodified Mode
+
+Both `FhirPackageManagerOptions.Unmodified` and
+`InstallCacheOptions.Unmodified` are optional booleans, defaulting to `false`.
+The manager snapshots its setting at construction; it covers all installation
+sources, imports, dependencies, restore, and eager/lazy/forced index operations.
+The low-level cache option controls one direct install/import call. The CLI
+equivalents are `--unmodified` and the `unmodified` configuration key.
+
+| Archive | Ordinary mode | Unmodified mode |
+|---------|---------------|-----------------|
+| Standard (`package/package.json`) | Preserves all safe root files and sibling trees alongside `package/` | Same distributed layout |
+| Root-layout (`package.json`) | Wraps **all** archive payload once beneath `package/` for tooling compatibility | Preserves the archive at the identity root |
+
+`PackageRecord.ContentPath` is the selected content directory. It may equal
+`DirectoryPath` for an unmodified root-layout package. Use `DirectoryPath` to
+access distributed standard siblings; content-relative SDK reads still reject
+`..` and cannot escape `ContentPath`. `SizeBytes` records expanded bytes from
+the whole archive, including siblings and a publisher-supplied index; later
+derived indexing does not recompute it.
+
+Unmodified is a runtime payload policy, **not persistent protection or a
+read-only cache**. Staging, cache-root bookkeeping, recovery, and explicit
+replacement/removal/clean remain allowed. A later ordinary manager can persist
+an index in the same package, including a preserved root layout. Cache hits do
+not reconstruct historical archive paths or index bytes: explicitly reinstall
+with SDK `OverwriteExisting` or CLI `install --overwrite`, not `install --force`.
+
+Older SDKs and external tools may reject preserved root-layout entries or modify
+them; use a **dedicated cache** when mixing such tools. Native filesystem
+Unicode normalization still limits exact visible filename fidelity. Unmodified
+managers reject unsupported injected caches/indexers early, before source reads
+or potentially mutating callbacks; ordinary custom-collaborator support remains
+unchanged. The standalone, explicitly mutating
+`TarballExtractor.NormalizePackageStructure` compatibility tool and the
+publishing validation bridge retain their narrower policies.
+See the [SDK contract](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/sdk-api-reference.md#archive-layout-and-runtime-preservation)
+for the full layout and index behavior.
 
 ## Prerequisites
 

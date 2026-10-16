@@ -1,5 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Text;
 using System.Text.Json;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
@@ -64,6 +65,24 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         bool forceReindex)
     {
         const string filename = "patient-e\u0301.json";
+        const string resourceJson = """{"resourceType":"Patient","id":"generated"}""";
+        string controlDirectory = Path.Combine(_cacheRoot, ".native-control");
+        Directory.CreateDirectory(controlDirectory);
+        await File.WriteAllBytesAsync(
+            Path.Combine(controlDirectory, filename),
+            Encoding.UTF8.GetBytes(resourceJson),
+            TestContext.Current.CancellationToken);
+        string controlFile = Directory.GetFiles(controlDirectory).Single();
+        string nativeFilename = Path.GetFileName(controlFile);
+        (await File.ReadAllBytesAsync(controlFile, TestContext.Current.CancellationToken))
+            .ShouldBe(Encoding.UTF8.GetBytes(resourceJson));
+        if (!string.Equals(nativeFilename, filename, StringComparison.Ordinal))
+        {
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                $"Native filesystem filename limitation: direct write of '{filename}' " +
+                $"returned '{nativeFilename}'. Extraction and generated indexes must use " +
+                "that visible spelling; the publisher index bytes must remain untouched.");
+        }
         string prefix = rootLayout ? string.Empty : "package/";
         string publisherIndex =
             "{\r\n \"files\" : [ { \"filename\" : \"" + filename
@@ -76,7 +95,7 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
                 """{"name":"example.package","version":"1.0.0"}"""),
             ArbitraryTarBuilder.File(
                 $"{prefix}{filename}",
-                """{"resourceType":"Patient","id":"generated"}"""),
+                resourceJson),
             ArbitraryTarBuilder.File("other/.index.json", "opaque ancillary index"),
             ArbitraryTarBuilder.File("other/package.json", "opaque ancillary manifest"),
             ArbitraryTarBuilder.Directory("empty/"),
@@ -110,7 +129,10 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             installed.DirectoryPath, "*", SearchOption.AllDirectories);
         Directory.GetFiles(installed.ContentPath)
             .Select(Path.GetFileName)
-            .ShouldContain(filename);
+            .ShouldContain(nativeFilename);
+        (await File.ReadAllBytesAsync(
+            Path.Combine(installed.ContentPath, nativeFilename),
+            TestContext.Current.CancellationToken)).ShouldBe(Encoding.UTF8.GetBytes(resourceJson));
         fileOperations.Clear();
         IPackageCacheIndexStore store = cache;
         IManagedPackageIndexer builder =
@@ -151,7 +173,8 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             index.ShouldNotBeNull();
             index.Files.Single().Id.ShouldBe(
                 reusesPublisherIndex ? "publisher" : "generated");
-            index.Files.Single().Filename.ShouldBe(filename);
+            index.Files.Single().Filename.ShouldBe(
+                reusesPublisherIndex ? filename : nativeFilename);
             readyPackage.ShouldNotBeNull();
             readyPackage.Index.ShouldBeSameAs(index);
             readyIndex.ShouldBeSameAs(index);
@@ -164,6 +187,11 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         {
             fileOperations.AssertNoPayloadWrites(installed.DirectoryPath);
             fileOperations.ReadPaths.Count(path => path == indexPath).ShouldBe(1);
+            if (state == "valid")
+            {
+                (await File.ReadAllBytesAsync(indexPath, TestContext.Current.CancellationToken))
+                    .ShouldBe(Encoding.UTF8.GetBytes(publisherIndex));
+            }
         }
         Directory.GetDirectories(
                 installed.DirectoryPath, "*", SearchOption.AllDirectories)

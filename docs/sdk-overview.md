@@ -10,9 +10,9 @@ FhirPkg is a C# SDK for discovering, resolving, downloading, caching, and managi
 - **Multi-registry resolution** — queries the primary FHIR registry, secondary
   registry, CI builds, HL7 website, and custom/private registries with automatic
   fallback.
-- **Local disk cache** — stores packages in the standard `~/.fhir/packages`
-  layout (or the directory specified by the `PACKAGE_CACHE_FOLDER` environment
-  variable), compatible with other FHIR tooling.
+- **Local disk cache** — uses the standard content-directory layout by default
+  in `~/.fhir/packages` (or a configured directory), compatible with other FHIR
+  tooling. Unmodified root-layout storage is an explicit interoperability opt-out.
 - **Dependency resolution** — resolves full transitive dependency closures,
   preserves coexisting exact versions and their subgraphs, and applies conflict
   strategies only to the preferred name-keyed projection.
@@ -210,6 +210,7 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 |----------|------|---------|-------------|
 | `InstallLimits` | `PackageInstallLimits` | 100 MiB compressed, 1 GiB expanded, 128 MiB/entry, 50,000 entries, path 1,024, depth 32 | Archive-processing safety limits (env-overridable) |
 | `CorruptCacheBehavior` | `CorruptCacheBehavior` | `Repair` | How an invalid cache target is handled (`Repair`, `Strict`) |
+| `Unmodified` | `bool` | `false` | Preserve root layout and suppress payload/index writes for this manager's runtime |
 | `CachePath` | `string?` | `PACKAGE_CACHE_FOLDER` env var, or `~/.fhir/packages` | Local package cache directory |
 | `Registries` | `List<RegistryEndpoint>` | `[]` | Custom registry endpoints (priority order) |
 | `IncludeCiBuilds` | `bool` | `true` | Query the FHIR CI build registry |
@@ -222,6 +223,75 @@ All behavior is controlled through `FhirPackageManagerOptions`:
 | `ResourceCacheSize` | `int` | `200` | Max entries in in-memory resource cache (0 = disabled) |
 | `ResourceCacheSafeMode` | `SafeMode` | `Off` | Cache return behavior: `Off`, `Clone`, `Freeze` |
 | `VersionFixups` | `Dictionary<string, string>` | `{"hl7.fhir.r4.core@4.0.0": "4.0.1", "hl7.fhir.r4b.core@4.3.0-snapshot1": "4.3.0"}` | Known version corrections |
+
+### Preserving Archive Payloads
+
+```csharp
+using FhirPackageManager manager = new(new FhirPackageManagerOptions
+{
+    CachePath = "./unmodified-cache",
+    Unmodified = true,
+});
+```
+
+`Unmodified` is snapshotted when the manager is constructed, including through
+`AddFhirPackageManagement`. It governs every manager-owned registry/directive,
+URI, caller-stream and local-archive install, import, batch install, dependency
+installation, restore, and eager/lazy/explicitly forced index operation.
+Changing the original options later does not change that manager. Direct cache
+callers instead set the optional, default-false `InstallCacheOptions.Unmodified`
+on `DiskPackageCache.InstallAsync` or `ImportAsync`; it is not a per-call
+override of manager policy. The CLI exposes `--unmodified` and the `unmodified`
+configuration key.
+
+| Archive / mode | Committed payload | `ContentPath` |
+|----------------|-------------------|---------------|
+| Standard / ordinary | Distributed `package/` plus all safe root files and sibling trees | `DirectoryPath/package` |
+| Standard / unmodified | Same distributed tree | `DirectoryPath/package` |
+| Root-layout / ordinary | **All** payload wrapped once in `package/` | `DirectoryPath/package` |
+| Root-layout / unmodified | Original tree at the identity root | `DirectoryPath` |
+
+Standard ancillary directories, including arbitrary names and opaque nested
+manifests, are not relocated. Default root wrapping is deliberate compatibility
+with tooling that requires `package/`; even an incidental distributed `package`
+entry remains inside that one wrapper. Use `PackageRecord.DirectoryPath` for
+known standard sibling paths. Content-file and resource reads remain relative
+to `ContentPath` and reject traversal such as `../other/file.json`. Package
+identity comes from `PackageRecord.Reference`, not the parent of `ContentPath`.
+
+Ordinary managers reuse a valid active `.index.json` unless forced and atomically
+write a missing, unusable, or forced index. Unmodified managers reuse valid
+indexes or build validated indexes **in memory**, leaving missing/unusable
+targets and their bytes untouched. `ForceReindex` requests recomputation, not
+permission to write. An occupied `.index.json` directory is never deleted to
+make room: ordinary persistence fails, while an unmodified manager can use a
+transient index. `DiskPackageCache.GetIndexAsync` reports only usable on-disk
+indexes, not another manager's transient state.
+
+No package protection marker is stored. Another ordinary manager may persist an
+index later, even in an existing raw root; cache hits neither rewrap it nor
+reconstruct original archive bytes. Use SDK `OverwriteExisting` or CLI
+`install --overwrite` (not `install --force`) to reinstall from a source under
+another mode. Staging, cache-root metadata/journals, recovery, and explicit
+whole-package replacement, removal, and clean remain available. Distributed
+`packages.ini` or `.fhirpkg` inside a package target are payload, not cache-root
+bookkeeping.
+
+Older SDKs or external tools may treat raw-root entries as corrupt or mutate
+them. Prefer a dedicated cache for unmodified work when those tools are in use.
+Native filesystem Unicode normalization still applies to visible filenames;
+extraction retains exact safe spelling rather than normalizing it itself.
+`SizeBytes` counts expanded files from the complete archive, including siblings
+and supplied indexes, and is not recalculated after derived indexing.
+
+Unmodified managers initially require the built-in coordinated cache and
+read-only managed index builder. Unsupported injected caches fail early with
+`UnsupportedCacheCapability` / `PolicyValidation`, and unsupported indexers with
+`NotSupportedException`, before source access or callbacks. Ordinary injection
+behavior is unchanged; no new public capability framework is required.
+The standalone `TarballExtractor.NormalizePackageStructure` remains an
+explicitly mutating, narrower compatibility utility; installation does not call
+it, and publishing's compatibility bridge and admission policy are unchanged.
 
 ## Architecture
 
@@ -254,7 +324,8 @@ The concrete manager also implements **`IFhirPackageResourceManager`**. New
 installs are indexed eagerly, while searches lazily generate any missing
 relevant indexes. Valid schema-v2 indexes are loaded from disk after restart;
 generated indexes are atomically persisted under the package identity lease
-before registration. Explicit and lazy indexing failures propagate and can be
+before registration in ordinary mode, or validated and registered in memory in
+unmodified mode. Explicit and lazy indexing failures propagate and can be
 retried. Eager indexing failures are logged without changing installation
 success.
 

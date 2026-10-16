@@ -36,7 +36,10 @@ Download tarball
 Bound acquisition + SHA-256/SHA-1 verification
   │
   ▼
-Validate archive, layout, manifest, and identity
+Extract safely; locate content; validate manifest and identity
+  │
+  ▼
+Prepare layout (wrap a root-layout archive only in ordinary mode)
   │
   ▼
 Transactionally commit to cache
@@ -47,6 +50,13 @@ Transactionally commit to cache
   ▼
 Return PackageRecord
 ```
+
+The optional `FhirPackageManagerOptions.Unmodified` boolean defaults to `false`
+and is snapshotted at construction. It applies to every manager-owned install
+source, import, batch/dependency installation, restore, and eager/lazy/forced
+index operation. `InstallCacheOptions.Unmodified`, also default-false, applies
+to a direct cache install/import call. The CLI exposes `--unmodified` and the
+`unmodified` configuration key. No mode is persisted against a package.
 
 ## 1 — Parsing the Directive
 
@@ -101,12 +111,22 @@ The SDK checks the local disk cache **before** contacting any registry. The cach
 is stored in the standard FHIR tooling layout (default `~/.fhir/packages`,
 configurable via `CachePath` or the `PACKAGE_CACHE_FOLDER` environment variable).
 
-A package is considered installed only when the target and `package/` directory
-are real directories, `package/package.json` is a real regular file, the
-manifest is readable, and its exact or alias identity matches the cache key. If
+A package is considered installed only when the target and selected content
+directory are real directories, the selected manifest is a real regular file,
+the manifest is readable, and its exact or alias identity matches the cache key.
+The content directory is normally `package/`; preserved root-layout entries
+select the identity root and root `package.json`. Existing foreign entries with
+both regular manifest slots retain standard-slot preference, without falling
+back after selected-manifest validation fails. If
 the directive already specifies an exact version and this validation succeeds,
 `InstallAsync` returns the cached `PackageRecord` immediately — no network
 traffic is generated.
+
+A hit keeps the current generation; it does not reconstruct the archive's
+original layout or index bytes. Request a new installation from the source with
+SDK `OverwriteExisting` or CLI `install --overwrite` (not `install --force`) to
+change modes deliberately. Ordinary indexing may still maintain the active
+index of a cached raw root without wrapping that existing generation.
 
 ### Cache Structure
 
@@ -129,7 +149,9 @@ traffic is generated.
 `packages.ini` tracks installation time, package size, mutable-source
 publication time, compressed archive SHA-256, and an opaque per-generation
 content token (`package-content-generations`) while preserving unrelated
-sections.
+sections. `SizeBytes` records expanded file bytes from the entire archive,
+including standard siblings and any supplied resource index. Derived index
+creation/replacement does not recompute that archive measurement.
 
 ### Mutable CI Outcome Classification
 
@@ -340,7 +362,8 @@ all enter the same install contract.
 - Caller streams are consumed from their current position and remain open.
 - Expected-identity installs acquire the identity lock before reading source
   bytes. A waiter therefore returns the winning valid cache entry without
-  consuming its source unless overwrite was requested.
+  consuming its source unless overwrite was requested, even when the waiter's
+  runtime mode differs from the winner's.
 - Discovery imports must stage enough bounded content to validate the manifest
   before the identity is known, so concurrent discovery calls may each consume
   their source and then converge on one cache entry.
@@ -361,14 +384,14 @@ Installation has finite defaults and can be tightened at manager or call scope:
 | Expanded bytes | 1 GiB | `FHIRPKG_MAX_EXPANDED_BYTES` |
 | One entry | 128 MiB | `FHIRPKG_MAX_ENTRY_BYTES` |
 | Archive entries | 50,000 | `FHIRPKG_MAX_ARCHIVE_ENTRIES` |
-| Normalized path length | 1,024 | `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH` |
+| Exact and canonical path length | 1,024 each | `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH` |
 | Path depth | 32 | `FHIRPKG_MAX_ARCHIVE_DEPTH` |
 
 Checksum failures and policy/archive/identity failures are reported as typed
 `PackageInstallException` values; cancellation remains
 `OperationCanceledException`.
 
-Before any live-cache mutation, the extractor:
+Before any live-cache mutation, extraction:
 
 1. bounds raw tar metadata and regular-file expansion;
 2. accepts only regular files and directories after safely consuming tar
@@ -376,11 +399,54 @@ Before any live-cache mutation, the extractor:
 3. canonicalizes both slash styles and rejects rooted, traversal, control,
    reserved-device, trailing-dot/space, overlong, and colliding paths;
 4. rejects duplicate, case/Unicode collision, and file-directory ancestor
-   conflicts before later writes;
-5. validates the complete standard or legacy package layout;
-6. reads the sole real regular `package.json`; and
-7. validates exact or allowed alias identity against the requested cache key,
-   or derives a canonical identity for import.
+   conflicts before later writes; and
+5. writes exact safe segment spelling, not the canonical collision key.
+
+Extraction checks both canonical and exact path lengths, and applies portable
+component limits (255 UTF-16 units and 255 UTF-8 bytes) to exact spelling before
+writing a target. Generic filesystem-normalizer and existing-index callers keep
+their prior path-validation contract. Native filesystem Unicode behavior still
+applies: a host may normalize names written directly as well as extracted names.
+Filename tests compare enumerated names and bytes without normalizing both
+strings; independent direct-file round trips identify and report native
+limitations rather than hiding application renames.
+
+The next responsibilities are deliberately separate:
+
+1. **Read-only archive discovery** (`PackageArchiveContentLocator`) selects the
+   exact regular `package/package.json` or root `package.json` using the bounded
+   extraction inventory. Two regular authoritative candidates are rejected even
+   if identical. Arbitrary nested manifests, including malformed JSON and
+   differently cased basenames, are opaque payload, not fallback candidates.
+2. **Identity validation** parses the selected manifest and validates exact or
+   allowed alias identity, or derives the identity for import. It does not
+   fall back after a selected manifest fails.
+3. **Layout preparation** leaves standard archives untouched: all safe root
+   files, empty directories, `openapi/`, `other/`, and unknown siblings stay at
+   their distributed paths. Ordinary root-layout installation wraps the
+   **entire** extracted tree once in `package/`, including incidental entries
+   already named `package`. Unmodified root installation skips this wrapper.
+
+Default legacy preparation moves `expanded` to an operation-owned unique
+`legacy-{Guid}` sibling, recreates `expanded`, then moves the whole sibling to
+`expanded/package`, with cancellation checks between operations. It completes
+before journaling or any live-target mutation and preserves the journal's
+required final staging path. Existing operation-owner cleanup removes failed
+or abandoned preparation; no receipt, payload copy, or preservation audit is
+introduced.
+
+`PackageRecord.ContentPath` is the selected directory and may equal
+`DirectoryPath` for a preserved root layout. `DirectoryPath` includes standard
+siblings; content-file reads do not gain permission to use `..` to reach them.
+Package/resource identity comes from the validated reference, not the parent
+directory of `ContentPath`.
+
+The standalone `TarballExtractor.NormalizePackageStructure` remains a narrow,
+explicitly requested, in-place compatibility transformation. Its optional
+lowercase `openapi/` / `other/` allowlist, occupied-destination rejection, and
+unambiguous legacy policy are unchanged. Installation does not use that policy.
+Publish identity discovery and standard-only NPM publication validation still
+use the compatibility bridge; publication admission is unchanged.
 
 ## 6 — Transactional Cache Commit and Process Coordination
 
@@ -419,6 +485,15 @@ strongest supported directory synchronization. Recovery runs after the next
 identity acquisition and before cleanup. Cancellation is honored immediately
 before destructive work; once renames begin, forward completion or rollback is
 non-cancellable.
+
+Promotion/recovery covers the whole identity tree, including root files,
+ancillary indexes and empty directories, not only the selected content folder.
+Unmodified mode still permits extraction, staging, cache-root bookkeeping,
+recovery, and explicitly requested whole-package overwrite/removal/clean.
+Distributed `packages.ini` and `.fhirpkg` entries inside a package target remain
+payload. There is no persistent protection marker: later ordinary processes or
+external tools can mutate payloads. Older tools may reject raw-root entries;
+use a dedicated cache when mixing unmodified root storage with such consumers.
 
 `ListPackagesAsync` recovers pending journal identities before enumeration.
 `ClearAsync` snapshots visible and journal identities under the global lock,
@@ -561,7 +636,8 @@ installation plan.
 After a package is committed, **`FhirPackageManager`** eagerly asks the
 **`PackageIndexer`** to index its resources. Resource queries also lazily index
 relevant cached packages, so indexes that are absent after an upgrade or were
-removed as invalid derivative data are regenerated on demand.
+distributed in unusable form can be regenerated on demand without changing
+installation acceptance.
 
 ### Indexing Process
 
@@ -574,10 +650,30 @@ removed as invalid derivative data are regenerated on demand.
    resources.
 5. Extract metadata: resource type, `id`, `url` (canonical URL), `version`,
    `name`, and (for StructureDefinitions) the definition flavor.
-6. Revalidate the unchanged package generation, serialize the index to a
-   unique temporary file, flush it, and atomically replace
-   `package/.index.json`.
-7. Register the index for search only after durable replacement succeeds.
+6. Validate the generated index and configured size limits and revalidate the
+   unchanged package generation. In ordinary mode, serialize to a unique
+   temporary file, flush, and atomically replace the selected content
+   directory's `.index.json`. In unmodified mode, do not create a temporary
+   payload file, replace/delete an index, or persist any generated payload.
+7. Register the index after successful ordinary persistence, or register the
+   validated in-memory result under the same lease in unmodified mode.
+
+`ForceReindex` requests recomputation but never overrides unmodified mode.
+Unmodified operations leave missing/unusable index targets untouched, including
+an occupied `.index.json` directory and its contents. Ordinary persistence also
+never deletes such a directory to make room; that write fails. Ancillary
+indexes outside the exact active index target are payload in both modes.
+`DiskPackageCache.GetIndexAsync` returns only usable on-disk indexes, not a
+manager's transient registration. A fresh unmodified process may rebuild in
+memory again; a subsequent ordinary process may persist an index, including
+at the root of a preserved root-layout entry.
+
+Unmodified manager construction rejects unsupported injected caches with
+`UnsupportedCacheCapability` / `PolicyValidation` and unsupported indexers with
+an explicit `NotSupportedException`, before source consumption or potentially
+mutating callbacks. The built-in coordinated cache and read-only managed
+index builder provide this path; ordinary custom-collaborator behavior remains
+unchanged, with no new public capability framework.
 
 Explicit and lazy indexing failures propagate to the caller and a later call
 can retry. Eager post-install indexing failures are logged as warnings; the

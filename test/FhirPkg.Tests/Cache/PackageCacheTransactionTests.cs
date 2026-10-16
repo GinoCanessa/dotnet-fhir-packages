@@ -22,55 +22,54 @@ public sealed class PackageCacheTransactionTests : IDisposable
         AppContext.BaseDirectory,
         $"fhir-transaction-{Guid.NewGuid():N}");
 
-    public static TheoryData<string, string, string> OverwriteCrashPoints =>
-        new()
+    public static TheoryData<string, string, string, bool, bool> OverwriteCrashPoints
+    {
+        get
         {
+            (PackageCacheFaultPoint Point, PackageCacheTransactionState State, string Value)[] points =
+            [
+                (PackageCacheFaultPoint.JournalWritten, PackageCacheTransactionState.Prepared, "old"),
+                (PackageCacheFaultPoint.OriginalRenamed, PackageCacheTransactionState.Prepared, "old"),
+                (PackageCacheFaultPoint.JournalWritten, PackageCacheTransactionState.OriginalMoved, "old"),
+                (PackageCacheFaultPoint.ReplacementPromoted, PackageCacheTransactionState.OriginalMoved, "old"),
+                (PackageCacheFaultPoint.JournalWritten, PackageCacheTransactionState.NewPromoted, "new"),
+                (PackageCacheFaultPoint.MetadataReplaced, PackageCacheTransactionState.MetadataCommitted, "new"),
+                (PackageCacheFaultPoint.JournalWritten, PackageCacheTransactionState.MetadataCommitted, "new"),
+                (PackageCacheFaultPoint.JournalWritten, PackageCacheTransactionState.Completed, "new"),
+                (PackageCacheFaultPoint.ArtifactRemoved, PackageCacheTransactionState.Completed, "new"),
+            ];
+            TheoryData<string, string, string, bool, bool> cases = [];
+            foreach (bool oldRawRoot in new[] { false, true })
             {
-                nameof(PackageCacheFaultPoint.JournalWritten),
-                nameof(PackageCacheTransactionState.Prepared),
-                "old"
-            },
-            {
-                nameof(PackageCacheFaultPoint.OriginalRenamed),
-                nameof(PackageCacheTransactionState.Prepared),
-                "old"
-            },
-            {
-                nameof(PackageCacheFaultPoint.JournalWritten),
-                nameof(PackageCacheTransactionState.OriginalMoved),
-                "old"
-            },
-            {
-                nameof(PackageCacheFaultPoint.ReplacementPromoted),
-                nameof(PackageCacheTransactionState.OriginalMoved),
-                "old"
-            },
-            {
-                nameof(PackageCacheFaultPoint.JournalWritten),
-                nameof(PackageCacheTransactionState.NewPromoted),
-                "new"
-            },
-            {
-                nameof(PackageCacheFaultPoint.MetadataReplaced),
-                nameof(PackageCacheTransactionState.MetadataCommitted),
-                "new"
-            },
-            {
-                nameof(PackageCacheFaultPoint.JournalWritten),
-                nameof(PackageCacheTransactionState.MetadataCommitted),
-                "new"
-            },
-            {
-                nameof(PackageCacheFaultPoint.JournalWritten),
-                nameof(PackageCacheTransactionState.Completed),
-                "new"
-            },
-            {
-                nameof(PackageCacheFaultPoint.ArtifactRemoved),
-                nameof(PackageCacheTransactionState.Completed),
-                "new"
+                foreach (bool newRawRoot in new[] { false, true })
+                {
+                    foreach ((PackageCacheFaultPoint point, PackageCacheTransactionState state, string value) in points)
+                        cases.Add(point.ToString(), state.ToString(), value, oldRawRoot, newRawRoot);
+                }
             }
-        };
+
+            return cases;
+        }
+    }
+
+    public static TheoryData<bool, string, int, bool> LegacyWrapperFailures
+    {
+        get
+        {
+            TheoryData<bool, string, int, bool> cases = [];
+            foreach (bool import in new[] { false, true })
+            {
+                foreach (bool abandoned in new[] { false, true })
+                {
+                    cases.Add(import, "MoveDirectory", 1, abandoned);
+                    cases.Add(import, "CreateDirectory", 1, abandoned);
+                    cases.Add(import, "MoveDirectory", 2, abandoned);
+                }
+            }
+
+            return cases;
+        }
+    }
 
     [Fact]
     public async Task NewInstall_CommitsContentMetadataAndCleansArtifacts()
@@ -194,16 +193,18 @@ public sealed class PackageCacheTransactionTests : IDisposable
     public async Task Overwrite_InjectedCrash_RecoversCoherentState(
         string pointName,
         string stateName,
-        string expectedValue)
+        string expectedValue,
+        bool oldRawRoot,
+        bool newRawRoot)
     {
-        await InstallInitialAsync();
+        CacheMetadataEntry original = await InstallInitialGenerationAsync(oldRawRoot);
         PackageCacheFaultPoint point =
             Enum.Parse<PackageCacheFaultPoint>(pointName);
         PackageCacheTransactionState state =
             Enum.Parse<PackageCacheTransactionState>(stateName);
         ThrowOnceObserver observer = new(point, state);
         using (DiskPackageCache faultingCache = CreateCache(observer))
-        using (MemoryStream replacement = CreateArchive("new"))
+        using (MemoryStream replacement = CreateGenerationArchive("new", newRawRoot))
         {
             await Should.ThrowAsync<PackageCacheInjectedFaultException>(
                 () => faultingCache.InstallAsync(
@@ -213,35 +214,41 @@ public sealed class PackageCacheTransactionTests : IDisposable
                     {
                         VerifyChecksum = false,
                         OverwriteExisting = true,
-                        ArchiveSha256 = "new-hash"
+                        Unmodified = newRawRoot,
+                        ArchiveSha256 = "new-hash",
+                        SourcePublicationDate = GenerationPublicationDate("new")
                     },
                     TestContext.Current.CancellationToken));
         }
 
         using DiskPackageCache recoveredCache = CreateCache();
-        string? value = await recoveredCache.GetFileContentAsync(
-            s_reference,
-            "value.txt",
-            TestContext.Current.CancellationToken);
-        CacheMetadata metadata = await recoveredCache.GetMetadataAsync(
-            TestContext.Current.CancellationToken);
-
-        value.ShouldBe(expectedValue);
-        metadata.Packages[
-            PackageCacheKey.Create(s_reference).MetadataKey]
-            .ArchiveSha256.ShouldBe(
-                expectedValue == "old" ? "old-hash" : "new-hash");
+        CacheMetadataEntry recovered = await AssertGenerationAsync(
+            recoveredCache,
+            expectedValue,
+            expectedValue == "old" ? oldRawRoot : newRawRoot,
+            expectedValue == "old" ? original.ContentGeneration! : observer.OperationId!);
+        if (expectedValue == "old")
+            recovered.ShouldBe(original);
+        else
+            recovered.ContentGeneration.ShouldNotBe(original.ContentGeneration);
         AssertNoOperationArtifacts();
     }
 
-    [Fact]
-    public async Task CancellationAtCommitBoundary_LeavesPriorPackage()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task CancellationAtCommitBoundary_LeavesPriorPackage(
+        bool oldRawRoot,
+        bool newRawRoot)
     {
-        await InstallInitialAsync();
+        CacheMetadataEntry original = await InstallInitialGenerationAsync(oldRawRoot);
+        byte[] metadataBefore = File.ReadAllBytes(Path.Combine(_cacheRoot, "packages.ini"));
         using CancellationTokenSource source = new();
         CancelAtPreparedObserver observer = new(source);
         using DiskPackageCache cache = CreateCache(observer);
-        using MemoryStream replacement = CreateArchive("new");
+        using MemoryStream replacement = CreateGenerationArchive("new", newRawRoot);
 
         await Should.ThrowAsync<OperationCanceledException>(
             () => cache.InstallAsync(
@@ -250,26 +257,38 @@ public sealed class PackageCacheTransactionTests : IDisposable
                 new InstallCacheOptions
                 {
                     VerifyChecksum = false,
-                    OverwriteExisting = true
+                    OverwriteExisting = true,
+                    Unmodified = newRawRoot,
+                    ArchiveSha256 = "new-hash",
+                    SourcePublicationDate = GenerationPublicationDate("new")
                 },
                 source.Token));
 
+        AssertGenerationTree(
+            PackageCacheKey.Create(s_reference).GetPackageDirectoryPath(_cacheRoot),
+            "old",
+            oldRawRoot);
+        File.ReadAllBytes(Path.Combine(_cacheRoot, "packages.ini")).ShouldBe(metadataBefore);
         using DiskPackageCache recoveredCache = CreateCache();
-        (await recoveredCache.GetFileContentAsync(
-            s_reference,
-            "value.txt",
-            TestContext.Current.CancellationToken)).ShouldBe("old");
+        (await AssertGenerationAsync(
+            recoveredCache, "old", oldRawRoot, original.ContentGeneration!)).ShouldBe(original);
         AssertNoOperationArtifacts();
     }
 
-    [Fact]
-    public async Task CancellationAfterFirstRename_CompletesCommit()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task CancellationAfterFirstRename_CompletesCommit(
+        bool oldRawRoot,
+        bool newRawRoot)
     {
-        await InstallInitialAsync();
+        CacheMetadataEntry original = await InstallInitialGenerationAsync(oldRawRoot);
         using CancellationTokenSource source = new();
         RenameBarrierObserver observer = new();
         using DiskPackageCache cache = CreateCache(observer);
-        using MemoryStream replacement = CreateArchive("new");
+        using MemoryStream replacement = CreateGenerationArchive("new", newRawRoot);
         Task<PackageRecord> installTask = cache.InstallAsync(
             s_reference,
             replacement,
@@ -277,7 +296,9 @@ public sealed class PackageCacheTransactionTests : IDisposable
             {
                 VerifyChecksum = false,
                 OverwriteExisting = true,
-                ArchiveSha256 = "new-hash"
+                Unmodified = newRawRoot,
+                ArchiveSha256 = "new-hash",
+                SourcePublicationDate = GenerationPublicationDate("new")
             },
             source.Token);
 
@@ -288,26 +309,35 @@ public sealed class PackageCacheTransactionTests : IDisposable
         PackageRecord record = await installTask;
 
         record.Manifest.Version.ShouldBe("1.0.0");
-        (await cache.GetFileContentAsync(
-            s_reference,
-            "value.txt",
-            TestContext.Current.CancellationToken)).ShouldBe("new");
+        CacheMetadataEntry committed = await AssertGenerationAsync(
+            cache, "new", newRawRoot, observer.OperationId!);
+        committed.ContentGeneration.ShouldNotBe(original.ContentGeneration);
+        AssertNoOperationArtifacts();
     }
 
-    [Fact]
-    public async Task ReaderDuringReplacement_WaitsForCoherentTarget()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ReaderDuringReplacement_WaitsForCoherentTarget(
+        bool oldRawRoot,
+        bool newRawRoot)
     {
-        await InstallInitialAsync();
+        CacheMetadataEntry original = await InstallInitialGenerationAsync(oldRawRoot);
         RenameBarrierObserver observer = new();
         using DiskPackageCache cache = CreateCache(observer);
-        using MemoryStream replacement = CreateArchive("new");
+        using MemoryStream replacement = CreateGenerationArchive("new", newRawRoot);
         Task<PackageRecord> installTask = cache.InstallAsync(
             s_reference,
             replacement,
             new InstallCacheOptions
             {
                 VerifyChecksum = false,
-                OverwriteExisting = true
+                OverwriteExisting = true,
+                Unmodified = newRawRoot,
+                ArchiveSha256 = "new-hash",
+                SourcePublicationDate = GenerationPublicationDate("new")
             },
             TestContext.Current.CancellationToken);
         await observer.Renamed.Task.WaitAsync(
@@ -325,10 +355,96 @@ public sealed class PackageCacheTransactionTests : IDisposable
         await installTask;
         PackageRecord? record = await readTask;
         record.ShouldNotBeNull();
-        (await cache.GetFileContentAsync(
-            s_reference,
-            "value.txt",
-            TestContext.Current.CancellationToken)).ShouldBe("new");
+        record.ContentPath.ShouldBe(newRawRoot
+            ? record.DirectoryPath
+            : Path.Combine(record.DirectoryPath, "package"));
+        record.ContentGeneration.ShouldNotBeNull().ShouldStartWith($"{observer.OperationId}\0");
+        AssertGenerationTree(record.DirectoryPath, "new", newRawRoot);
+        CacheMetadataEntry committed = await AssertGenerationAsync(
+            cache, "new", newRawRoot, observer.OperationId!);
+        committed.ContentGeneration.ShouldNotBe(original.ContentGeneration);
+        AssertNoOperationArtifacts();
+    }
+
+    [Theory]
+    [MemberData(nameof(LegacyWrapperFailures))]
+    public async Task LegacyWrappingFailure_LeavesPriorGenerationAndCleansOperation(
+        bool import,
+        string operationName,
+        int callIndex,
+        bool abandoned)
+    {
+        bool oldRawRoot = import;
+        CacheMetadataEntry original = await InstallInitialGenerationAsync(oldRawRoot);
+        string target = PackageCacheKey.Create(s_reference).GetPackageDirectoryPath(_cacheRoot);
+        string metadataPath = Path.Combine(_cacheRoot, "packages.ini");
+        byte[] metadataBefore = File.ReadAllBytes(metadataPath);
+        using MemoryStream replacement = CreateGenerationArchive("new", rawRoot: true);
+        await using PackageContentAcquisition? acquisition = abandoned
+            ? await PackageContentAcquirer.AcquireAsync(
+                replacement,
+                _cacheRoot,
+                new PackageInstallLimits(),
+                cancellationToken: TestContext.Current.CancellationToken)
+            : null;
+        FaultingFileOperations fileOperations = new(
+            new FileOperationFault(operationName, callIndex));
+        using DiskPackageCache faultingCache = CreateCache(fileOperations: fileOperations);
+        InstallCacheOptions options = new()
+        {
+            OverwriteExisting = true,
+            AcquiredContent = acquisition,
+        };
+
+        await Should.ThrowAsync<IOException>(() => import
+            ? faultingCache.ImportAsync(replacement, options, TestContext.Current.CancellationToken)
+            : faultingCache.InstallAsync(
+                s_reference, replacement, options, TestContext.Current.CancellationToken));
+
+        // Inspect raw state first: an SDK read could recover or remove the evidence.
+        replacement.CanRead.ShouldBeTrue();
+        AssertGenerationTree(target, "old", oldRawRoot);
+        File.ReadAllBytes(metadataPath).ShouldBe(metadataBefore);
+        fileOperations.MutatingCalls.ShouldNotContain("WriteFileAndFlush");
+        fileOperations.MutatingCalls.ShouldNotContain("MoveArtifact");
+        foreach (string name in new[] { "transactions", "backup", "quarantine" })
+        {
+            string path = Path.Combine(_cacheRoot, ".fhirpkg", name);
+            if (Directory.Exists(path))
+                Directory.GetFileSystemEntries(path).ShouldBeEmpty();
+        }
+
+        if (abandoned)
+        {
+            acquisition.ShouldNotBeNull();
+            File.Exists(acquisition.ArchivePath).ShouldBeTrue();
+            string expanded = Path.Combine(acquisition.OperationDirectory, "expanded");
+            string[] legacy = Directory.GetDirectories(acquisition.OperationDirectory, "legacy-*");
+            if (operationName == "MoveDirectory" && callIndex == 1)
+            {
+                legacy.ShouldBeEmpty();
+                AssertGenerationTree(expanded, "new", rawRoot: true);
+            }
+            else
+            {
+                AssertGenerationTree(legacy.ShouldHaveSingleItem(), "new", rawRoot: true);
+                if (operationName == "CreateDirectory")
+                    Directory.Exists(expanded).ShouldBeFalse();
+                else
+                    Directory.GetFileSystemEntries(expanded).ShouldBeEmpty();
+            }
+        }
+        else
+        {
+            AssertNoOperationArtifacts();
+        }
+
+        using DiskPackageCache recoveredCache = CreateCache();
+        (await AssertGenerationAsync(
+            recoveredCache, "old", oldRawRoot, original.ContentGeneration!)).ShouldBe(original);
+        if (acquisition is not null)
+            Directory.Exists(acquisition.OperationDirectory).ShouldBeFalse();
+        AssertNoOperationArtifacts();
     }
 
     [Fact]
@@ -1586,6 +1702,119 @@ public sealed class PackageCacheTransactionTests : IDisposable
             TestContext.Current.CancellationToken);
     }
 
+    private async Task<CacheMetadataEntry> InstallInitialGenerationAsync(bool rawRoot)
+    {
+        using DiskPackageCache cache = CreateCache();
+        using MemoryStream archive = CreateGenerationArchive("old", rawRoot);
+        await cache.InstallAsync(
+            s_reference,
+            archive,
+            new InstallCacheOptions
+            {
+                Unmodified = rawRoot,
+                ArchiveSha256 = "old-hash",
+                SourcePublicationDate = GenerationPublicationDate("old"),
+            },
+            TestContext.Current.CancellationToken);
+        CacheMetadata metadata = await cache.GetMetadataAsync(TestContext.Current.CancellationToken);
+        return await AssertGenerationAsync(
+            cache, "old", rawRoot, metadata.Packages.ShouldHaveSingleItem().Value.ContentGeneration!);
+    }
+
+    private static DateTimeOffset GenerationPublicationDate(string value) =>
+        new(2026, 10, value == "old" ? 1 : 2, 0, 0, 0, TimeSpan.Zero);
+
+    private static ArbitraryTarEntry[] GenerationEntries(string value, bool rawRoot)
+    {
+        string prefix = rawRoot ? string.Empty : "package/";
+        return
+        [
+            ArbitraryTarBuilder.File(
+                $"{prefix}package.json",
+                $$"""{"name":"example.package","version":"1.0.0","description":"{{value}}"}"""),
+            ArbitraryTarBuilder.File($"{prefix}value.txt", value),
+            ArbitraryTarBuilder.File(
+                $"{prefix}content/.index.json",
+                $$"""{"index-version":2,"files":[{"filename":"value.txt","resourceType":"Binary","id":"{{value}}"}]}"""),
+            ArbitraryTarBuilder.File($"{prefix}content/{value}-only.bin",
+                value == "old" ? [0, 128, 255] : [255, 0, 1, 2, 3]),
+            ArbitraryTarBuilder.Directory($"{prefix}content/empty-{value}/"),
+            ArbitraryTarBuilder.File("ROOT.txt", $"{value} root payload"),
+            ArbitraryTarBuilder.File("packages.ini", $"{value} distributed metadata"),
+            ArbitraryTarBuilder.File(".fhirpkg/sentinel.txt", $"{value} distributed hidden payload"),
+            ArbitraryTarBuilder.File("other/sentinel.txt", $"{value} sibling"),
+            ArbitraryTarBuilder.File($"other/{value}-only.txt", value),
+            ArbitraryTarBuilder.File("other/.index.json", $"{value} ancillary index"),
+            ArbitraryTarBuilder.File("other/package.json", $"{value} opaque manifest"),
+            ArbitraryTarBuilder.File("package/other/sentinel.txt", $"{value} content subtree"),
+            ArbitraryTarBuilder.File("package/other/.index.json", $"{value} content ancillary index"),
+            ArbitraryTarBuilder.Directory($"empty-{value}/"),
+        ];
+    }
+
+    private static MemoryStream CreateGenerationArchive(string value, bool rawRoot) =>
+        ArbitraryTarBuilder.Create(GenerationEntries(value, rawRoot));
+
+    private static void AssertGenerationTree(string target, string value, bool rawRoot)
+    {
+        ArbitraryTarEntry[] entries = GenerationEntries(value, rawRoot);
+        Dictionary<string, byte[]> expectedFiles = entries
+            .Where(entry => entry.Content is not null)
+            .ToDictionary(entry => entry.Name, entry => entry.Content!, StringComparer.Ordinal);
+        HashSet<string> expectedDirectories = new(StringComparer.Ordinal);
+        foreach (ArbitraryTarEntry entry in entries)
+        {
+            string[] segments = entry.Name.TrimEnd('/').Split('/');
+            int depth = entry.Content is null ? segments.Length : segments.Length - 1;
+            for (int index = 1; index <= depth; index++)
+                expectedDirectories.Add(string.Join("/", segments.Take(index)));
+        }
+
+        Directory.GetDirectories(target, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(target, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(expectedDirectories.OrderBy(path => path, StringComparer.Ordinal));
+        string[] files = Directory.GetFiles(target, "*", SearchOption.AllDirectories);
+        files.Select(path => Path.GetRelativePath(target, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(expectedFiles.Keys.OrderBy(path => path, StringComparer.Ordinal));
+        foreach (string file in files)
+        {
+            string relative = Path.GetRelativePath(target, file).Replace('\\', '/');
+            File.ReadAllBytes(file).ShouldBe(expectedFiles[relative], relative);
+        }
+    }
+
+    private static async Task<CacheMetadataEntry> AssertGenerationAsync(
+        DiskPackageCache cache,
+        string value,
+        bool rawRoot,
+        string expectedGeneration)
+    {
+        PackageRecord record = (await cache.GetPackageAsync(
+            s_reference, TestContext.Current.CancellationToken)).ShouldNotBeNull();
+        record.Reference.ShouldBe(s_reference);
+        record.Manifest.Description.ShouldBe(value);
+        record.ContentPath.ShouldBe(rawRoot
+            ? record.DirectoryPath
+            : Path.Combine(record.DirectoryPath, "package"));
+        record.ContentGeneration.ShouldNotBeNull().ShouldStartWith($"{expectedGeneration}\0");
+        AssertGenerationTree(record.DirectoryPath, value, rawRoot);
+        CacheMetadata metadata = await cache.GetMetadataAsync(TestContext.Current.CancellationToken);
+        CacheMetadataEntry entry = metadata.Packages.ShouldHaveSingleItem().Value;
+        metadata.Packages.Keys.ShouldHaveSingleItem().ShouldBe(
+            PackageCacheKey.Create(s_reference).MetadataKey);
+        entry.ArchiveSha256.ShouldBe($"{value}-hash");
+        entry.SourcePublicationDate.ShouldBe(GenerationPublicationDate(value));
+        entry.ContentGeneration.ShouldBe(expectedGeneration);
+        entry.ContentGeneration.ShouldNotBeNullOrWhiteSpace();
+        entry.SizeBytes.ShouldBe(GenerationEntries(value, rawRoot)
+            .Sum(member => member.Content?.LongLength ?? 0));
+        record.SizeBytes.ShouldBe(entry.SizeBytes);
+        record.InstalledAt.ShouldBe(new DateTimeOffset(entry.DownloadDateTime));
+        return entry;
+    }
+
     private DiskPackageCache CreateCache(
         IPackageCacheFaultObserver? observer = null,
         IPackageCacheFileOperations? fileOperations = null) =>
@@ -1642,6 +1871,8 @@ public sealed class PackageCacheTransactionTests : IDisposable
             _state = state;
         }
 
+        internal string? OperationId { get; private set; }
+
         public ValueTask OnEventAsync(
             PackageCacheFaultEvent faultEvent,
             CancellationToken cancellationToken)
@@ -1650,6 +1881,7 @@ public sealed class PackageCacheTransactionTests : IDisposable
                 && faultEvent.State == _state
                 && Interlocked.Exchange(ref _thrown, 1) == 0)
             {
+                OperationId = faultEvent.OperationId;
                 throw new PackageCacheInjectedFaultException(
                     $"Injected fault at {_point}/{_state}.");
             }
@@ -1686,6 +1918,8 @@ public sealed class PackageCacheTransactionTests : IDisposable
     private sealed class RenameBarrierObserver :
         IPackageCacheFaultObserver
     {
+        internal string? OperationId { get; private set; }
+
         internal TaskCompletionSource Renamed { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -1699,6 +1933,7 @@ public sealed class PackageCacheTransactionTests : IDisposable
             if (faultEvent.Point != PackageCacheFaultPoint.OriginalRenamed)
                 return;
 
+            OperationId = faultEvent.OperationId;
             Renamed.TrySetResult();
             await Release.Task.ConfigureAwait(false);
         }

@@ -3,9 +3,11 @@
 using System.Diagnostics;
 using System.Formats.Tar;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FhirPkg.Cache;
+using FhirPkg.Installation;
 using FhirPkg.Models;
 using FhirPkg.Utilities;
 using Shouldly;
@@ -19,13 +21,30 @@ public sealed class CrossProcessCacheIntegrationTests
     private static readonly TimeSpan s_timeout =
         TimeSpan.FromSeconds(30);
 
-    [Fact]
-    public async Task SameIdentity_WaiterReturnsWinnerWithoutReadingSource()
+    [Theory]
+    [InlineData("install", false, false)]
+    [InlineData("install", false, true)]
+    [InlineData("install", true, false)]
+    [InlineData("install", true, true)]
+    [InlineData("manager-install", false, true)]
+    [InlineData("manager-install", true, false)]
+    [InlineData("manager-install", true, true)]
+    public async Task SameIdentity_WaiterReturnsWinnerWithoutReadingSource(
+        string command,
+        bool rootLayout,
+        bool ownerUnmodified)
     {
         using TestWorkspace workspace = new();
         string archive = workspace.CreateArchive(
             "same.package",
-            "1.0.0");
+            "1.0.0",
+            rootLayout: rootLayout,
+            generation: "winner");
+        string losingArchive = workspace.CreateArchive(
+            "same.package",
+            "1.0.0",
+            rootLayout: !rootLayout,
+            generation: "loser");
         string barrier = workspace.File("owner.ready");
         string release = workspace.File("owner.release");
         string ownerCounter = workspace.File("owner.counter");
@@ -35,28 +54,32 @@ public sealed class CrossProcessCacheIntegrationTests
         string ownerResult = workspace.File("owner.result.json");
         string waiterResult = workspace.File("waiter.result.json");
         using HostProcess owner = StartHost(
-            "install",
-            "--cache", workspace.CachePath,
-            "--archive", archive,
-            "--name", "same.package",
-            "--version", "1.0.0",
-            "--barrier", barrier,
-            "--release", release,
-            "--counter", ownerCounter,
-            "--result", ownerResult);
+            command,
+            WithMode(
+                ownerUnmodified,
+                "--cache", workspace.CachePath,
+                "--archive", archive,
+                "--name", "same.package",
+                "--version", "1.0.0",
+                "--barrier", barrier,
+                "--release", release,
+                "--counter", ownerCounter,
+                "--result", ownerResult));
         await WaitForFileAsync(
             barrier,
             TestContext.Current.CancellationToken,
             owner);
         using HostProcess waiter = StartHost(
-            "install",
-            "--cache", workspace.CachePath,
-            "--archive", archive,
-            "--name", "same.package",
-            "--version", "1.0.0",
-            "--counter", waiterCounter,
-            "--contention", waiterContention,
-            "--result", waiterResult);
+            command,
+            WithMode(
+                !ownerUnmodified,
+                "--cache", workspace.CachePath,
+                "--archive", losingArchive,
+                "--name", "same.package",
+                "--version", "1.0.0",
+                "--counter", waiterCounter,
+                "--contention", waiterContention,
+                "--result", waiterResult));
 
         await WaitForContentAsync(
             waiterContention,
@@ -76,15 +99,43 @@ public sealed class CrossProcessCacheIntegrationTests
         ownerData.BytesRead.ShouldBeGreaterThan(0);
         waiterData.BytesRead.ShouldBe(0);
         ReadCounter(waiterCounter).ShouldBe(0);
+        waiterData.Name.ShouldBe("same.package");
+        waiterData.Version.ShouldBe("1.0.0");
+        waiterData.ContentPath.ShouldBe(ownerData.ContentPath);
+        await AssertCachedGenerationAsync(
+            workspace, new PackageReference("same.package", "1.0.0"),
+            archive, rootLayout, ownerUnmodified);
+        AssertNoOperationArtifacts(workspace.CachePath);
     }
 
-    [Fact]
-    public async Task SynchronousContentPath_WaitsForCrossProcessIdentityOwner()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task SynchronousContentPath_WaitsForCrossProcessIdentityOwner(
+        bool rootLayout,
+        bool unmodified)
     {
         using TestWorkspace workspace = new();
         string archive = workspace.CreateArchive(
             "sync.package",
-            "1.0.0");
+            "1.0.0",
+            rootLayout: rootLayout,
+            generation: "new");
+        string oldArchive = workspace.CreateArchive(
+            "sync.package", "1.0.0", rootLayout: !rootLayout, generation: "old");
+        HostExecution initial = await RunHostAsync(
+            "install",
+            "--cache", workspace.CachePath,
+            "--archive", oldArchive,
+            "--name", "sync.package",
+            "--version", "1.0.0",
+            "--unmodified");
+        initial.ExitCode.ShouldBe(0, initial.StandardOutput + initial.StandardError);
+        PackageReference reference = new("sync.package", "1.0.0");
+        CacheMetadataEntry prior = await AssertCachedGenerationAsync(
+            workspace, reference, oldArchive, !rootLayout, unmodified: true);
         string barrier = workspace.File("sync-owner.ready");
         string release = workspace.File("sync-owner.release");
         string contention = workspace.File("sync-reader.contention");
@@ -92,12 +143,15 @@ public sealed class CrossProcessCacheIntegrationTests
             workspace.File("sync-reader.result.json");
         using HostProcess owner = StartHost(
             "install",
-            "--cache", workspace.CachePath,
-            "--archive", archive,
-            "--name", "sync.package",
-            "--version", "1.0.0",
-            "--barrier", barrier,
-            "--release", release);
+            WithMode(
+                unmodified,
+                "--cache", workspace.CachePath,
+                "--archive", archive,
+                "--name", "sync.package",
+                "--version", "1.0.0",
+                "--overwrite",
+                "--barrier", barrier,
+                "--release", release));
         await WaitForFileAsync(
             barrier,
             TestContext.Current.CancellationToken,
@@ -115,6 +169,10 @@ public sealed class CrossProcessCacheIntegrationTests
             "retry|1|identity:sync.package#1.0.0",
             TestContext.Current.CancellationToken,
             reader);
+        AssertArchiveTree(
+            oldArchive,
+            PackageCacheKey.Create(reference).GetPackageDirectoryPath(workspace.CachePath),
+            wrapRoot: false);
         File.WriteAllText(release, "release");
 
         HostExecution ownerExecution =
@@ -135,6 +193,14 @@ public sealed class CrossProcessCacheIntegrationTests
         readerData.Success.ShouldBeTrue();
         readerData.ContentPath.ShouldNotBeNull();
         Directory.Exists(readerData.ContentPath!).ShouldBeTrue();
+        string target = PackageCacheKey.Create(reference).GetPackageDirectoryPath(workspace.CachePath);
+        readerData.ContentPath.ShouldBe(rootLayout && unmodified
+            ? target
+            : Path.Combine(target, "package"));
+        CacheMetadataEntry committed = await AssertCachedGenerationAsync(
+            workspace, reference, archive, rootLayout, unmodified);
+        committed.ContentGeneration.ShouldNotBe(prior.ContentGeneration);
+        AssertNoOperationArtifacts(workspace.CachePath);
     }
 
     [Fact]
@@ -242,13 +308,19 @@ public sealed class CrossProcessCacheIntegrationTests
         records.Count.ShouldBe(2);
     }
 
-    [Fact]
-    public async Task DiscoveryRace_MayStageTwiceButConvergesOnOneIdentity()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiscoveryRace_MayStageTwiceButConvergesOnOneIdentity(bool rootLayout)
     {
         using TestWorkspace workspace = new();
-        string archive = workspace.CreateArchive(
+        string firstArchive = workspace.CreateArchive(
             "discovery.package",
-            "1.0.0");
+            "1.0.0",
+            rootLayout: rootLayout,
+            generation: "first");
+        string secondArchive = workspace.CreateArchive(
+            "discovery.package", "1.0.0", rootLayout: rootLayout, generation: "second");
         string firstBarrier = workspace.File("first.ready");
         string secondBarrier = workspace.File("second.ready");
         string release = workspace.File("discovery.release");
@@ -257,14 +329,15 @@ public sealed class CrossProcessCacheIntegrationTests
         using HostProcess first = StartHost(
             "import",
             "--cache", workspace.CachePath,
-            "--archive", archive,
+            "--archive", firstArchive,
+            "--unmodified",
             "--barrier", firstBarrier,
             "--release", release,
             "--result", firstResult);
         using HostProcess second = StartHost(
             "import",
             "--cache", workspace.CachePath,
-            "--archive", archive,
+            "--archive", secondArchive,
             "--barrier", secondBarrier,
             "--release", release,
             "--result", secondResult);
@@ -282,8 +355,15 @@ public sealed class CrossProcessCacheIntegrationTests
 
         executions.ShouldAllBe(
             execution => execution.ExitCode == 0);
-        ReadResult(firstResult).BytesRead.ShouldBeGreaterThan(0);
-        ReadResult(secondResult).BytesRead.ShouldBeGreaterThan(0);
+        HostResult firstData = ReadResult(firstResult);
+        HostResult secondData = ReadResult(secondResult);
+        firstData.BytesRead.ShouldBeGreaterThan(0);
+        secondData.BytesRead.ShouldBeGreaterThan(0);
+        firstData.ContentPath.ShouldBe(secondData.ContentPath);
+        firstData.Name.ShouldBe("discovery.package");
+        secondData.Name.ShouldBe(firstData.Name);
+        firstData.Version.ShouldBe("1.0.0");
+        secondData.Version.ShouldBe(firstData.Version);
         using DiskPackageCache cache = new(workspace.CachePath);
         (await cache.ListPackagesAsync(
             ct: TestContext.Current.CancellationToken))
@@ -292,6 +372,17 @@ public sealed class CrossProcessCacheIntegrationTests
                 new PackageReference(
                     "discovery.package",
                     "1.0.0"));
+        CacheMetadata metadata = await cache.GetMetadataAsync(TestContext.Current.CancellationToken);
+        string? winningHash = metadata.Packages.ShouldHaveSingleItem().Value.ArchiveSha256;
+        bool firstWon = winningHash == ArchiveHash(firstArchive);
+        winningHash.ShouldBe(firstWon ? ArchiveHash(firstArchive) : ArchiveHash(secondArchive));
+        await AssertCachedGenerationAsync(
+            workspace,
+            new PackageReference("discovery.package", "1.0.0"),
+            firstWon ? firstArchive : secondArchive,
+            rootLayout,
+            unmodified: firstWon);
+        AssertNoOperationArtifacts(workspace.CachePath);
     }
 
     [Fact]
@@ -538,30 +629,66 @@ public sealed class CrossProcessCacheIntegrationTests
         }
     }
 
-    [Fact]
-    public async Task CrashAfterMetadataCommit_WaiterRecoversWinnerWithoutReading()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task CrashAfterMetadataCommit_WaiterRecoversWinnerWithoutReading(
+        bool oldRawRoot,
+        bool newRawRoot)
     {
         using TestWorkspace workspace = new();
         string archive = workspace.CreateArchive(
             "forward.package",
-            "1.0.0");
+            "1.0.0",
+            rootLayout: newRawRoot,
+            generation: "new");
+        string oldArchive = workspace.CreateArchive(
+            "forward.package", "1.0.0", rootLayout: oldRawRoot, generation: "old");
+        HostExecution initial = await RunHostAsync(
+            "install",
+            WithMode(
+                oldRawRoot,
+                "--cache", workspace.CachePath,
+                "--archive", oldArchive,
+                "--name", "forward.package",
+                "--version", "1.0.0"));
+        initial.ExitCode.ShouldBe(0, initial.StandardOutput + initial.StandardError);
+        PackageReference reference = new("forward.package", "1.0.0");
+        CacheMetadataEntry prior = await AssertCachedGenerationAsync(
+            workspace, reference, oldArchive, oldRawRoot, oldRawRoot);
         string progress = workspace.File("forward.progress");
         string neverRelease = workspace.File("forward.release");
         using HostProcess owner = StartHost(
             "install",
-            "--cache", workspace.CachePath,
-            "--archive", archive,
-            "--name", "forward.package",
-            "--version", "1.0.0",
-            "--progress", progress,
-            "--pause-fault",
-            "MetadataReplaced:MetadataCommitted",
-            "--release", neverRelease);
+            WithMode(
+                newRawRoot,
+                "--cache", workspace.CachePath,
+                "--archive", archive,
+                "--name", "forward.package",
+                "--version", "1.0.0",
+                "--overwrite",
+                "--progress", progress,
+                "--pause-fault",
+                "MetadataReplaced:MetadataCommitted",
+                "--release", neverRelease));
         await WaitForContentAsync(
             progress,
             "fault|MetadataReplaced|MetadataCommitted",
             TestContext.Current.CancellationToken,
             owner);
+        string operationId = (await ReadSharedTextAsync(
+            progress, TestContext.Current.CancellationToken))
+            .Split('\n')
+            .Single(line => line.StartsWith(
+                "fault|MetadataReplaced|MetadataCommitted|", StringComparison.Ordinal))
+            .Split('|')[3];
+        string target = PackageCacheKey.Create(reference).GetPackageDirectoryPath(workspace.CachePath);
+        AssertArchiveTree(archive, target, wrapRoot: false);
+        string backup = Directory.GetDirectories(
+            Path.Combine(workspace.CachePath, ".fhirpkg", "backup")).ShouldHaveSingleItem();
+        AssertArchiveTree(oldArchive, backup, wrapRoot: false);
         owner.Kill();
         await owner.WaitForExitAfterKillAsync(
             TestContext.Current.CancellationToken);
@@ -570,17 +697,28 @@ public sealed class CrossProcessCacheIntegrationTests
 
         HostExecution waiter = await RunHostAsync(
             "install",
-            "--cache", workspace.CachePath,
-            "--archive", archive,
-            "--name", "forward.package",
-            "--version", "1.0.0",
-            "--counter", counter,
-            "--result", result);
+            WithMode(
+                !newRawRoot,
+                "--cache", workspace.CachePath,
+                "--archive", oldArchive,
+                "--name", "forward.package",
+                "--version", "1.0.0",
+                "--counter", counter,
+                "--result", result));
 
         waiter.ExitCode.ShouldBe(0, waiter.StandardError);
         ReadResult(result).BytesRead.ShouldBe(0);
         ReadCounter(counter).ShouldBe(0);
+        ReadResult(result).ContentPath.ShouldBe(newRawRoot ? target : Path.Combine(target, "package"));
+        CacheMetadataEntry committed = await AssertCachedGenerationAsync(
+            workspace, reference, archive, newRawRoot, newRawRoot);
+        committed.ContentGeneration.ShouldBe(operationId);
+        committed.ContentGeneration.ShouldNotBe(prior.ContentGeneration);
+        AssertNoOperationArtifacts(workspace.CachePath);
     }
+
+    private static string[] WithMode(bool unmodified, params string[] arguments) =>
+        unmodified ? [.. arguments, "--unmodified"] : arguments;
 
     private static HostProcess StartHost(
         string command,
@@ -791,6 +929,93 @@ public sealed class CrossProcessCacheIntegrationTests
             System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    private static string ArchiveHash(string archivePath) =>
+        Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(archivePath))).ToLowerInvariant();
+
+    private static long AssertArchiveTree(string archivePath, string target, bool wrapRoot)
+    {
+        Dictionary<string, byte[]> files = new(StringComparer.Ordinal);
+        HashSet<string> directories = new(StringComparer.Ordinal);
+        using FileStream archive = File.OpenRead(archivePath);
+        using GZipStream gzip = new(archive, CompressionMode.Decompress);
+        using TarReader reader = new(gzip);
+        while (reader.GetNextEntry() is TarEntry entry)
+        {
+            string path = (wrapRoot ? "package/" : string.Empty) + entry.Name.TrimEnd('/');
+            string[] segments = path.Split('/');
+            int directoryDepth = entry.EntryType == TarEntryType.Directory
+                ? segments.Length
+                : segments.Length - 1;
+            for (int depth = 1; depth <= directoryDepth; depth++)
+                directories.Add(string.Join("/", segments.Take(depth)));
+            if (entry.EntryType == TarEntryType.Directory)
+                continue;
+
+            entry.EntryType.ShouldBe(TarEntryType.RegularFile);
+            using MemoryStream content = new();
+            entry.DataStream!.CopyTo(content);
+            files.Add(path, content.ToArray());
+        }
+
+        Directory.GetDirectories(target, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(target, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(directories.OrderBy(path => path, StringComparer.Ordinal));
+        string[] actualFiles = Directory.GetFiles(target, "*", SearchOption.AllDirectories);
+        actualFiles.Select(path => Path.GetRelativePath(target, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(files.Keys.OrderBy(path => path, StringComparer.Ordinal));
+        foreach (string file in actualFiles)
+        {
+            string relative = Path.GetRelativePath(target, file).Replace('\\', '/');
+            File.ReadAllBytes(file).ShouldBe(files[relative], relative);
+        }
+
+        return files.Values.Sum(bytes => bytes.LongLength);
+    }
+
+    private static async Task<CacheMetadataEntry> AssertCachedGenerationAsync(
+        TestWorkspace workspace,
+        PackageReference reference,
+        string archivePath,
+        bool rootLayout,
+        bool unmodified)
+    {
+        using DiskPackageCache cache = new(workspace.CachePath);
+        PackageRecord record = (await cache.GetPackageAsync(
+            reference, TestContext.Current.CancellationToken)).ShouldNotBeNull();
+        record.Reference.ShouldBe(reference);
+        record.Manifest.Name.ShouldBe(reference.Name);
+        record.Manifest.Version.ShouldBe(reference.Version);
+        record.DirectoryPath.ShouldBe(
+            PackageCacheKey.Create(reference).GetPackageDirectoryPath(workspace.CachePath));
+        record.ContentPath.ShouldBe(rootLayout && unmodified
+            ? record.DirectoryPath
+            : Path.Combine(record.DirectoryPath, "package"));
+        long expandedBytes = AssertArchiveTree(
+            archivePath, record.DirectoryPath, wrapRoot: rootLayout && !unmodified);
+        CacheMetadata metadata = await cache.GetMetadataAsync(TestContext.Current.CancellationToken);
+        metadata.Packages.Keys.ShouldHaveSingleItem().ShouldBe(
+            PackageCacheKey.Create(reference).MetadataKey);
+        CacheMetadataEntry entry = metadata.Packages.ShouldHaveSingleItem().Value;
+        entry.ArchiveSha256.ShouldBe(ArchiveHash(archivePath));
+        entry.SizeBytes.ShouldBe(expandedBytes);
+        entry.ContentGeneration.ShouldNotBeNullOrWhiteSpace();
+        record.SizeBytes.ShouldBe(expandedBytes);
+        record.InstalledAt.ShouldBe(new DateTimeOffset(entry.DownloadDateTime));
+        return entry;
+    }
+
+    private static void AssertNoOperationArtifacts(string cachePath)
+    {
+        foreach (string name in new[] { "staging", "transactions", "backup", "quarantine" })
+        {
+            string directory = Path.Combine(cachePath, ".fhirpkg", name);
+            if (Directory.Exists(directory))
+                Directory.GetFileSystemEntries(directory).ShouldBeEmpty();
+        }
+    }
+
     private sealed class TestWorkspace : IDisposable
     {
         internal TestWorkspace()
@@ -813,7 +1038,9 @@ public sealed class CrossProcessCacheIntegrationTests
             string name,
             string version,
             string? extraName = null,
-            string? extraContent = null)
+            string? extraContent = null,
+            bool rootLayout = false,
+            string? generation = null)
         {
             string archivePath = File(
                 $"{name}-{Guid.NewGuid():N}.tgz");
@@ -830,19 +1057,40 @@ public sealed class CrossProcessCacheIntegrationTests
                 gzip,
                 TarEntryFormat.Pax,
                 leaveOpen: false);
-            writer.WriteEntry(new PaxTarEntry(
-                TarEntryType.Directory,
-                "package/"));
+            string prefix = rootLayout ? string.Empty : "package/";
+            if (!rootLayout)
+                writer.WriteEntry(new PaxTarEntry(TarEntryType.Directory, prefix));
             WriteTarEntry(
                 writer,
-                "package/package.json",
+                $"{prefix}package.json",
                 $$"""{"name":"{{name}}","version":"{{version}}"}""");
             if (extraName is not null)
             {
                 WriteTarEntry(
                     writer,
-                    $"package/{extraName}",
+                    $"{prefix}{extraName}",
                     extraContent ?? string.Empty);
+            }
+            if (generation is not null)
+            {
+                WriteTarEntry(writer, $"{prefix}resource.json",
+                    $$"""{"resourceType":"Patient","id":"{{generation}}"}""");
+                WriteTarEntry(writer, $"{prefix}.index.json",
+                    $$"""{"index-version":2,"files":[{"filename":"resource.json","resourceType":"Patient","id":"{{generation}}"}]}""");
+                WriteTarEntry(writer, $"root-{generation}.txt", $"{generation} root sentinel");
+                WriteTarEntry(writer, "packages.ini", $"{generation} distributed metadata");
+                WriteTarEntry(writer, ".fhirpkg/sentinel.txt", $"{generation} distributed hidden file");
+                WriteTarEntry(writer, "other/sentinel.txt", $"{generation} sibling");
+                WriteTarEntry(writer, "other/.index.json", $"{generation} ancillary index");
+                WriteTarEntry(writer, "other/package.json", $"{generation} opaque manifest");
+                WriteTarEntry(writer, "package/other/sentinel.txt", $"{generation} content subtree");
+                WriteTarEntry(writer, "package/other/.index.json", $"{generation} content ancillary index");
+                WriteTarEntry(writer, $"{prefix}content/{generation}.bin",
+                    generation == "old" ? [0, 128, 255] : [255, 1, 0, 2, 3]);
+                writer.WriteEntry(new PaxTarEntry(
+                    TarEntryType.Directory, $"{prefix}content/empty-{generation}/"));
+                writer.WriteEntry(new PaxTarEntry(
+                    TarEntryType.Directory, $"ancillary/empty-{generation}/"));
             }
 
             return archivePath;
@@ -857,14 +1105,19 @@ public sealed class CrossProcessCacheIntegrationTests
         private static void WriteTarEntry(
             TarWriter writer,
             string path,
-            string content)
+            string content) =>
+            WriteTarEntry(writer, path, Encoding.UTF8.GetBytes(content));
+
+        private static void WriteTarEntry(
+            TarWriter writer,
+            string path,
+            byte[] content)
         {
-            byte[] bytes = Encoding.UTF8.GetBytes(content);
             writer.WriteEntry(new PaxTarEntry(
                 TarEntryType.RegularFile,
                 path)
             {
-                DataStream = new MemoryStream(bytes)
+                DataStream = new MemoryStream(content)
             });
         }
     }
@@ -945,6 +1198,8 @@ public sealed class CrossProcessCacheIntegrationTests
         public bool Success { get; init; }
         public bool Cancelled { get; init; }
         public long BytesRead { get; init; }
+        public string? Name { get; init; }
+        public string? Version { get; init; }
         public string? ContentPath { get; init; }
         public string? ErrorDetail { get; init; }
         public string? OperationId { get; init; }
