@@ -22,6 +22,8 @@ public sealed class ReleaseCommandTests
 
     private const string BundleDigest =
         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    private const string CandidateDigest =
+        "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
     private const string CliIndexUri =
         "https://packages.example/cli/index.json";
     private const string CorpusBlob =
@@ -30,6 +32,14 @@ public sealed class ReleaseCommandTests
         "--expected-digest must be 'sha256:' followed by 64 lowercase hexadecimal characters.";
     private const string GitHubRepository =
         "octo-org/dotnet-fhir-packages";
+    private const string RecoveryApprovalAuthor =
+        "Release Approver <approver@example.test>";
+    private const string RecoveryApprovalCommit =
+        "abcdef0123456789abcdef0123456789abcdef01";
+    private const string RecoveryReleaseUrl =
+        $"https://github.test/{GitHubRepository}/releases/tag/{ReleaseValidationFixture.Tag}";
+    private const string RecoveryRunUrl =
+        $"https://github.test/{GitHubRepository}/actions/runs/4242";
     private const string SdkIndexUri =
         "https://packages.example/sdk/index.json";
 
@@ -1247,6 +1257,674 @@ public sealed class ReleaseCommandTests
         }
     }
 
+    [Fact]
+    public async Task VerifyRecoveryCommand_BindsOptionsAndWritesOutputsAndSummary()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            List<RecoveryRequest> requests = [];
+            Mock<IReleaseRecoveryVerifier> verifier = CreateRecoveryVerifier(
+                CreateAuthorizedRecoveryResult(RecoveryApprovalAuthor),
+                requests);
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            ReleaseCommandServices services = CreateServices(
+                recoveryVerifier: verifier.Object,
+                standardOutput: stdout,
+                standardError: stderr);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "verify-recovery",
+                    "--repository",
+                    GitHubRepository,
+                    "--version",
+                    ReleaseValidationFixture.Version,
+                    "--tag",
+                    ReleaseValidationFixture.Tag,
+                    "--commit",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "--recover-run-id",
+                    "4242",
+                    "--approval-commit",
+                    RecoveryApprovalCommit,
+                    "--dry-run",
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            result.ExitCode.ShouldBe(0, result.DiagnosticError);
+            requests.ShouldHaveSingleItem().ShouldBe(
+                new RecoveryRequest(
+                    GitHubRepository,
+                    ReleaseValidationFixture.Tag,
+                    ReleaseValidationFixture.Version,
+                    ReleaseValidationFixture.RepositoryCommit,
+                    4242,
+                    RecoveryApprovalCommit,
+                    DryRun: true));
+            stdout.ToString().ShouldBe(
+                "Authorized recovery of v2099.101.1 from run 4242 (dry run); GitHub Release published: true." +
+                Environment.NewLine);
+            stderr.ToString().ShouldBeEmpty();
+            ReadOutputLines(outputPath).ShouldBe(
+                [
+                    "release_published=true",
+                    "candidate_artifact_id=21",
+                    $"candidate_artifact_digest={CandidateDigest}",
+                    "original_bundle_artifact_id=22",
+                    $"original_bundle_artifact_digest={BundleDigest}",
+                    $"approval_commit={RecoveryApprovalCommit}",
+                    $"approval_author={RecoveryApprovalAuthor}",
+                ]);
+            File.ReadAllText(summaryPath).ShouldBe(
+                "### Recovery authorization\n" +
+                "\n" +
+                "| Rule | Result | Detail |\n" +
+                "|-|-|-|\n" +
+                $"| R1 `release-published` | reported | GitHub Release v2099.101.1 is published: {RecoveryReleaseUrl} Dry run: reported, not enforced. |\n" +
+                $"| R2 `original-run` | passed | Workflow run 4242 is a completed 'workflow_dispatch' run (accepted in a dry run) of .github/workflows/nuget-generator.yaml at {ReleaseValidationFixture.RepositoryCommit}: {RecoveryRunUrl} |\n" +
+                "| R3 `source-ci` | passed | All 2 'exact-source-ci / *' jobs and 'pack-release-candidate' concluded 'success' in their latest attempts. |\n" +
+                $"| R4 `retained` | passed | Candidate 'fhir-pkg-2099.101.1-candidate' (artifact 21, {CandidateDigest}) and qualification inputs 'fhir-pkg-2099.101.1-fixture-bundle' (artifact 22, {BundleDigest}) are retained. |\n" +
+                $"| R5 `approval` | passed | docs/releases/approvals/v2099.101.1.json at approval commit {RecoveryApprovalCommit} (blob 1111111111111111111111111111111111111111, authored by Release Approver &lt;approver@example.test&gt;) is unchanged on origin/main. |\n" +
+                "\n" +
+                "Original source-CI jobs (linked, not re-run):\n" +
+                "\n" +
+                $"- <{RecoveryRunUrl}/job/12>\n" +
+                $"- <{RecoveryRunUrl}/job/13>\n");
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task VerifyRecoveryCommand_TreatsAnEmptyApprovalCommitAsAbsent()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            List<RecoveryRequest> requests = [];
+            Mock<IReleaseRecoveryVerifier> verifier = CreateRecoveryVerifier(
+                CreateAuthorizedRecoveryResult(approvalAuthor: null),
+                requests);
+            StringWriter stdout = new();
+            ReleaseCommandServices services = CreateServices(
+                recoveryVerifier: verifier.Object,
+                standardOutput: stdout);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "verify-recovery",
+                    "--repository",
+                    GitHubRepository,
+                    "--version",
+                    ReleaseValidationFixture.Version,
+                    "--tag",
+                    ReleaseValidationFixture.Tag,
+                    "--commit",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "--recover-run-id",
+                    "4242",
+                    "--approval-commit",
+                    "",
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    Path.Combine(workingDirectory, "step-summary.md"),
+                ]);
+
+            result.ExitCode.ShouldBe(0, result.DiagnosticError);
+            RecoveryRequest request = requests.ShouldHaveSingleItem();
+            request.ApprovalCommit.ShouldBe(string.Empty);
+            request.DryRun.ShouldBeFalse();
+            stdout.ToString().ShouldBe(
+                "Authorized recovery of v2099.101.1 from run 4242; GitHub Release published: true." +
+                Environment.NewLine);
+            ReadOutputLines(outputPath).ShouldBe(
+                [
+                    "release_published=true",
+                    "candidate_artifact_id=21",
+                    $"candidate_artifact_digest={CandidateDigest}",
+                    "original_bundle_artifact_id=22",
+                    $"original_bundle_artifact_digest={BundleDigest}",
+                    "approval_commit=",
+                    "approval_author=",
+                ]);
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task VerifyRecoveryCommand_FailedRulesWriteAnnotationsSummaryAndExitOne()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            const string releaseDetail =
+                "GitHub Release v2099.101.1 is not published (the Release is a draft).";
+            const string runDetail =
+                "Workflow run 4242 is not an eligible original release run: workflow is '.github/workflows/a|b.yaml', not '.github/workflows/nuget-generator.yaml'.";
+            const string notEvaluatedDetail =
+                "Not evaluated because R2 original-run did not pass.";
+            RecoveryVerificationResult refused = new(
+                [
+                    new RecoveryRuleResult(
+                        "R1",
+                        "release-published",
+                        RecoveryRuleOutcome.Failed,
+                        releaseDetail),
+                    new RecoveryRuleResult(
+                        "R2",
+                        "original-run",
+                        RecoveryRuleOutcome.Failed,
+                        runDetail),
+                    new RecoveryRuleResult(
+                        "R3",
+                        "source-ci",
+                        RecoveryRuleOutcome.NotEvaluated,
+                        notEvaluatedDetail),
+                    new RecoveryRuleResult(
+                        "R4",
+                        "retained",
+                        RecoveryRuleOutcome.NotEvaluated,
+                        notEvaluatedDetail),
+                    new RecoveryRuleResult(
+                        "R5",
+                        "approval",
+                        RecoveryRuleOutcome.Reported,
+                        "No approval commit was named; the original qualification inputs are used unchanged."),
+                ],
+                ReleasePublished: false,
+                CandidateArtifact: null,
+                BundleArtifact: null,
+                SourceCiJobs: [],
+                ApprovalAuthor: null);
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            ReleaseCommandServices services = CreateServices(
+                recoveryVerifier: CreateRecoveryVerifier(refused, []).Object,
+                standardOutput: stdout,
+                standardError: stderr);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "verify-recovery",
+                    "--repository",
+                    GitHubRepository,
+                    "--version",
+                    ReleaseValidationFixture.Version,
+                    "--tag",
+                    ReleaseValidationFixture.Tag,
+                    "--commit",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "--recover-run-id",
+                    "4242",
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            result.ExitCode.ShouldBe(1);
+            stdout.ToString().ShouldBe(
+                $"::error title=Recovery refused (R1 release-published)::{releaseDetail}" +
+                Environment.NewLine +
+                $"::error title=Recovery refused (R2 original-run)::{runDetail}" +
+                Environment.NewLine);
+            stderr.ToString().ShouldBe(
+                $"Recovery refused (R1 release-published): {releaseDetail}" +
+                Environment.NewLine +
+                $"Recovery refused (R2 original-run): {runDetail}" +
+                Environment.NewLine);
+            File.ReadAllText(summaryPath).ShouldBe(
+                "### Recovery authorization\n" +
+                "\n" +
+                "| Rule | Result | Detail |\n" +
+                "|-|-|-|\n" +
+                $"| R1 `release-published` | failed | {releaseDetail} |\n" +
+                "| R2 `original-run` | failed | Workflow run 4242 is not an eligible original release run: workflow is '.github/workflows/a\\|b.yaml', not '.github/workflows/nuget-generator.yaml'. |\n" +
+                $"| R3 `source-ci` | not-evaluated | {notEvaluatedDetail} |\n" +
+                $"| R4 `retained` | not-evaluated | {notEvaluatedDetail} |\n" +
+                "| R5 `approval` | reported | No approval commit was named; the original qualification inputs are used unchanged. |\n" +
+                "\n" +
+                "Original source-CI jobs (linked, not re-run): none.\n");
+            File.Exists(outputPath).ShouldBeFalse();
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task VerifyRecoveryCommand_RefusedRequestWritesAnnotationSummaryAndExitsOne()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            const string message =
+                "Tag 'v2099.101.2' must exactly match 'v2099.101.1'.";
+            Mock<IReleaseRecoveryVerifier> verifier = new(MockBehavior.Strict);
+            verifier
+                .Setup(recoveryVerifier => recoveryVerifier.VerifyAsync(
+                    It.IsAny<RecoveryRequest>(),
+                    It.IsAny<CancellationToken>()))
+                .ThrowsAsync(new ReleaseValidationException(message));
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            ReleaseCommandServices services = CreateServices(
+                recoveryVerifier: verifier.Object,
+                standardOutput: stdout,
+                standardError: stderr);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "verify-recovery",
+                    "--repository",
+                    GitHubRepository,
+                    "--version",
+                    ReleaseValidationFixture.Version,
+                    "--tag",
+                    "v2099.101.2",
+                    "--commit",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "--recover-run-id",
+                    "4242",
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            result.ExitCode.ShouldBe(1);
+            stdout.ToString().ShouldBe(
+                $"::error title=Recovery refused::{message}" +
+                Environment.NewLine);
+            stderr.ToString().ShouldBe(message + Environment.NewLine);
+            File.ReadAllText(summaryPath).ShouldBe(
+                $"### Recovery authorization\n\n{message}\n");
+            File.Exists(outputPath).ShouldBeFalse();
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void VerifyRecoveryCommand_RejectsARecoverRunIdBelowOne()
+    {
+        ParseResult parseResult =
+            Program.BuildRootCommand(CreateServices()).Parse(
+                [
+                    "verify-recovery",
+                    "--repository",
+                    GitHubRepository,
+                    "--version",
+                    ReleaseValidationFixture.Version,
+                    "--tag",
+                    ReleaseValidationFixture.Tag,
+                    "--commit",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "--recover-run-id",
+                    "0",
+                ]);
+
+        parseResult.Errors
+            .Select(static error => error.Message)
+            .ToArray()
+            .ShouldBe(["--recover-run-id must be at least one."]);
+    }
+
+    [Fact]
+    public async Task VerifyRecoveryCommand_IntegrationInvocationAuthorizesFromGitHubRecords()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            Mock<IReleaseGitHubClient> gitHubClient = new(MockBehavior.Strict);
+            gitHubClient
+                .Setup(client => client.GetPublishedReleaseAsync(
+                    GitHubRepository,
+                    ReleaseValidationFixture.Tag,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new GitHubRelease(
+                    9001,
+                    ReleaseValidationFixture.Tag,
+                    Draft: false,
+                    RecoveryReleaseUrl));
+            gitHubClient
+                .Setup(client => client.GetWorkflowRunAsync(
+                    GitHubRepository,
+                    4242,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new GitHubWorkflowRun(
+                    4242,
+                    ".github/workflows/nuget-generator.yaml",
+                    "release",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "completed",
+                    "failure",
+                    RunAttempt: 1,
+                    GitHubRepository,
+                    GitHubRepository,
+                    RecoveryRunUrl,
+                    new DateTimeOffset(2026, 10, 16, 14, 17, 0, TimeSpan.Zero)));
+            GitHubWorkflowJob[] jobs =
+            [
+                new(
+                    12,
+                    "exact-source-ci / build-and-test-ubuntu-latest",
+                    1,
+                    "completed",
+                    "success",
+                    $"{RecoveryRunUrl}/job/12"),
+                new(
+                    14,
+                    "pack-release-candidate",
+                    1,
+                    "completed",
+                    "success",
+                    $"{RecoveryRunUrl}/job/14"),
+                new(
+                    15,
+                    "qualify-ubuntu-latest-net8.0",
+                    1,
+                    "completed",
+                    "failure",
+                    $"{RecoveryRunUrl}/job/15"),
+            ];
+            gitHubClient
+                .Setup(client => client.ListWorkflowRunJobsAsync(
+                    GitHubRepository,
+                    4242,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(jobs);
+            GitHubArtifact[] artifacts =
+            [
+                CreateRecoveryArtifact(
+                    21,
+                    "fhir-pkg-2099.101.1-candidate",
+                    CandidateDigest),
+                CreateRecoveryArtifact(
+                    22,
+                    "fhir-pkg-2099.101.1-fixture-bundle",
+                    BundleDigest),
+            ];
+            gitHubClient
+                .Setup(client => client.ListWorkflowRunArtifactsAsync(
+                    GitHubRepository,
+                    4242,
+                    It.IsAny<CancellationToken>()))
+                .ReturnsAsync(artifacts);
+            Mock<IReleaseGitClient> gitClient = new(MockBehavior.Strict);
+            Mock<IReleaseGitObjectClient> gitObjectClient =
+                new(MockBehavior.Strict);
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            ReleaseCommandServices services = CreateServices(
+                recoveryVerifier: new ReleaseRecoveryVerifier(
+                    gitClient.Object,
+                    gitObjectClient.Object,
+                    gitHubClient.Object),
+                gitHubClient: gitHubClient.Object,
+                standardOutput: stdout,
+                standardError: stderr);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "verify-recovery",
+                    "--repository",
+                    GitHubRepository,
+                    "--version",
+                    ReleaseValidationFixture.Version,
+                    "--tag",
+                    ReleaseValidationFixture.Tag,
+                    "--commit",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "--recover-run-id",
+                    "4242",
+                    "--approval-commit",
+                    "",
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            result.ExitCode.ShouldBe(0, result.DiagnosticError);
+            stderr.ToString().ShouldBeEmpty();
+            ReadOutputLines(outputPath).ShouldBe(
+                [
+                    "release_published=true",
+                    "candidate_artifact_id=21",
+                    $"candidate_artifact_digest={CandidateDigest}",
+                    "original_bundle_artifact_id=22",
+                    $"original_bundle_artifact_digest={BundleDigest}",
+                    "approval_commit=",
+                    "approval_author=",
+                ]);
+            string summary = File.ReadAllText(summaryPath);
+            summary.ShouldContain(
+                $"| R1 `release-published` | passed | GitHub Release v2099.101.1 is published: {RecoveryReleaseUrl} |\n");
+            summary.ShouldContain("| R5 `approval` | reported | ");
+            summary.ShouldEndWith(
+                $"Original source-CI jobs (linked, not re-run):\n\n- <{RecoveryRunUrl}/job/12>\n");
+            gitClient.VerifyNoOtherCalls();
+            gitObjectClient.VerifyNoOtherCalls();
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task VerifyReleasePublishedCommand_BindsOptionsAndReportsAPublishedRelease()
+    {
+        Mock<IReleaseGitHubClient> gitHubClient = new(MockBehavior.Strict);
+        gitHubClient
+            .Setup(client => client.GetPublishedReleaseAsync(
+                GitHubRepository,
+                ReleaseValidationFixture.Tag,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GitHubRelease(
+                9001,
+                ReleaseValidationFixture.Tag,
+                Draft: false,
+                RecoveryReleaseUrl));
+        StringWriter stdout = new();
+        StringWriter stderr = new();
+        ReleaseCommandServices services = CreateServices(
+            gitHubClient: gitHubClient.Object,
+            gitHubOutputWriter:
+                new Mock<IGitHubOutputWriter>(MockBehavior.Strict).Object,
+            stepSummaryWriter:
+                new Mock<IGitHubStepSummaryWriter>(MockBehavior.Strict).Object,
+            standardOutput: stdout,
+            standardError: stderr);
+
+        CommandInvocationResult result = await InvokeAsync(
+            services,
+            [
+                "verify-release-published",
+                "--repository",
+                GitHubRepository,
+                "--tag",
+                ReleaseValidationFixture.Tag,
+            ]);
+
+        result.ExitCode.ShouldBe(0, result.DiagnosticError);
+        stdout.ToString().ShouldBe(
+            $"GitHub Release v2099.101.1 is published: {RecoveryReleaseUrl}" +
+            Environment.NewLine);
+        stderr.ToString().ShouldBeEmpty();
+        gitHubClient.Verify(
+            client => client.GetPublishedReleaseAsync(
+                GitHubRepository,
+                ReleaseValidationFixture.Tag,
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        gitHubClient.VerifyNoOtherCalls();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task VerifyReleasePublishedCommand_RefusesAMissingOrDraftRelease(
+        bool draftExists)
+    {
+        const string message = "GitHub Release v2099.101.1 is not published.";
+        Mock<IReleaseGitHubClient> gitHubClient = new(MockBehavior.Strict);
+        gitHubClient
+            .Setup(client => client.GetPublishedReleaseAsync(
+                GitHubRepository,
+                ReleaseValidationFixture.Tag,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(
+                draftExists
+                    ? new GitHubRelease(
+                        9001,
+                        ReleaseValidationFixture.Tag,
+                        Draft: true,
+                        RecoveryReleaseUrl)
+                    : null);
+        StringWriter stdout = new();
+        StringWriter stderr = new();
+        ReleaseCommandServices services = CreateServices(
+            gitHubClient: gitHubClient.Object,
+            standardOutput: stdout,
+            standardError: stderr);
+
+        CommandInvocationResult result = await InvokeAsync(
+            services,
+            [
+                "verify-release-published",
+                "--repository",
+                GitHubRepository,
+                "--tag",
+                ReleaseValidationFixture.Tag,
+            ]);
+
+        result.ExitCode.ShouldBe(1);
+        stdout.ToString().ShouldBe(
+            $"::error title=GitHub Release not published::{message}" +
+            Environment.NewLine);
+        stderr.ToString().ShouldBe(message + Environment.NewLine);
+    }
+
+    [Fact]
+    public async Task VerifyReleasePublishedCommand_RefusesAReleaseThatCannotBeRead()
+    {
+        const string message =
+            "GITHUB_TOKEN is required for GetPublishedRelease.";
+        Mock<IReleaseGitHubClient> gitHubClient = new(MockBehavior.Strict);
+        gitHubClient
+            .Setup(client => client.GetPublishedReleaseAsync(
+                GitHubRepository,
+                ReleaseValidationFixture.Tag,
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new ReleaseValidationException(message));
+        StringWriter stdout = new();
+        StringWriter stderr = new();
+        ReleaseCommandServices services = CreateServices(
+            gitHubClient: gitHubClient.Object,
+            standardOutput: stdout,
+            standardError: stderr);
+
+        CommandInvocationResult result = await InvokeAsync(
+            services,
+            [
+                "verify-release-published",
+                "--repository",
+                GitHubRepository,
+                "--tag",
+                ReleaseValidationFixture.Tag,
+            ]);
+
+        result.ExitCode.ShouldBe(1);
+        stdout.ToString().ShouldBe(
+            $"::error title=GitHub Release not published::{message}" +
+            Environment.NewLine);
+        stderr.ToString().ShouldBe(message + Environment.NewLine);
+    }
+
+    [Fact]
+    public async Task VerifyReleasePublishedCommand_RequiresARepository()
+    {
+        const string message =
+            "--repository is required when GITHUB_REPOSITORY is not set.";
+        Mock<IReleaseGitHubClient> gitHubClient = new(MockBehavior.Strict);
+        StringWriter stdout = new();
+        StringWriter stderr = new();
+        ReleaseCommandServices services = CreateServices(
+            gitHubClient: gitHubClient.Object,
+            standardOutput: stdout,
+            standardError: stderr);
+
+        CommandInvocationResult result = await InvokeAsync(
+            services,
+            [
+                "verify-release-published",
+                "--repository",
+                "",
+                "--tag",
+                ReleaseValidationFixture.Tag,
+            ]);
+
+        result.ExitCode.ShouldBe(1);
+        stdout.ToString().ShouldBe(
+            $"::error title=GitHub Release not published::{message}" +
+            Environment.NewLine);
+        stderr.ToString().ShouldBe(message + Environment.NewLine);
+        gitHubClient.VerifyNoOtherCalls();
+    }
+
     private static ReleaseCommandServices CreateServices(
         IReleaseInputValidator? inputValidator = null,
         IReleaseVersionAvailabilityValidator? versionAvailabilityValidator = null,
@@ -1254,6 +1932,7 @@ public sealed class ReleaseCommandTests
         IReleasePublicationStateValidator? publicationStateValidator = null,
         IPublishedPackageValidator? publishedPackageValidator = null,
         IFixtureBundleLocator? fixtureBundleLocator = null,
+        IReleaseRecoveryVerifier? recoveryVerifier = null,
         IReleaseGitHubClient? gitHubClient = null,
         IGitHubOutputWriter? gitHubOutputWriter = null,
         IGitHubStepSummaryWriter? stepSummaryWriter = null,
@@ -1270,6 +1949,8 @@ public sealed class ReleaseCommandTests
             publishedPackageValidator ??
             new ThrowingPublishedPackageValidator(),
             fixtureBundleLocator ?? new ThrowingFixtureBundleLocator(),
+            recoveryVerifier ??
+            new Mock<IReleaseRecoveryVerifier>(MockBehavior.Strict).Object,
             gitHubClient ??
             new Mock<IReleaseGitHubClient>(MockBehavior.Strict).Object,
             gitHubOutputWriter ?? new GitHubOutputWriter(),
@@ -1418,6 +2099,77 @@ public sealed class ReleaseCommandTests
                 });
         return gitHubClient;
     }
+
+    private static Mock<IReleaseRecoveryVerifier> CreateRecoveryVerifier(
+        RecoveryVerificationResult result,
+        List<RecoveryRequest> requests)
+    {
+        Mock<IReleaseRecoveryVerifier> verifier = new(MockBehavior.Strict);
+        verifier
+            .Setup(recoveryVerifier => recoveryVerifier.VerifyAsync(
+                It.IsAny<RecoveryRequest>(),
+                It.IsAny<CancellationToken>()))
+            .Callback(
+                (RecoveryRequest request, CancellationToken _) =>
+                    requests.Add(request))
+            .ReturnsAsync(result);
+        return verifier;
+    }
+
+    private static RecoveryVerificationResult CreateAuthorizedRecoveryResult(
+        string? approvalAuthor) =>
+        new(
+            [
+                new RecoveryRuleResult(
+                    "R1",
+                    "release-published",
+                    RecoveryRuleOutcome.Reported,
+                    $"GitHub Release {ReleaseValidationFixture.Tag} is published: {RecoveryReleaseUrl} Dry run: reported, not enforced."),
+                new RecoveryRuleResult(
+                    "R2",
+                    "original-run",
+                    RecoveryRuleOutcome.Passed,
+                    $"Workflow run 4242 is a completed 'workflow_dispatch' run (accepted in a dry run) of .github/workflows/nuget-generator.yaml at {ReleaseValidationFixture.RepositoryCommit}: {RecoveryRunUrl}"),
+                new RecoveryRuleResult(
+                    "R3",
+                    "source-ci",
+                    RecoveryRuleOutcome.Passed,
+                    "All 2 'exact-source-ci / *' jobs and 'pack-release-candidate' concluded 'success' in their latest attempts."),
+                new RecoveryRuleResult(
+                    "R4",
+                    "retained",
+                    RecoveryRuleOutcome.Passed,
+                    $"Candidate 'fhir-pkg-2099.101.1-candidate' (artifact 21, {CandidateDigest}) and qualification inputs 'fhir-pkg-2099.101.1-fixture-bundle' (artifact 22, {BundleDigest}) are retained."),
+                new RecoveryRuleResult(
+                    "R5",
+                    "approval",
+                    RecoveryRuleOutcome.Passed,
+                    $"docs/releases/approvals/v2099.101.1.json at approval commit {RecoveryApprovalCommit} (blob 1111111111111111111111111111111111111111, authored by {RecoveryApprovalAuthor}) is unchanged on origin/main."),
+            ],
+            ReleasePublished: true,
+            CreateRecoveryArtifact(
+                21,
+                "fhir-pkg-2099.101.1-candidate",
+                CandidateDigest),
+            CreateRecoveryArtifact(
+                22,
+                "fhir-pkg-2099.101.1-fixture-bundle",
+                BundleDigest),
+            [$"{RecoveryRunUrl}/job/12", $"{RecoveryRunUrl}/job/13"],
+            approvalAuthor);
+
+    private static GitHubArtifact CreateRecoveryArtifact(
+        long id,
+        string name,
+        string digest) =>
+        new(
+            id,
+            name,
+            Expired: false,
+            digest,
+            SizeInBytes: 4096,
+            new DateTimeOffset(2027, 1, 14, 6, 23, 45, TimeSpan.Zero),
+            4242);
 
     private static string[] ReadOutputKeys(string outputPath) =>
         [.. ReadOutputLines(outputPath)

@@ -64,6 +64,8 @@ public class ReleaseWorkflowContractTests
                 "validate-published-package",
                 "locate-fixture-bundle",
                 "fetch-artifact",
+                "verify-recovery",
+                "verify-release-published",
             ]);
 
         releaseWorkflow.ShouldContain(

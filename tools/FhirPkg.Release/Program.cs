@@ -35,6 +35,8 @@ internal static class Program
         rootCommand.Add(ValidatePublishedPackageCommand.Build(services));
         rootCommand.Add(LocateFixtureBundleCommand.Build(services));
         rootCommand.Add(FetchArtifactCommand.Build(services));
+        rootCommand.Add(VerifyRecoveryCommand.Build(services));
+        rootCommand.Add(VerifyReleasePublishedCommand.Build(services));
 
         return rootCommand;
     }

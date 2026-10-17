@@ -13,6 +13,7 @@ internal sealed class ReleaseCommandServices
         IReleasePublicationStateValidator publicationStateValidator,
         IPublishedPackageValidator publishedPackageValidator,
         IFixtureBundleLocator fixtureBundleLocator,
+        IReleaseRecoveryVerifier recoveryVerifier,
         IReleaseGitHubClient gitHubClient,
         IGitHubOutputWriter gitHubOutputWriter,
         IGitHubStepSummaryWriter stepSummaryWriter,
@@ -40,6 +41,9 @@ internal sealed class ReleaseCommandServices
         FixtureBundleLocator =
             fixtureBundleLocator ??
             throw new ArgumentNullException(nameof(fixtureBundleLocator));
+        RecoveryVerifier =
+            recoveryVerifier ??
+            throw new ArgumentNullException(nameof(recoveryVerifier));
         GitHubClient =
             gitHubClient ??
             throw new ArgumentNullException(nameof(gitHubClient));
@@ -73,6 +77,8 @@ internal sealed class ReleaseCommandServices
     {
         get;
     }
+
+    internal IReleaseRecoveryVerifier RecoveryVerifier { get; }
 
     internal TextWriter StandardError { get; }
 
@@ -118,6 +124,10 @@ internal sealed class ReleaseCommandServices
             gitClient,
             gitClient,
             gitHubClient);
+        ReleaseRecoveryVerifier recoveryVerifier = new(
+            gitClient,
+            gitClient,
+            gitHubClient);
         GitHubOutputWriter gitHubOutputWriter = new();
         GitHubStepSummaryWriter stepSummaryWriter = new();
 
@@ -128,6 +138,7 @@ internal sealed class ReleaseCommandServices
             publicationStateValidator,
             publishedPackageValidator,
             fixtureBundleLocator,
+            recoveryVerifier,
             gitHubClient,
             gitHubOutputWriter,
             stepSummaryWriter,
