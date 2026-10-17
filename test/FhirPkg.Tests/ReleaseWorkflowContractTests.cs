@@ -139,7 +139,7 @@ public class ReleaseWorkflowContractTests
             "dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(4);
         CountOccurrences(
             releaseWorkflow,
-            "--project tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(8);
+            "--project tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(10);
         CountOccurrences(releaseWorkflow, "validate-version").ShouldBe(0);
         CountOccurrences(releaseWorkflow, "validate-inputs").ShouldBe(2);
         CountOccurrences(releaseWorkflow, "validate-candidate").ShouldBe(3);
@@ -155,7 +155,7 @@ public class ReleaseWorkflowContractTests
             "--allow-published-version").ShouldBe(1);
         CountOccurrences(
             releaseWorkflow,
-            "--no-build\n          --no-restore\n          --").ShouldBe(8);
+            "--no-build\n          --no-restore\n          --").ShouldBe(10);
         releaseWorkflow.ShouldNotContain("Test-Release");
         releaseWorkflow.ShouldNotContain("Test-PublishedRelease");
         releaseWorkflow.ShouldNotContain("skip-signature-verification");
@@ -310,6 +310,87 @@ public class ReleaseWorkflowContractTests
             qualificationSection.IndexOf(
                 "Qualify exact local package",
                 StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ReleaseWorkflow_QualifiesOfflineFromFrozenInputs()
+    {
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string validateSection = GetSection(
+            releaseWorkflow,
+            "  validate:\n",
+            "  source-ci:\n");
+        string packSection = GetSection(
+            releaseWorkflow,
+            "  pack:\n",
+            "  package-qualification:\n");
+        string qualificationSection = GetSection(
+            releaseWorkflow,
+            "  package-qualification:\n",
+            "  publish:\n");
+
+        releaseWorkflow.ShouldContain(
+            "permissions:\n  contents: read\n  actions: read\n");
+        CountOccurrences(
+            releaseWorkflow,
+            "locate-fixture-bundle").ShouldBe(1);
+        CountOccurrences(releaseWorkflow, "fetch-artifact").ShouldBe(1);
+        CountOccurrences(
+            releaseWorkflow,
+            "--repository \"${{ github.repository }}\"").ShouldBe(2);
+
+        int validateInputsIndex = validateSection.IndexOf(
+            "validate-inputs",
+            StringComparison.Ordinal);
+        validateInputsIndex.ShouldBeGreaterThanOrEqualTo(0);
+        validateSection.IndexOf(
+            "locate-fixture-bundle",
+            StringComparison.Ordinal).ShouldBeGreaterThan(
+                validateInputsIndex);
+
+        int fetchArtifactIndex = packSection.IndexOf(
+            "fetch-artifact",
+            StringComparison.Ordinal);
+        fetchArtifactIndex.ShouldBeGreaterThanOrEqualTo(0);
+        fetchArtifactIndex.ShouldBeLessThan(
+            packSection.IndexOf(
+                "dotnet build src/FhirPkg.Cli/FhirPkg.Cli.csproj",
+                StringComparison.Ordinal));
+        int candidateUploadIndex = packSection.IndexOf(
+            "Upload immutable release candidate",
+            StringComparison.Ordinal);
+        candidateUploadIndex.ShouldBeGreaterThanOrEqualTo(0);
+        candidateUploadIndex.ShouldBeLessThan(
+            packSection.IndexOf(
+                "Upload qualification inputs",
+                StringComparison.Ordinal));
+        packSection.ShouldContain(
+            "name: fhir-pkg-${{ needs.validate.outputs.version }}-fixture-bundle");
+        CountOccurrences(packSection, "retention-days: 90").ShouldBe(2);
+
+        qualificationSection.ShouldContain(
+            "--bundle-sha256 $env:BUNDLE_SHA256");
+        qualificationSection.ShouldContain(
+            "--release-tag $env:RELEASE_TAG");
+        qualificationSection.ShouldContain(
+            "HTTP_PROXY: http://127.0.0.1:1");
+        qualificationSection.ShouldContain(
+            "HTTPS_PROXY: http://127.0.0.1:1");
+        qualificationSection.ShouldContain(
+            "ALL_PROXY: http://127.0.0.1:1");
+        qualificationSection.ShouldContain("NO_PROXY: ''");
+        qualificationSection.ShouldContain(
+            "run-id: ${{ needs.pack.outputs.candidate_run_id }}");
+        int inputsDownloadIndex = qualificationSection.IndexOf(
+            "Download frozen qualification inputs",
+            StringComparison.Ordinal);
+        inputsDownloadIndex.ShouldBeGreaterThanOrEqualTo(0);
+        inputsDownloadIndex.ShouldBeLessThan(
+            qualificationSection.IndexOf(
+                "Qualify exact local package",
+                StringComparison.Ordinal));
+        qualificationSection.ShouldNotContain("--freeze-bundle");
+        qualificationSection.ShouldNotContain("--derive-bundle");
     }
 
     [Fact]

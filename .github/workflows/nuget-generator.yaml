@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: nuget-release-${{ github.event.release.tag_name || inputs.tag }}
@@ -37,6 +38,10 @@ jobs:
       version: ${{ steps.inputs.outputs.version }}
       tag: ${{ steps.inputs.outputs.tag }}
       validation_only: ${{ steps.inputs.outputs.validation_only }}
+      bundle_artifact_id: ${{ steps.bundle.outputs.bundle_artifact_id }}
+      bundle_artifact_digest: ${{ steps.bundle.outputs.bundle_artifact_digest }}
+      bundle_run_id: ${{ steps.bundle.outputs.bundle_run_id }}
+      corpus_blob: ${{ steps.bundle.outputs.corpus_blob }}
 
     steps:
       - uses: actions/checkout@v6
@@ -114,6 +119,23 @@ jobs:
           --tag "${{ steps.inputs.outputs.tag }}"
           --github-ref "${{ github.ref }}"
 
+      - name: Locate frozen fixture bundle
+        id: bundle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          locate-fixture-bundle
+          --repository "${{ github.repository }}"
+          --commit "${{ steps.release.outputs.commit }}"
+          --tag "${{ steps.inputs.outputs.tag }}"
+
   source-ci:
     name: exact-source-ci
     needs: validate
@@ -132,6 +154,8 @@ jobs:
       sdk_package_sha256: ${{ steps.candidate.outputs.sdk_sha256 }}
       cli_package_sha256: ${{ steps.candidate.outputs.cli_sha256 }}
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      bundle_sha256: ${{ steps.bundle.outputs.bundle_sha256 }}
+      candidate_run_id: ${{ github.run_id }}
 
     steps:
       - uses: actions/checkout@v6
@@ -169,6 +193,38 @@ jobs:
           --configuration Release
           --framework net10.0
           --no-restore
+
+      - name: Download frozen fixture bundle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          fetch-artifact
+          --repository "${{ github.repository }}"
+          --artifact-id "${{ needs.validate.outputs.bundle_artifact_id }}"
+          --expected-digest "${{ needs.validate.outputs.bundle_artifact_digest }}"
+          --destination "${{ runner.temp }}/fixture-bundle"
+
+      - name: Record qualification input identity
+        id: bundle
+        shell: pwsh
+        run: |
+          $manifestPath = Join-Path `
+            '${{ runner.temp }}' `
+            'fixture-bundle/bundle-manifest.json'
+          $bundleSha256 =
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).
+              Hash.
+              ToLowerInvariant()
+          Add-Content `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "bundle_sha256=$bundleSha256"
 
       - name: Build release graph once
         shell: pwsh
@@ -334,6 +390,15 @@ jobs:
           compression-level: 0
           retention-days: 90
 
+      - name: Upload qualification inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: fhir-pkg-${{ needs.validate.outputs.version }}-fixture-bundle
+          path: ${{ runner.temp }}/fixture-bundle/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
   package-qualification:
     name: qualify-${{ matrix.os }}-${{ matrix.framework }}
     needs: [validate, pack]
@@ -369,7 +434,7 @@ jobs:
           SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
           CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
           ARTIFACT_DIGEST: ${{ needs.pack.outputs.artifact_digest }}
-          CANDIDATE_RUN_ID: ${{ github.run_id }}
+          CANDIDATE_RUN_ID: ${{ needs.pack.outputs.candidate_run_id }}
         run: |
           $summary = @(
             '### Candidate',
@@ -422,6 +487,8 @@ jobs:
         with:
           name: fhir-pkg-${{ needs.validate.outputs.version }}-candidate
           path: ${{ runner.temp }}/release-candidate
+          run-id: ${{ needs.pack.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Verify downloaded release candidate
         id: candidate
@@ -555,12 +622,24 @@ jobs:
             -RepositoryCommit $env:RELEASE_COMMIT `
             -ExpectedPackageSha256 $env:CLI_PACKAGE_SHA256
 
+      - name: Download frozen qualification inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: fhir-pkg-${{ needs.validate.outputs.version }}-fixture-bundle
+          path: ${{ runner.temp }}/fixture-bundle
+
       - name: Qualify exact local package
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARGET_FRAMEWORK: ${{ matrix.framework }}
           QUALIFY_TITLE: qualify-${{ matrix.os }}-${{ matrix.framework }}
+          BUNDLE_SHA256: ${{ needs.pack.outputs.bundle_sha256 }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          HTTP_PROXY: http://127.0.0.1:1
+          HTTPS_PROXY: http://127.0.0.1:1
+          ALL_PROXY: http://127.0.0.1:1
+          NO_PROXY: ''
         run: |
           $cache = Join-Path '${{ runner.temp }}' 'qualification-cache'
           $report = Join-Path '${{ runner.temp }}' 'qualification-report.json'
@@ -577,7 +656,10 @@ jobs:
             --output $report `
             --corpus test/FhirPkg.Qualification/qualification-corpus.json `
             --summary $env:GITHUB_STEP_SUMMARY `
-            --summary-title $env:QUALIFY_TITLE
+            --summary-title $env:QUALIFY_TITLE `
+            --bundle (Join-Path '${{ runner.temp }}' 'fixture-bundle') `
+            --bundle-sha256 $env:BUNDLE_SHA256 `
+            --release-tag $env:RELEASE_TAG
 
       - name: Report missing qualification report
         if: ${{ always() }}
@@ -603,10 +685,16 @@ jobs:
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
           SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
           CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
           ARTIFACT_DIGEST: ${{ needs.pack.outputs.artifact_digest }}
+          CANDIDATE_RUN_ID: ${{ needs.pack.outputs.candidate_run_id }}
+          BUNDLE_SHA256: ${{ needs.pack.outputs.bundle_sha256 }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
           TARGET_FRAMEWORK: ${{ matrix.framework }}
           TOOL_INFORMATIONAL_VERSION: ${{ steps.tool_qualification.outputs.informational_version }}
           MATRIX_OS: ${{ matrix.os }}
@@ -623,10 +711,17 @@ jobs:
 
           $evidence = [ordered]@{
             version = $env:RELEASE_VERSION
+            releaseTag = $env:RELEASE_TAG
             repositoryCommit = $env:RELEASE_COMMIT
             sdkPackageSha256 = $env:SDK_PACKAGE_SHA256
             cliPackageSha256 = $env:CLI_PACKAGE_SHA256
             workflowArtifactDigest = $env:ARTIFACT_DIGEST
+            candidateRunId = $env:CANDIDATE_RUN_ID
+            bundleSha256 = $env:BUNDLE_SHA256
+            corpusSha256 = $report.corpusSha256
+            runId = $env:RUN_ID
+            runAttempt = $env:RUN_ATTEMPT
+            workflowSha = $env:WORKFLOW_SHA
             runner = $env:MATRIX_OS
             framework = $env:TARGET_FRAMEWORK
             toolInformationalVersion =
@@ -725,6 +820,8 @@ jobs:
         with:
           name: fhir-pkg-${{ needs.validate.outputs.version }}-candidate
           path: ${{ runner.temp }}/release-candidate
+          run-id: ${{ needs.pack.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Revalidate qualified release candidate
         id: candidate
