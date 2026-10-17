@@ -10,6 +10,25 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+### Added
+- Added a weekly, dispatchable fixture drift check
+  (`.github/workflows/fixture-drift.yaml`) that downloaded and verified every
+  pinned qualification fixture and froze a hash-addressed fixture bundle only
+  from a passing check, plus a separate, non-gating LIVE registry
+  interoperability job.
+- Added release recovery for already-published GitHub Releases: a dispatch at
+  the release tag finished the original run without rebuilding, re-qualified
+  its candidate on the original frozen inputs plus any release-scoped approval
+  under `docs/releases/approvals/`, and published through the same protected
+  job.
+
+### Changed
+- Release and validation runs required a frozen fixture bundle for their exact
+  qualification corpus, failed before building without one, and qualified
+  every case offline from that bundle.
+- Qualification jobs wrote job summaries and error annotations that listed
+  rejected artifacts and separated dependent from independent case failures.
+
 ## [2026.1016.1417] - 2026-10-16
 
 ### Added

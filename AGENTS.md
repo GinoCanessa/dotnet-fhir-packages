@@ -73,8 +73,10 @@ projects, and `tools/FhirPkg.Release`.
   itself via `setup-dotnet`, so the roll-forward policy above changes nothing
   there — it resolves to exactly `10.0.302` on the runners and only gives local
   machines room to use a newer feature band. `ReleaseWorkflowContractTests`
-  asserts the workflow's `dotnet-version: 10.0.302`; changing `global.json`
-  alone does not satisfy it.
+  asserts `dotnet-version: 10.0.302` in both the publish workflow and
+  `.github/workflows/fixture-drift.yaml`, so `global.json` and those two
+  workflows are a coupled set of three files; changing `global.json` alone
+  does not satisfy it.
 - **Central package management.** All package versions live in
   `Directory.Packages.props`. Add a `<PackageVersion>` there and a bare
   `<PackageReference Include="..." />` in the project — never a `Version=`
@@ -192,8 +194,17 @@ changes.
 ### Release tooling
 
 `tools/FhirPkg.Release` is exercised by the publish workflow and by the
-release-contract tests inside `test/FhirPkg.Tests`. Do not invoke the publish
-workflow locally. The release process is documented in
+release-contract tests inside `test/FhirPkg.Tests`. Four of its commands call
+the GitHub REST API with `GITHUB_TOKEN`: `locate-fixture-bundle`,
+`fetch-artifact`, `verify-recovery`, and `verify-release-published`.
+`.github/workflows/fixture-drift.yaml` is the weekly fixture drift check that
+freezes the fixture bundle releases qualify from; the release-contract tests
+read it alongside the publish workflow.
+
+Agents never dispatch the release, recovery, or drift workflows — neither
+`nuget-generator.yaml` in any mode (release, validation-only, or recovery) nor
+`fixture-drift.yaml` — and do not invoke the publish workflow locally. The
+release process is documented in
 [`docs/releases/README.md`](docs/releases/README.md).
 
 ---
@@ -297,10 +308,12 @@ These are decisions, not preferences. Violating one is a review Blocker.
   it, stamping a version onto it, or malforming it silently ships a release
   with empty notes. Version headings are stamped by the release process, never
   by hand.
-- **`global.json` and the publish workflow are a coupled pair.**
-  `ReleaseWorkflowContractTests` asserts the workflow's
-  `dotnet-version: 10.0.302`, so changing the SDK pin means changing both and
-  re-running that test — it reads the workflow YAML from build output.
+- **`global.json`, the publish workflow, and the fixture drift workflow are a
+  coupled set of three files.** `ReleaseWorkflowContractTests` asserts
+  `dotnet-version: 10.0.302` in both `.github/workflows/nuget-generator.yaml`
+  and `.github/workflows/fixture-drift.yaml`, so changing the SDK pin means
+  changing all three and re-running that test — it reads the workflow YAML from
+  build output.
 - **Nothing touches nuget.org from a local machine.** No `dotnet nuget push`,
   no local run of the publish workflow, and no `publish` command against a real
   registry. Publication happens only through the process in
