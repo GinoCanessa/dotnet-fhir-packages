@@ -59,6 +59,19 @@ internal static class QualificationSummaryWriter
                 annotations);
         }
 
+        QualificationCaseResult? derive = report.Cases.FirstOrDefault(
+            result => string.Equals(
+                result.Id,
+                FixtureBundle.DeriveCaseId,
+                StringComparison.Ordinal));
+        if (derive is not null)
+        {
+            AddDeriveTable(markdown, annotations, report, derive);
+            return new QualificationSummaryContent(
+                markdown.ToString(),
+                annotations);
+        }
+
         AddQualificationInputs(markdown, report);
         AddRejectedArtifacts(markdown, annotations, report);
         AddFailedCases(markdown, annotations, report);
@@ -155,16 +168,56 @@ internal static class QualificationSummaryWriter
                     verify,
                     FixtureBundle.CorpusSha256DetailName)
                 ?? report.CorpusSha256;
-            string approvals = FindDetail(
-                    verify,
-                    FixtureBundle.ApprovalsDetailName)
-                ?? FixtureBundle.NoApprovals;
+            string approvals = DescribeApprovals(verify);
             inputs =
                 $"bundle sha256:{EscapeMarkdown(bundleSha256)} {MiddleDot} corpus {EscapeMarkdown(corpusSha256)} {MiddleDot} approvals: {EscapeMarkdown(approvals)}";
         }
 
         AddLine(markdown, $"Qualification inputs: {inputs}");
         AddLine(markdown);
+    }
+
+    // Lists "<artifact> <pinned> → <approved>" for each approval detail.
+    private static string DescribeApprovals(QualificationCaseResult verify)
+    {
+        string[] approvals = GetApprovalDetails(verify)
+            .Select(detail =>
+                $"{GetApprovedArtifact(detail)} {DescribeApprovedChange(detail.Value)}")
+            .ToArray();
+        return approvals.Length > 0
+            ? string.Join(", ", approvals)
+            : FindDetail(verify, FixtureBundle.ApprovalsDetailName)
+                ?? FixtureBundle.NoApprovals;
+    }
+
+    private static QualificationDetail[] GetApprovalDetails(
+        QualificationCaseResult result) =>
+        result.Details
+            .Where(detail => detail.Name.StartsWith(
+                FixtureBundle.ApprovalDetailPrefix,
+                StringComparison.Ordinal))
+            .ToArray();
+
+    private static string GetApprovedArtifact(QualificationDetail detail) =>
+        detail.Name[FixtureBundle.ApprovalDetailPrefix.Length..];
+
+    // An approval detail reads "<pinned> → <approved> by <approvedBy> at
+    // <approvalCommit>"; this keeps "<pinned> → <approved>".
+    private static string DescribeApprovedChange(string value)
+    {
+        int approver = value.IndexOf(" by ", StringComparison.Ordinal);
+        return approver < 0 ? value : value[..approver];
+    }
+
+    private static (string Pinned, string Approved) ParseApprovedChange(
+        string value)
+    {
+        string change = DescribeApprovedChange(value);
+        string separator = $" {FixtureBundle.ApprovalArrow} ";
+        int arrow = change.IndexOf(separator, StringComparison.Ordinal);
+        return arrow < 0
+            ? (change, MissingValue)
+            : (change[..arrow], change[(arrow + separator.Length)..]);
     }
 
     private static string? FindDetail(
@@ -349,6 +402,93 @@ internal static class QualificationSummaryWriter
         {
             QualificationFailureCodes.ImmutableHashMismatch =>
                 "**changed**",
+            QualificationFailureCodes.SourceUnreachable =>
+                "**unreachable**",
+            _ => "**failed**"
+        };
+    }
+
+    private static void AddDeriveTable(
+        StringBuilder markdown,
+        List<string> annotations,
+        QualificationReport report,
+        QualificationCaseResult derive)
+    {
+        QualificationDetail[] approvals = GetApprovalDetails(derive);
+        bool artifactFailed = false;
+        if (approvals.Length > 0)
+        {
+            AddLine(
+                markdown,
+                "| Artifact | Pinned SHA-256 | Approved SHA-256 | Observed SHA-256 | Result |");
+            AddLine(markdown, "|-|-|-|-|-|");
+            foreach (QualificationDetail approval in approvals)
+            {
+                string id = GetApprovedArtifact(approval);
+                (string pinned, string approved) =
+                    ParseApprovedChange(approval.Value);
+                QualificationArtifactResult? artifact =
+                    report.Artifacts.FirstOrDefault(result => string.Equals(
+                        result.Id,
+                        id,
+                        StringComparison.Ordinal));
+                string observed = artifact?.ActualSha256 ?? MissingValue;
+                AddLine(
+                    markdown,
+                    $"| {EscapeMarkdown(id)} | {EscapeMarkdown(pinned)} | {EscapeMarkdown(approved)} | {EscapeMarkdown(observed)} | {DescribeDeriveResult(artifact)} |");
+                if (artifact is null || artifact.Success)
+                    continue;
+
+                artifactFailed = true;
+                annotations.Add(FormatError(
+                    $"Approved bytes unavailable {id}",
+                    artifact.Failure?.Message ?? "No failure was recorded."));
+            }
+
+            AddLine(markdown);
+        }
+
+        if (!derive.Success && !artifactFailed)
+        {
+            string message = DescribeFailures(derive);
+            AddLine(
+                markdown,
+                $"{EscapeMarkdown(derive.Id)} failed: {EscapeMarkdown(message)}");
+            AddLine(markdown);
+            annotations.Add(FormatError(
+                $"Qualification case {derive.Id} failed",
+                message));
+        }
+
+        string? derivedSha256 = derive.Success
+            ? FindDetail(
+                derive,
+                FixtureBundle.DerivedBundleSha256DetailName)
+            : null;
+        string baseSha256 = FindDetail(
+                derive,
+                FixtureBundle.BaseBundleSha256DetailName)
+            ?? MissingValue;
+        AddLine(
+            markdown,
+            derivedSha256 is null
+                ? "no bundle derived"
+                : $"derived bundle sha256:{EscapeMarkdown(derivedSha256)} from base sha256:{EscapeMarkdown(baseSha256)}");
+    }
+
+    private static string DescribeDeriveResult(
+        QualificationArtifactResult? artifact)
+    {
+        if (artifact is null)
+            return "not fetched";
+
+        if (artifact.Success)
+            return "verified";
+
+        return artifact.Failure?.Code switch
+        {
+            QualificationFailureCodes.ApprovedBytesUnavailable =>
+                "**unavailable**",
             QualificationFailureCodes.SourceUnreachable =>
                 "**unreachable**",
             _ => "**failed**"

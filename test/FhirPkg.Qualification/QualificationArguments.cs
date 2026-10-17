@@ -11,14 +11,18 @@ internal sealed record QualificationArguments
     private static readonly HashSet<string> s_supportedOptions =
         new(StringComparer.OrdinalIgnoreCase)
         {
+            "approval",
+            "approval-commit",
             "bundle",
             "bundle-sha256",
             "cache",
             "corpus",
+            "derive-bundle",
             "freeze-bundle",
             "http-timeout-seconds",
             "output",
             "process-host",
+            "release-tag",
             "summary",
             "summary-title",
             "validate-only"
@@ -37,6 +41,14 @@ internal sealed record QualificationArguments
     internal string? BundlePath { get; init; }
 
     internal string? BundleSha256 { get; init; }
+
+    internal string? DeriveBundlePath { get; init; }
+
+    internal string? ApprovalPath { get; init; }
+
+    internal string? ApprovalCommit { get; init; }
+
+    internal string? ReleaseTag { get; init; }
 
     internal string? SummaryPath { get; init; }
 
@@ -102,6 +114,83 @@ internal sealed record QualificationArguments
 
         string? bundle = values.GetValueOrDefault("bundle");
         string? bundleSha256 = values.GetValueOrDefault("bundle-sha256");
+        string? deriveBundle = values.GetValueOrDefault("derive-bundle");
+        string? approval = values.GetValueOrDefault("approval");
+        string? approvalCommit = values.GetValueOrDefault("approval-commit");
+        string? releaseTag = values.GetValueOrDefault("release-tag");
+        if (deriveBundle is not null)
+        {
+            if (string.IsNullOrWhiteSpace(deriveBundle))
+            {
+                throw new ArgumentException(
+                    "Option '--derive-bundle' requires a value.");
+            }
+
+            if (validateOnly)
+            {
+                throw new ArgumentException(
+                    "Option '--derive-bundle' cannot be combined with '--validate-only true'.");
+            }
+
+            if (freezeBundle is not null)
+            {
+                throw new ArgumentException(
+                    "Option '--derive-bundle' cannot be combined with '--freeze-bundle'.");
+            }
+
+            if (bundle is null)
+            {
+                throw new ArgumentException(
+                    "Option '--bundle' is required with '--derive-bundle'.");
+            }
+
+            if (bundleSha256 is null)
+            {
+                throw new ArgumentException(
+                    "Option '--bundle-sha256' is required with '--derive-bundle'.");
+            }
+
+            if (approval is null)
+            {
+                throw new ArgumentException(
+                    "Option '--approval' is required with '--derive-bundle'.");
+            }
+
+            if (approvalCommit is null)
+            {
+                throw new ArgumentException(
+                    "Option '--approval-commit' is required with '--derive-bundle'.");
+            }
+
+            if (releaseTag is null)
+            {
+                throw new ArgumentException(
+                    "Option '--release-tag' is required with '--derive-bundle'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(approval))
+            {
+                throw new ArgumentException(
+                    "Option '--approval' requires a value.");
+            }
+
+            if (!FixtureBundle.IsCommit(approvalCommit))
+            {
+                throw new ArgumentException(
+                    "Option '--approval-commit' must be exactly 40 lowercase hexadecimal characters.");
+            }
+        }
+        else if (approval is not null)
+        {
+            throw new ArgumentException(
+                "Option '--approval' requires '--derive-bundle'.");
+        }
+        else if (approvalCommit is not null)
+        {
+            throw new ArgumentException(
+                "Option '--approval-commit' requires '--derive-bundle'.");
+        }
+
         if (bundle is not null)
         {
             if (string.IsNullOrWhiteSpace(bundle))
@@ -138,6 +227,21 @@ internal sealed record QualificationArguments
         {
             throw new ArgumentException(
                 "Option '--bundle-sha256' requires '--bundle'.");
+        }
+
+        if (releaseTag is not null)
+        {
+            if (string.IsNullOrWhiteSpace(releaseTag))
+            {
+                throw new ArgumentException(
+                    "Option '--release-tag' requires a value.");
+            }
+
+            if (bundle is null)
+            {
+                throw new ArgumentException(
+                    "Option '--release-tag' requires '--bundle'.");
+            }
         }
 
         string cache = values.TryGetValue(
@@ -184,6 +288,14 @@ internal sealed record QualificationArguments
                 ? null
                 : Path.GetFullPath(bundle),
             BundleSha256 = bundleSha256,
+            DeriveBundlePath = deriveBundle is null
+                ? null
+                : Path.GetFullPath(deriveBundle),
+            ApprovalPath = approval is null
+                ? null
+                : Path.GetFullPath(approval),
+            ApprovalCommit = approvalCommit,
+            ReleaseTag = releaseTag,
             SummaryPath = values.TryGetValue(
                 "summary",
                 out string? summary)

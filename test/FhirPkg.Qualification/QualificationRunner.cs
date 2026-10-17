@@ -127,9 +127,58 @@ internal sealed class QualificationRunner
         return FinalizeReport();
     }
 
+    internal async Task<QualificationReport> DeriveAsync(
+        CancellationToken cancellationToken)
+    {
+        string derivedPath = _arguments.DeriveBundlePath
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires a bundle output directory.");
+        string bundlePath = _arguments.BundlePath
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires a base bundle.");
+        string bundleSha256 = _arguments.BundleSha256
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires the expected base bundle SHA-256.");
+        string approvalPath = _arguments.ApprovalPath
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires an approval file.");
+        string approvalCommit = _arguments.ApprovalCommit
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires the approval commit.");
+        string releaseTag = _arguments.ReleaseTag
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires the release tag.");
+        EnsureEmptyRoot();
+        await RunCaseAsync(
+                FixtureBundle.DeriveCaseId,
+                (context, token) => DeriveBundleAsync(
+                    context,
+                    derivedPath,
+                    bundlePath,
+                    bundleSha256,
+                    approvalPath,
+                    approvalCommit,
+                    releaseTag,
+                    token),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return FinalizeReport();
+    }
+
+    internal Task<QualificationReport> RunBundleAsync(
+        string bundlePath,
+        string bundleSha256,
+        CancellationToken cancellationToken) =>
+        RunBundleAsync(
+            bundlePath,
+            bundleSha256,
+            _arguments.ReleaseTag,
+            cancellationToken);
+
     internal async Task<QualificationReport> RunBundleAsync(
         string bundlePath,
         string bundleSha256,
+        string? releaseTag,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
@@ -145,6 +194,7 @@ internal sealed class QualificationRunner
                             context,
                             bundlePath,
                             bundleSha256,
+                            releaseTag,
                             token)
                         .ConfigureAwait(false);
                     routes = await FixtureRoutes.CreateAsync(
@@ -318,10 +368,211 @@ internal sealed class QualificationRunner
         QualificationArtifactResult result) =>
         $"{result.Id} ({result.Failure?.Code ?? "unclassified"})";
 
+    private async Task DeriveBundleAsync(
+        QualificationCaseContext context,
+        string derivedPath,
+        string bundlePath,
+        string bundleSha256,
+        string approvalPath,
+        string approvalCommit,
+        string releaseTag,
+        CancellationToken cancellationToken)
+    {
+        // A recovery bundle derives only from a frozen bundle, so the base is
+        // verified with no release tag and therefore carries no approvals.
+        VerifiedFixtureBundle baseBundle = await FixtureBundleVerifier
+            .VerifyAsync(
+                bundlePath,
+                bundleSha256,
+                _corpus,
+                _report.CorpusSha256,
+                releaseTag: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+        context.Detail(
+            FixtureBundle.BaseBundleSha256DetailName,
+            baseBundle.Digest);
+
+        FixtureApproval approval = await ReadApprovalAsync(
+                approvalPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        approval.ValidateStructure();
+        approval.ValidateAgainst(_corpus, releaseTag);
+        foreach (FixtureApprovalReplacement replacement in
+            approval.Replacements)
+        {
+            FixtureBundleArtifact entry =
+                baseBundle.GetArtifact(replacement.Artifact);
+            if (!string.Equals(
+                    entry.Sha256,
+                    replacement.PinnedSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new FixtureBundleException(
+                    QualificationFailureCodes.ApprovalInvalid,
+                    $"Approval for '{replacement.Artifact}' records pinned SHA-256 {replacement.PinnedSha256}, but the base bundle holds {entry.Sha256}.");
+            }
+        }
+
+        foreach (FixtureBundleApproval applied in
+            approval.ToBundleApprovals(approvalCommit))
+        {
+            context.Detail(
+                FixtureBundle.GetApprovalDetailName(applied.Artifact),
+                FixtureBundle.DescribeApproval(applied));
+        }
+
+        Dictionary<string, DownloadedArtifact> approvedArtifacts =
+            await FetchApprovedArtifactsAsync(
+                    approval,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        string derivedSha256 = await FixtureBundleWriter.WriteDerivedAsync(
+                derivedPath,
+                baseBundle,
+                _corpus,
+                _report.CorpusSha256,
+                approval,
+                approvalCommit,
+                releaseTag,
+                approvedArtifacts,
+                cancellationToken)
+            .ConfigureAwait(false);
+        context.Detail(
+            FixtureBundle.DerivedBundleSha256DetailName,
+            derivedSha256);
+    }
+
+    private static async Task<FixtureApproval> ReadApprovalAsync(
+        string approvalPath,
+        CancellationToken cancellationToken)
+    {
+        byte[] content;
+        try
+        {
+            content = await File.ReadAllBytesAsync(
+                    approvalPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+            when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new FixtureBundleException(
+                QualificationFailureCodes.ApprovalInvalid,
+                $"The approval file could not be read: {exception.Message}");
+        }
+
+        return FixtureApproval.Parse(content);
+    }
+
+    // Fetches each approved artifact once, live, from its corpus URI.
+    private async Task<Dictionary<string, DownloadedArtifact>>
+        FetchApprovedArtifactsAsync(
+            FixtureApproval approval,
+            CancellationToken cancellationToken)
+    {
+        Dictionary<string, DownloadedArtifact> fetched =
+            new(StringComparer.Ordinal);
+        List<string> unavailable = [];
+        using (ArtifactDownloader downloader = new(
+            _downloadRoot,
+            _arguments.HttpTimeout,
+            _acquisitionHandler))
+        {
+            foreach (FixtureApprovalReplacement replacement in
+                approval.Replacements.OrderBy(
+                    replacement => replacement.Artifact,
+                    StringComparer.Ordinal))
+            {
+                ImmutableArtifactDefinition definition =
+                    _corpus.GetImmutable(replacement.Artifact);
+                DownloadedArtifact? artifact =
+                    await FetchApprovedArtifactAsync(
+                            downloader,
+                            definition,
+                            replacement.ApprovedSha256,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                if (artifact is not null)
+                {
+                    fetched[definition.Id] = artifact;
+                    continue;
+                }
+
+                QualificationFailure? failure =
+                    _artifactResults[definition.Id].Failure;
+                unavailable.Add(
+                    failure?.Code
+                        == QualificationFailureCodes.ApprovedBytesUnavailable
+                        ? failure.Message
+                        : $"upstream no longer serves the approved bytes for {definition.Id}: {failure?.Message ?? "no failure was recorded"}");
+            }
+        }
+
+        if (unavailable.Count > 0)
+        {
+            throw new FixtureBundleException(
+                QualificationFailureCodes.ApprovedBytesUnavailable,
+                string.Join("; ", unavailable));
+        }
+
+        return fetched;
+    }
+
+    private async Task<DownloadedArtifact?> FetchApprovedArtifactAsync(
+        ArtifactDownloader downloader,
+        ImmutableArtifactDefinition definition,
+        string approvedSha256,
+        CancellationToken cancellationToken)
+    {
+        QualificationArtifactResult result = new()
+        {
+            Kind = FixtureBundle.ImmutableKind,
+            Id = definition.Id,
+            SourceUri = definition.Uri,
+            ExpectedSha256 = approvedSha256,
+            Success = false
+        };
+        _artifactResults[definition.Id] = result;
+        try
+        {
+            DownloadedArtifact artifact =
+                await downloader.DownloadAsync(
+                        definition.Id,
+                        new Uri(definition.Uri),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            bool hashMatch = string.Equals(
+                approvedSha256,
+                artifact.ActualSha256,
+                StringComparison.Ordinal);
+            RecordDownload(result, artifact, hashMatch);
+            if (hashMatch)
+                return artifact;
+
+            result.Failure = new QualificationFailure
+            {
+                Code = QualificationFailureCodes.ApprovedBytesUnavailable,
+                ExceptionType = nameof(FixtureBundleException),
+                Message =
+                    $"upstream no longer serves the approved bytes for {definition.Id}: observed {artifact.ActualSha256}"
+            };
+        }
+        catch (Exception exception)
+        {
+            result.Failure = CreateFailure(exception);
+        }
+
+        return null;
+    }
+
     private async Task<VerifiedFixtureBundle> VerifyBundleAsync(
         QualificationCaseContext context,
         string bundlePath,
         string bundleSha256,
+        string? releaseTag,
         CancellationToken cancellationToken)
     {
         VerifiedFixtureBundle bundle = await FixtureBundleVerifier
@@ -330,6 +581,7 @@ internal sealed class QualificationRunner
                 bundleSha256,
                 _corpus,
                 _report.CorpusSha256,
+                releaseTag,
                 cancellationToken)
             .ConfigureAwait(false);
         context.Detail(
@@ -338,9 +590,25 @@ internal sealed class QualificationRunner
         context.Detail(
             FixtureBundle.CorpusSha256DetailName,
             bundle.Manifest.CorpusSha256);
+        IReadOnlyList<FixtureBundleApproval> approvals = bundle.Approvals;
+        if (approvals.Count == 0)
+        {
+            context.Detail(
+                FixtureBundle.ApprovalsDetailName,
+                FixtureBundle.NoApprovals);
+            return bundle;
+        }
+
         context.Detail(
             FixtureBundle.ApprovalsDetailName,
-            FixtureBundle.NoApprovals);
+            approvals.Count);
+        foreach (FixtureBundleApproval approval in approvals)
+        {
+            context.Detail(
+                FixtureBundle.GetApprovalDetailName(approval.Artifact),
+                FixtureBundle.DescribeApproval(approval));
+        }
+
         return bundle;
     }
 
@@ -559,18 +827,7 @@ internal sealed class QualificationRunner
                     expectedSha256,
                     artifact.ActualSha256,
                     StringComparison.Ordinal);
-            result.FinalUri = artifact.FinalUri?.AbsoluteUri;
-            result.ActualSha256 = artifact.ActualSha256;
-            result.HashMatch = hashMatch;
-            result.CompressedBytes = artifact.CompressedBytes;
-            result.ExpandedBytes = artifact.Metrics.ExpandedBytes;
-            result.LargestEntryBytes =
-                artifact.Metrics.LargestEntryBytes;
-            result.EntryCount = artifact.Metrics.EntryCount;
-            result.PublicationUtc = artifact.PublicationDate?
-                .ToUniversalTime()
-                .ToString("O");
-            result.Success = hashMatch is not false;
+            RecordDownload(result, artifact, hashMatch);
             if (result.Success)
             {
                 _artifacts[id] = artifact;
@@ -592,6 +849,25 @@ internal sealed class QualificationRunner
         {
             result.Failure = CreateFailure(exception);
         }
+    }
+
+    private static void RecordDownload(
+        QualificationArtifactResult result,
+        DownloadedArtifact artifact,
+        bool? hashMatch)
+    {
+        result.FinalUri = artifact.FinalUri?.AbsoluteUri;
+        result.ActualSha256 = artifact.ActualSha256;
+        result.HashMatch = hashMatch;
+        result.CompressedBytes = artifact.CompressedBytes;
+        result.ExpandedBytes = artifact.Metrics.ExpandedBytes;
+        result.LargestEntryBytes =
+            artifact.Metrics.LargestEntryBytes;
+        result.EntryCount = artifact.Metrics.EntryCount;
+        result.PublicationUtc = artifact.PublicationDate?
+            .ToUniversalTime()
+            .ToString("O");
+        result.Success = hashMatch is not false;
     }
 
     private async Task RunCaseAsync(

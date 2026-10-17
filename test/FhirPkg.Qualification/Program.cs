@@ -57,6 +57,8 @@ internal static class Program
                 arguments.ProcessHostPath,
                 arguments.FreezeBundlePath,
                 arguments.BundlePath,
+                arguments.DeriveBundlePath,
+                arguments.ApprovalPath,
                 Environment.CurrentDirectory,
                 AppContext.BaseDirectory
             ]);
@@ -92,17 +94,22 @@ internal static class Program
                     ? await runner.FreezeAsync(
                             cancellationSource.Token)
                         .ConfigureAwait(false)
-                    : arguments.BundlePath is string bundlePath
-                        ? await runner.RunBundleAsync(
-                                bundlePath,
-                                arguments.BundleSha256
-                                    ?? throw new QualificationInvariantException(
-                                        "Bundle mode requires the expected bundle SHA-256."),
+                    : arguments.DeriveBundlePath is not null
+                        ? await runner.DeriveAsync(
                                 cancellationSource.Token)
                             .ConfigureAwait(false)
-                        : await runner.RunAsync(
-                                cancellationSource.Token)
-                            .ConfigureAwait(false);
+                        : arguments.BundlePath is string bundlePath
+                            ? await runner.RunBundleAsync(
+                                    bundlePath,
+                                    arguments.BundleSha256
+                                        ?? throw new QualificationInvariantException(
+                                            "Bundle mode requires the expected bundle SHA-256."),
+                                    arguments.ReleaseTag,
+                                    cancellationSource.Token)
+                                .ConfigureAwait(false)
+                            : await runner.RunAsync(
+                                    cancellationSource.Token)
+                                .ConfigureAwait(false);
         }
         catch (Exception exception)
         {

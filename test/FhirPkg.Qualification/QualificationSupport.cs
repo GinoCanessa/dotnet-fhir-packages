@@ -40,6 +40,11 @@ internal static class QualificationFailureCodes
     internal const string UnroutedFixtureRequest =
         "UnroutedFixtureRequest";
 
+    internal const string ApprovalInvalid = "ApprovalInvalid";
+
+    internal const string ApprovedBytesUnavailable =
+        "ApprovedBytesUnavailable";
+
     internal static string? Classify(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);

@@ -46,6 +46,10 @@
       Link="ReleaseContracts\nuget-generator.yaml"
       CopyToOutputDirectory="PreserveNewest" />
     <None
+      Include="..\..\docs\releases\approvals\*.json"
+      Link="ReleaseContracts\approvals\%(Filename)%(Extension)"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
       Include="..\..\test\FhirPkg.Qualification\FhirPkg.Qualification.csproj"
       Link="ReleaseContracts\FhirPkg.Qualification.csproj"
       CopyToOutputDirectory="PreserveNewest" />

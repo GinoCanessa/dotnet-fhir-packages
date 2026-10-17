@@ -13,10 +13,13 @@ namespace FhirPkg.Tests;
 public sealed class QualificationDiagnosticsTests : IDisposable
 {
     private const string SummaryTitle = "qualify-ubuntu-latest-net10.0";
+    private const string DeriveTitle = "recover-derive";
     private const string ReportFileName = "qualification-report.json";
     private const string UsCoreId = "hl7.fhir.us.core#6.0.0";
     private const string UsCoreUnavailable =
         "Required artifact 'hl7.fhir.us.core#6.0.0' was unavailable.";
+    private const string ApprovalCommit =
+        "0123456789abcdef0123456789abcdef01234567";
 
     private static readonly string s_pinnedSha256 = new('a', 64);
     private static readonly string s_observedSha256 = new('b', 64);
@@ -454,6 +457,184 @@ public sealed class QualificationDiagnosticsTests : IDisposable
             + $"Qualification inputs: bundle sha256:{bundleSha256} \u00b7 corpus {corpusSha256} \u00b7 approvals: none\n"
             + "\n"
             + "2 of 2 cases passed \u00b7 full detail: qualification-report.json\n");
+    }
+
+    [Fact]
+    public void Render_PassingBundleVerifyWithApprovals_ListsEachApprovalInTheInputs()
+    {
+        string bundleSha256 = new('f', 64);
+        string corpusSha256 = new('c', 64);
+        string ipsPinned = new('1', 64);
+        string ipsApproved = new('2', 64);
+        QualificationReport report = CreateReport(
+            [],
+            [
+                CreateCase(
+                    "bundle-verify",
+                    [],
+                    [
+                        CreateDetail(
+                            $"approval.{UsCoreId}",
+                            $"{s_pinnedSha256} \u2192 {s_observedSha256} by GinoCanessa at {ApprovalCommit}"),
+                        CreateDetail(
+                            "approval.hl7.fhir.uv.ips#1.1.0",
+                            $"{ipsPinned} \u2192 {ipsApproved} by Release Manager at {ApprovalCommit}"),
+                        CreateDetail("approvals", "2"),
+                        CreateDetail("bundleSha256", bundleSha256),
+                        CreateDetail("corpusSha256", corpusSha256)
+                    ]),
+                CreateCase("01-immutable-expected-stream", [])
+            ]);
+
+        QualificationSummaryContent content =
+            QualificationSummaryWriter.Render(
+                report,
+                SummaryTitle,
+                ReportFileName);
+
+        content.Annotations.ShouldBeEmpty();
+        content.Markdown.ShouldBe(
+            "### qualify-ubuntu-latest-net10.0 \u2014 PASSED\n"
+            + "\n"
+            + $"Qualification inputs: bundle sha256:{bundleSha256} \u00b7 corpus {corpusSha256} \u00b7 approvals: "
+            + $"{UsCoreId} {s_pinnedSha256} \u2192 {s_observedSha256}, "
+            + $"hl7.fhir.uv.ips#1.1.0 {ipsPinned} \u2192 {ipsApproved}\n"
+            + "\n"
+            + "2 of 2 cases passed \u00b7 full detail: qualification-report.json\n");
+    }
+
+    [Fact]
+    public void Render_DeriveReport_Succeeded_RendersTheDeriveTableAndFooter()
+    {
+        string baseSha256 = new('d', 64);
+        string derivedSha256 = new('e', 64);
+        QualificationReport report = CreateReport(
+            [
+                CreateArtifact(
+                    "immutable",
+                    UsCoreId,
+                    s_observedSha256,
+                    s_observedSha256,
+                    success: true)
+            ],
+            [
+                CreateCase(
+                    "bundle-derive",
+                    [],
+                    [
+                        CreateDetail(
+                            $"approval.{UsCoreId}",
+                            $"{s_pinnedSha256} \u2192 {s_observedSha256} by GinoCanessa at {ApprovalCommit}"),
+                        CreateDetail("baseBundleSha256", baseSha256),
+                        CreateDetail("derivedBundleSha256", derivedSha256)
+                    ])
+            ]);
+
+        QualificationSummaryContent content =
+            QualificationSummaryWriter.Render(
+                report,
+                DeriveTitle,
+                ReportFileName);
+
+        content.Annotations.ShouldBeEmpty();
+        content.Markdown.ShouldBe(
+            "### recover-derive \u2014 PASSED\n"
+            + "\n"
+            + "| Artifact | Pinned SHA-256 | Approved SHA-256 | Observed SHA-256 | Result |\n"
+            + "|-|-|-|-|-|\n"
+            + $"| {UsCoreId} | {s_pinnedSha256} | {s_observedSha256} | {s_observedSha256} | verified |\n"
+            + "\n"
+            + $"derived bundle sha256:{derivedSha256} from base sha256:{baseSha256}\n");
+    }
+
+    [Fact]
+    public void Render_DeriveReport_ApprovedBytesUnavailable_ShowsTheRowAndNoBundle()
+    {
+        string baseSha256 = new('d', 64);
+        string servedSha256 = new('9', 64);
+        string message =
+            $"upstream no longer serves the approved bytes for {UsCoreId}: observed {servedSha256}";
+        QualificationReport report = CreateReport(
+            [
+                CreateArtifact(
+                    "immutable",
+                    UsCoreId,
+                    s_observedSha256,
+                    servedSha256,
+                    success: false,
+                    CreateFailure(
+                        QualificationFailureCodes.ApprovedBytesUnavailable,
+                        message,
+                        nameof(FixtureBundleException)))
+            ],
+            [
+                CreateCase(
+                    "bundle-derive",
+                    [
+                        CreateFailure(
+                            QualificationFailureCodes.ApprovedBytesUnavailable,
+                            message,
+                            nameof(FixtureBundleException))
+                    ],
+                    [
+                        CreateDetail(
+                            $"approval.{UsCoreId}",
+                            $"{s_pinnedSha256} \u2192 {s_observedSha256} by GinoCanessa at {ApprovalCommit}"),
+                        CreateDetail("baseBundleSha256", baseSha256)
+                    ])
+            ]);
+
+        QualificationSummaryContent content =
+            QualificationSummaryWriter.Render(
+                report,
+                DeriveTitle,
+                ReportFileName);
+
+        content.Markdown.ShouldBe(
+            "### recover-derive \u2014 FAILED\n"
+            + "\n"
+            + "| Artifact | Pinned SHA-256 | Approved SHA-256 | Observed SHA-256 | Result |\n"
+            + "|-|-|-|-|-|\n"
+            + $"| {UsCoreId} | {s_pinnedSha256} | {s_observedSha256} | {servedSha256} | **unavailable** |\n"
+            + "\n"
+            + "no bundle derived\n");
+        content.Annotations.ToArray().ShouldBe(
+            [$"::error title=Approved bytes unavailable {UsCoreId}::{message}"]);
+    }
+
+    [Fact]
+    public void Render_DeriveReport_RefusedApproval_ShowsTheFailureWithoutATable()
+    {
+        const string message =
+            "The approval is for release v2026.1016.1500, not release v2026.1016.1417.";
+        QualificationReport report = CreateReport(
+            [],
+            [
+                CreateCase(
+                    "bundle-derive",
+                    [
+                        CreateFailure(
+                            QualificationFailureCodes.ApprovalInvalid,
+                            message,
+                            nameof(FixtureBundleException))
+                    ],
+                    [CreateDetail("baseBundleSha256", new string('d', 64))])
+            ]);
+
+        QualificationSummaryContent content =
+            QualificationSummaryWriter.Render(
+                report,
+                DeriveTitle,
+                ReportFileName);
+
+        content.Markdown.ShouldBe(
+            "### recover-derive \u2014 FAILED\n"
+            + "\n"
+            + $"bundle-derive failed: {message}\n"
+            + "\n"
+            + "no bundle derived\n");
+        content.Annotations.ToArray().ShouldBe(
+            [$"::error title=Qualification case bundle-derive failed::{message}"]);
     }
 
     [Fact]

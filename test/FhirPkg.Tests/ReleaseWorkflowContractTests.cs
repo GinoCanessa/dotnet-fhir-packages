@@ -358,6 +358,19 @@ public class ReleaseWorkflowContractTests
         buildWorkflow.ShouldNotContain("fixture-drift");
     }
 
+    [Fact]
+    public void BuildWorkflow_ValidatesApprovalFilesWhenTheyChange()
+    {
+        string buildWorkflow = ReadContract("build-and-test.yaml");
+        string testProject = ReadTestProject();
+
+        CountOccurrences(
+            buildWorkflow,
+            "'docs/releases/approvals/**'").ShouldBe(2);
+        testProject.ShouldContain(
+            "Include=\"..\\..\\docs\\releases\\approvals\\*.json\"");
+    }
+
     [Theory]
     [InlineData("LF", "\n")]
     [InlineData("CRLF", "\r\n")]
