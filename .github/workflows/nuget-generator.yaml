@@ -361,6 +361,35 @@ jobs:
             throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
           }
 
+      - name: Write candidate identity summary
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
+          CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
+          ARTIFACT_DIGEST: ${{ needs.pack.outputs.artifact_digest }}
+          CANDIDATE_RUN_ID: ${{ github.run_id }}
+        run: |
+          $summary = @(
+            '### Candidate',
+            '',
+            "- Artifact: fhir-pkg-$env:RELEASE_VERSION-candidate",
+            "- Workflow artifact digest: $env:ARTIFACT_DIGEST",
+            "- fhir-pkg-lib SHA-256: $env:SDK_PACKAGE_SHA256",
+            "- fhir-pkg-cli SHA-256: $env:CLI_PACKAGE_SHA256",
+            "- Release commit: $env:RELEASE_COMMIT",
+            "- Candidate run id: $env:CANDIDATE_RUN_ID"
+          )
+          try
+          {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+          }
+          catch
+          {
+            Write-Warning "The candidate identity summary was not written: $($_.Exception.Message)"
+          }
+
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
@@ -531,6 +560,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARGET_FRAMEWORK: ${{ matrix.framework }}
+          QUALIFY_TITLE: qualify-${{ matrix.os }}-${{ matrix.framework }}
         run: |
           $cache = Join-Path '${{ runner.temp }}' 'qualification-cache'
           $report = Join-Path '${{ runner.temp }}' 'qualification-report.json'
@@ -545,7 +575,29 @@ jobs:
             -- `
             --cache $cache `
             --output $report `
-            --corpus test/FhirPkg.Qualification/qualification-corpus.json
+            --corpus test/FhirPkg.Qualification/qualification-corpus.json `
+            --summary $env:GITHUB_STEP_SUMMARY `
+            --summary-title $env:QUALIFY_TITLE
+
+      - name: Report missing qualification report
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $report = Join-Path '${{ runner.temp }}' 'qualification-report.json'
+          if (!(Test-Path -LiteralPath $report -PathType Leaf))
+          {
+            $message =
+              'The qualification harness produced no report; the failing step above (restore, tool install, or smoke test) has the cause.'
+            Write-Output "::error title=No qualification report::$message"
+            try
+            {
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $message
+            }
+            catch
+            {
+              Write-Warning "The missing-report summary was not written: $($_.Exception.Message)"
+            }
+          }
 
       - name: Record qualification candidate evidence
         shell: pwsh

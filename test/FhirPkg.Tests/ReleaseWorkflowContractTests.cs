@@ -282,6 +282,32 @@ public class ReleaseWorkflowContractTests
             "Test-QualificationRestore.ps1").ShouldBe(1);
     }
 
+    [Fact]
+    public void ReleaseWorkflow_QualificationAlwaysWritesSummaries()
+    {
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string qualificationSection = GetSection(
+            releaseWorkflow,
+            "  package-qualification:\n",
+            "  publish:\n");
+        string missingReportSection = GetSection(
+            qualificationSection,
+            "      - name: Report missing qualification report\n",
+            "      - name: Record qualification candidate evidence\n");
+        int identitySummaryIndex = qualificationSection.IndexOf(
+            "Write candidate identity summary",
+            StringComparison.Ordinal);
+
+        qualificationSection.ShouldContain(
+            "--summary $env:GITHUB_STEP_SUMMARY");
+        missingReportSection.ShouldContain("if: ${{ always() }}");
+        identitySummaryIndex.ShouldBeGreaterThanOrEqualTo(0);
+        identitySummaryIndex.ShouldBeLessThan(
+            qualificationSection.IndexOf(
+                "Qualify exact local package",
+                StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("LF", "\n")]
     [InlineData("CRLF", "\r\n")]
