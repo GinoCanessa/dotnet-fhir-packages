@@ -32,7 +32,7 @@ public class ReleaseWorkflowContractTests
         string packSection = GetSection(
             releaseWorkflow,
             "  pack:\n",
-            "  package-qualification:\n");
+            "  retrieve:\n");
         string qualificationSection = GetSection(
             releaseWorkflow,
             "  package-qualification:\n",
@@ -133,16 +133,16 @@ public class ReleaseWorkflowContractTests
         releaseWorkflow.ShouldContain(ReleaseToolProject);
         CountOccurrences(
             releaseWorkflow,
-            "dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(4);
+            "dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(5);
         CountOccurrences(
             releaseWorkflow,
-            "dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(4);
+            "dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(5);
         CountOccurrences(
             releaseWorkflow,
-            "--project tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(10);
+            "--project tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(15);
         CountOccurrences(releaseWorkflow, "validate-version").ShouldBe(0);
         CountOccurrences(releaseWorkflow, "validate-inputs").ShouldBe(2);
-        CountOccurrences(releaseWorkflow, "validate-candidate").ShouldBe(3);
+        CountOccurrences(releaseWorkflow, "validate-candidate").ShouldBe(4);
         CountOccurrences(releaseWorkflow, "inspect-publication").ShouldBe(1);
         CountOccurrences(
             releaseWorkflow,
@@ -152,10 +152,10 @@ public class ReleaseWorkflowContractTests
             "--github-ref \"${{ github.ref }}\"").ShouldBe(2);
         CountOccurrences(
             releaseWorkflow,
-            "--allow-published-version").ShouldBe(1);
+            "--allow-published-version").ShouldBe(2);
         CountOccurrences(
             releaseWorkflow,
-            "--no-build\n          --no-restore\n          --").ShouldBe(10);
+            "--no-build\n          --no-restore\n          --").ShouldBe(15);
         releaseWorkflow.ShouldNotContain("Test-Release");
         releaseWorkflow.ShouldNotContain("Test-PublishedRelease");
         releaseWorkflow.ShouldNotContain("skip-signature-verification");
@@ -323,7 +323,7 @@ public class ReleaseWorkflowContractTests
         string packSection = GetSection(
             releaseWorkflow,
             "  pack:\n",
-            "  package-qualification:\n");
+            "  retrieve:\n");
         string qualificationSection = GetSection(
             releaseWorkflow,
             "  package-qualification:\n",
@@ -334,10 +334,10 @@ public class ReleaseWorkflowContractTests
         CountOccurrences(
             releaseWorkflow,
             "locate-fixture-bundle").ShouldBe(1);
-        CountOccurrences(releaseWorkflow, "fetch-artifact").ShouldBe(1);
+        CountOccurrences(releaseWorkflow, "fetch-artifact").ShouldBe(3);
         CountOccurrences(
             releaseWorkflow,
-            "--repository \"${{ github.repository }}\"").ShouldBe(2);
+            "--repository \"${{ github.repository }}\"").ShouldBe(6);
 
         int validateInputsIndex = validateSection.IndexOf(
             "validate-inputs",
@@ -380,7 +380,7 @@ public class ReleaseWorkflowContractTests
             "ALL_PROXY: http://127.0.0.1:1");
         qualificationSection.ShouldContain("NO_PROXY: ''");
         qualificationSection.ShouldContain(
-            "run-id: ${{ needs.pack.outputs.candidate_run_id }}");
+            "run-id: ${{ needs.release-identity.outputs.candidate_run_id }}");
         int inputsDownloadIndex = qualificationSection.IndexOf(
             "Download frozen qualification inputs",
             StringComparison.Ordinal);
@@ -391,6 +391,127 @@ public class ReleaseWorkflowContractTests
                 StringComparison.Ordinal));
         qualificationSection.ShouldNotContain("--freeze-bundle");
         qualificationSection.ShouldNotContain("--derive-bundle");
+    }
+
+    [Fact]
+    public void ReleaseWorkflow_RecoveryReusesQualificationAndPublication()
+    {
+        const string dryRunExpression =
+            "steps.inputs.outputs.validation_only == 'true' && '--dry-run'";
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string dispatchSection = GetSection(
+            releaseWorkflow,
+            "  workflow_dispatch:\n",
+            "\npermissions:\n");
+        string validateSection = GetSection(
+            releaseWorkflow,
+            "  validate:\n",
+            "  source-ci:\n");
+        string sourceCiSection = GetSection(
+            releaseWorkflow,
+            "  source-ci:\n",
+            "  pack:\n");
+        string packSection = GetSection(
+            releaseWorkflow,
+            "  pack:\n",
+            "  retrieve:\n");
+        string retrieveSection = GetSection(
+            releaseWorkflow,
+            "  retrieve:\n",
+            "  release-identity:\n");
+        string identitySection = GetSection(
+            releaseWorkflow,
+            "  release-identity:\n",
+            "  package-qualification:\n");
+        string qualificationSection = GetSection(
+            releaseWorkflow,
+            "  package-qualification:\n",
+            "  publish:\n");
+        string publishSection = GetSection(
+            releaseWorkflow,
+            "  publish:\n",
+            null);
+        string publishCondition = GetSection(
+            publishSection,
+            "    if: >-\n",
+            "    runs-on: ubuntu-latest\n");
+
+        dispatchSection.ShouldContain("      recover_run_id:\n");
+        dispatchSection.ShouldContain("      approval_commit:\n");
+        validateSection.ShouldContain(
+            "approval_commit requires recover_run_id.");
+        validateSection.ShouldContain(
+            "Manual workflow dispatch is validation-only unless recover_run_id names the release run being finished.");
+        releaseWorkflow.ShouldContain(
+            "concurrency:\n  group: nuget-release-${{ github.event.release.tag_name || inputs.tag }}\n  cancel-in-progress: false\n");
+
+        sourceCiSection.ShouldContain(
+            "if: ${{ needs.validate.outputs.mode != 'recovery' }}");
+        packSection.ShouldContain(
+            "if: ${{ needs.validate.outputs.mode != 'recovery' }}");
+        retrieveSection.ShouldContain(
+            "if: ${{ needs.validate.outputs.mode == 'recovery' }}");
+        qualificationSection.ShouldContain(
+            "if: ${{ !cancelled() && needs.release-identity.result == 'success' }}");
+        CountOccurrences(
+            releaseWorkflow,
+            "needs.pack.outputs.").ShouldBe(
+                CountOccurrences(identitySection, "needs.pack.outputs."));
+
+        retrieveSection.ShouldNotContain("dotnet pack");
+        retrieveSection.ShouldNotContain("dotnet build src/");
+        retrieveSection.ShouldNotContain(
+            "fhir-pkg-${{ needs.validate.outputs.version }}-candidate");
+        retrieveSection.ShouldNotContain("environment:");
+        retrieveSection.ShouldNotContain("secrets.");
+        retrieveSection.ShouldContain("--derive-bundle");
+        CountOccurrences(retrieveSection, "fetch-artifact").ShouldBe(2);
+        int secondFetchArtifactIndex = retrieveSection.IndexOf(
+            "fetch-artifact",
+            retrieveSection.IndexOf(
+                "fetch-artifact",
+                StringComparison.Ordinal) + 1,
+            StringComparison.Ordinal);
+        secondFetchArtifactIndex.ShouldBeGreaterThanOrEqualTo(0);
+        secondFetchArtifactIndex.ShouldBeLessThan(
+            retrieveSection.IndexOf(
+                "Upload qualification inputs",
+                StringComparison.Ordinal));
+
+        identitySection.ShouldContain("needs: [validate, pack, retrieve]");
+        identitySection.ShouldContain("!cancelled()");
+        identitySection.ShouldNotContain("actions/checkout");
+        identitySection.ShouldNotContain("secrets.");
+
+        publishCondition.ShouldContain("!cancelled()");
+        publishCondition.ShouldContain(
+            "needs.validate.outputs.validation_only == 'false'");
+        publishCondition.ShouldContain(
+            "github.event.action == 'published'");
+        publishCondition.ShouldContain(
+            "needs.validate.outputs.mode == 'recovery'");
+        publishCondition.ShouldContain(
+            "needs.validate.outputs.release_published == 'true'");
+        publishCondition.ShouldContain(
+            "needs.package-qualification.result == 'success'");
+
+        int releasePublishedIndex = publishSection.IndexOf(
+            "verify-release-published",
+            StringComparison.Ordinal);
+        releasePublishedIndex.ShouldBeGreaterThanOrEqualTo(0);
+        releasePublishedIndex.ShouldBeLessThan(
+            publishSection.IndexOf(
+                "secrets.GINOC_NUGET",
+                StringComparison.Ordinal));
+
+        validateSection.ShouldContain("verify-recovery");
+        CountOccurrences(releaseWorkflow, "verify-recovery").ShouldBe(1);
+        CountOccurrences(
+            releaseWorkflow,
+            "verify-release-published").ShouldBe(1);
+        CountOccurrences(validateSection, dryRunExpression).ShouldBe(1);
+        CountOccurrences(releaseWorkflow, "--dry-run").ShouldBe(
+            CountOccurrences(releaseWorkflow, dryRunExpression));
     }
 
     [Fact]
