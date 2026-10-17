@@ -308,6 +308,56 @@ public class ReleaseWorkflowContractTests
                 StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void FixtureDriftWorkflow_FreezesOnlyVerifiedBytesAndNeverGates()
+    {
+        string driftWorkflow = ReadContract("fixture-drift.yaml");
+        string driftSection = GetSection(
+            driftWorkflow,
+            "  fixture-drift:\n",
+            "  live-registry-interop:\n");
+        string liveSection = GetSection(
+            driftWorkflow,
+            "  live-registry-interop:\n",
+            null);
+
+        driftWorkflow.ShouldContain("schedule:");
+        driftWorkflow.ShouldContain("workflow_dispatch:");
+        driftWorkflow.ShouldNotContain("pull_request");
+        driftWorkflow.ShouldNotContain("  push:");
+        driftWorkflow.ShouldNotContain("\n  release:");
+        driftWorkflow.ShouldNotContain("workflow_run");
+        driftWorkflow.ShouldContain("permissions:\n  contents: read\n");
+        driftWorkflow.ShouldNotContain("environment:");
+        driftWorkflow.ShouldNotContain("secrets.");
+        driftWorkflow.ShouldNotContain("GINOC_NUGET");
+        driftWorkflow.ShouldContain("dotnet-version: 10.0.302");
+
+        driftSection.ShouldContain("--freeze-bundle");
+        driftSection.ShouldContain(
+            "name: fixture-bundle-v1-${{ steps.key.outputs.corpus_blob }}");
+        driftSection.ShouldContain("retention-days: 90");
+        driftSection.ShouldContain("if: ${{ success() }}");
+        driftSection.ShouldContain(
+            "HEAD:test/FhirPkg.Qualification/qualification-corpus.json");
+
+        liveSection.ShouldContain("continue-on-error: true");
+        liveSection.ShouldNotContain("--freeze-bundle");
+        liveSection.ShouldNotContain("--bundle");
+        liveSection.ShouldNotContain("fixture-bundle-v1-");
+    }
+
+    [Fact]
+    public void BuildWorkflow_SourceCiStaysOffline()
+    {
+        string buildWorkflow = ReadContract("build-and-test.yaml");
+
+        buildWorkflow.ShouldContain("--validate-only true");
+        buildWorkflow.ShouldNotContain("--bundle");
+        buildWorkflow.ShouldNotContain("--freeze-bundle");
+        buildWorkflow.ShouldNotContain("fixture-drift");
+    }
+
     [Theory]
     [InlineData("LF", "\n")]
     [InlineData("CRLF", "\r\n")]
