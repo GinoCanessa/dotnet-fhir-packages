@@ -541,7 +541,10 @@ the approval's commit author. Only `validation_only=false` can publish; any
 other value makes the dispatch a [dry run](#recovery-dry-run-and-rehearsal).
 `Resolve release inputs` refuses a malformed `recover_run_id` or
 `approval_commit`, or an `approval_commit` without `recover_run_id`, before
-anything else runs.
+anything else runs; in every run, release and validation included, it also
+refuses a `version` that is not three numeric components without leading
+zeros and a `tag` other than `v<version>`, and no later script receives either
+value except through an environment variable.
 
 `validate-release` then authorizes the recovery with `verify-recovery`, from
 GitHub's records and git rather than from values typed by the operator:

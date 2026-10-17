@@ -1,5 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Text.RegularExpressions;
 using Shouldly;
 using Xunit;
 
@@ -515,6 +516,198 @@ public class ReleaseWorkflowContractTests
     }
 
     [Fact]
+    public void ReleaseWorkflow_NoDispatchInputExpandedInRunScripts()
+    {
+        const string dispatchInputExpansionPattern =
+            @"\$\{\{[^}]*?(?:(?:steps\.inputs|needs\.validate)\.outputs\.(?:version|tag)\b|github\.event\.inputs\.|github\.event\.release\.tag_name\b|(?<![\w.])inputs\.)";
+        const string releaseTagEntry =
+            "RELEASE_TAG: ${{ needs.validate.outputs.tag }}";
+        const string inputTagEntry = "INPUT_TAG: ${{ inputs.tag }}";
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        List<string> runBlocks = GetRunBlocks(releaseWorkflow);
+        Regex dispatchInputExpansion = new(
+            dispatchInputExpansionPattern,
+            RegexOptions.IgnoreCase);
+        string matrixCandidateSection = GetSection(
+            releaseWorkflow,
+            "      - name: Verify downloaded release candidate\n",
+            "      - name: Create isolated qualification package source\n");
+
+        runBlocks.Count.ShouldBe(
+            Regex.Matches(
+                releaseWorkflow,
+                "^ *(?:- +)?run:",
+                RegexOptions.Multiline).Count);
+
+        dispatchInputExpansion.IsMatch(releaseTagEntry).ShouldBeTrue();
+        dispatchInputExpansion.IsMatch(inputTagEntry).ShouldBeTrue();
+        releaseWorkflow.ShouldContain(releaseTagEntry);
+        releaseWorkflow.ShouldContain(inputTagEntry);
+
+        List<string> recoveryBlocks =
+        [
+            .. runBlocks.Where(
+                static block => block.Contains(
+                    "verify-recovery",
+                    StringComparison.Ordinal)),
+        ];
+        recoveryBlocks.Count.ShouldBe(1);
+        recoveryBlocks[0].ShouldContain("--version \"$RELEASE_VERSION\"");
+        recoveryBlocks[0].ShouldContain("--tag \"$RELEASE_TAG\"");
+
+        matrixCandidateSection.ShouldContain("shell: pwsh");
+
+        List<string> expandingBlocks =
+        [
+            .. runBlocks.Where(
+                block => dispatchInputExpansion.IsMatch(block)),
+        ];
+        expandingBlocks.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(
+        "Validate release inputs, tag, and main ancestry",
+        "RELEASE_VERSION: ${{ steps.inputs.outputs.version }}",
+        "--version \"$RELEASE_VERSION\"")]
+    [InlineData(
+        "Validate release inputs, tag, and main ancestry",
+        "RELEASE_TAG: ${{ steps.inputs.outputs.tag }}",
+        "--tag \"$RELEASE_TAG\"")]
+    [InlineData(
+        "Locate frozen fixture bundle",
+        "RELEASE_TAG: ${{ steps.inputs.outputs.tag }}",
+        "--tag \"$RELEASE_TAG\"")]
+    [InlineData(
+        "Authorize recovery",
+        "RELEASE_VERSION: ${{ steps.inputs.outputs.version }}",
+        "--version \"$RELEASE_VERSION\"")]
+    [InlineData(
+        "Authorize recovery",
+        "RELEASE_TAG: ${{ steps.inputs.outputs.tag }}",
+        "--tag \"$RELEASE_TAG\"")]
+    [InlineData(
+        "Verify release candidate",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--version \"$RELEASE_VERSION\"")]
+    [InlineData(
+        "Verify release candidate",
+        "RELEASE_TAG: ${{ needs.validate.outputs.tag }}",
+        "--tag \"$RELEASE_TAG\"")]
+    [InlineData(
+        "Verify original release candidate",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--version \"$RELEASE_VERSION\"")]
+    [InlineData(
+        "Verify original release candidate",
+        "RELEASE_TAG: ${{ needs.validate.outputs.tag }}",
+        "--tag \"$RELEASE_TAG\"")]
+    [InlineData(
+        "Verify downloaded release candidate",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--version \"$env:RELEASE_VERSION\"")]
+    [InlineData(
+        "Verify downloaded release candidate",
+        "RELEASE_TAG: ${{ needs.validate.outputs.tag }}",
+        "--tag \"$env:RELEASE_TAG\"")]
+    [InlineData(
+        "Revalidate release tag and main ancestry",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--version \"$RELEASE_VERSION\"")]
+    [InlineData(
+        "Revalidate release tag and main ancestry",
+        "RELEASE_TAG: ${{ needs.validate.outputs.tag }}",
+        "--tag \"$RELEASE_TAG\"")]
+    [InlineData(
+        "Verify GitHub Release is published",
+        "RELEASE_TAG: ${{ needs.validate.outputs.tag }}",
+        "--tag \"$RELEASE_TAG\"")]
+    [InlineData(
+        "Revalidate qualified release candidate",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--version \"$RELEASE_VERSION\"")]
+    [InlineData(
+        "Revalidate qualified release candidate",
+        "RELEASE_TAG: ${{ needs.validate.outputs.tag }}",
+        "--tag \"$RELEASE_TAG\"")]
+    [InlineData(
+        "Reconcile existing NuGet publication state",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--version \"$RELEASE_VERSION\"")]
+    [InlineData(
+        "Verify published CLI primary matches candidate",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--published-package-uri \"https://api.nuget.org/v3-flatcontainer/fhir-pkg-cli/$RELEASE_VERSION/fhir-pkg-cli.$RELEASE_VERSION.nupkg\"")]
+    [InlineData(
+        "Verify published CLI primary matches candidate",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--version \"$RELEASE_VERSION\"")]
+    [InlineData(
+        "Verify published SDK primary matches candidate",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--published-package-uri \"https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/$RELEASE_VERSION/fhir-pkg-lib.$RELEASE_VERSION.nupkg\"")]
+    [InlineData(
+        "Verify published SDK primary matches candidate",
+        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
+        "--version \"$RELEASE_VERSION\"")]
+    public void ReleaseWorkflow_PassesVersionAndTagToScriptsThroughEnvironment(
+        string stepName,
+        string environmentEntry,
+        string argument)
+    {
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string stepSection = GetSection(
+            releaseWorkflow,
+            "      - name: " + stepName + "\n",
+            "\n\n");
+
+        stepSection.ShouldContain(environmentEntry);
+        stepSection.ShouldContain(argument);
+    }
+
+    [Fact]
+    public void ReleaseWorkflow_ValidatesVersionAndTagBeforeWritingOutputs()
+    {
+        const string versionCheck =
+            @"if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z')";
+        const string tagCheck =
+            "if (-not [string]::Equals($tag, \"v$version\", [StringComparison]::Ordinal))";
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string validateSection = GetSection(
+            releaseWorkflow,
+            "  validate:\n",
+            "  source-ci:\n");
+        string resolveInputsSection = GetSection(
+            validateSection,
+            "      - name: Resolve release inputs\n",
+            "      - uses: actions/setup-dotnet@v5\n");
+
+        CountOccurrences(resolveInputsSection, versionCheck).ShouldBe(1);
+        CountOccurrences(resolveInputsSection, tagCheck).ShouldBe(1);
+        resolveInputsSection.ShouldContain(@"'^[1-9][0-9]*\z'");
+        resolveInputsSection.ShouldContain(@"'^[0-9a-f]{40}\z'");
+        resolveInputsSection.ShouldNotContain("'^[1-9][0-9]*$'");
+        resolveInputsSection.ShouldNotContain("'^[0-9a-f]{40}$'");
+
+        int unsupportedEventIndex = resolveInputsSection.IndexOf(
+            "throw \"Unsupported release event",
+            StringComparison.Ordinal);
+        int versionCheckIndex = resolveInputsSection.IndexOf(
+            versionCheck,
+            StringComparison.Ordinal);
+        int tagCheckIndex = resolveInputsSection.IndexOf(
+            tagCheck,
+            StringComparison.Ordinal);
+        int firstOutputIndex = resolveInputsSection.IndexOf(
+            "Add-Content -Path $env:GITHUB_OUTPUT",
+            StringComparison.Ordinal);
+        unsupportedEventIndex.ShouldBeGreaterThanOrEqualTo(0);
+        versionCheckIndex.ShouldBeGreaterThan(unsupportedEventIndex);
+        tagCheckIndex.ShouldBeGreaterThan(versionCheckIndex);
+        firstOutputIndex.ShouldBeGreaterThan(tagCheckIndex);
+    }
+
+    [Fact]
     public void FixtureDriftWorkflow_FreezesOnlyVerifiedBytesAndNeverGates()
     {
         string driftWorkflow = ReadContract("fixture-drift.yaml");
@@ -654,6 +847,49 @@ public class ReleaseWorkflowContractTests
         }
 
         return value[startIndex..endIndex];
+    }
+
+    private static List<string> GetRunBlocks(string workflow)
+    {
+        Regex runKeyRegex = new("^(?<prefix> *(?:- +)?)run:(?<value>.*)$");
+        string[] lines = workflow.Split('\n');
+        List<string> runBlocks = [];
+        for (int lineIndex = 0; lineIndex < lines.Length; lineIndex++)
+        {
+            Match runKey = runKeyRegex.Match(lines[lineIndex]);
+            if (!runKey.Success)
+            {
+                continue;
+            }
+
+            string value = runKey.Groups["value"].Value.Trim();
+            if (!value.StartsWith('|') &&
+                !value.StartsWith('>'))
+            {
+                runBlocks.Add(value);
+                continue;
+            }
+
+            int keyIndent = runKey.Groups["prefix"].Length;
+            List<string> blockLines = [];
+            while (lineIndex + 1 < lines.Length)
+            {
+                string line = lines[lineIndex + 1];
+                int lineIndent = line.Length - line.TrimStart(' ').Length;
+                if (!string.IsNullOrWhiteSpace(line) &&
+                    lineIndent <= keyIndent)
+                {
+                    break;
+                }
+
+                blockLines.Add(line);
+                lineIndex++;
+            }
+
+            runBlocks.Add(string.Join("\n", blockLines));
+        }
+
+        return runBlocks;
     }
 
     private static int CountOccurrences(
