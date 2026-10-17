@@ -53,6 +53,7 @@ internal static class Program
                 arguments.OutputPath,
                 arguments.CorpusPath,
                 arguments.ProcessHostPath,
+                arguments.FreezeBundlePath,
                 Environment.CurrentDirectory,
                 AppContext.BaseDirectory
             ]);
@@ -84,9 +85,13 @@ internal static class Program
                 ? await runner.ValidateOnlyAsync(
                         cancellationSource.Token)
                     .ConfigureAwait(false)
-                : await runner.RunAsync(
-                        cancellationSource.Token)
-                    .ConfigureAwait(false);
+                : arguments.FreezeBundlePath is not null
+                    ? await runner.FreezeAsync(
+                            cancellationSource.Token)
+                        .ConfigureAwait(false)
+                    : await runner.RunAsync(
+                            cancellationSource.Token)
+                        .ConfigureAwait(false);
         }
         catch (Exception exception)
         {

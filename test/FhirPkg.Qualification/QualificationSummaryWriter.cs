@@ -46,6 +46,19 @@ internal static class QualificationSummaryWriter
                 annotations);
         }
 
+        QualificationCaseResult? freeze = report.Cases.FirstOrDefault(
+            result => string.Equals(
+                result.Id,
+                FixtureBundle.FreezeCaseId,
+                StringComparison.Ordinal));
+        if (freeze is not null)
+        {
+            AddDriftTable(markdown, annotations, report, freeze);
+            return new QualificationSummaryContent(
+                markdown.ToString(),
+                annotations);
+        }
+
         AddRejectedArtifacts(markdown, annotations, report);
         AddFailedCases(markdown, annotations, report);
         AddLine(
@@ -175,6 +188,120 @@ internal static class QualificationSummaryWriter
 
         AddLine(markdown);
     }
+
+    private static void AddDriftTable(
+        StringBuilder markdown,
+        List<string> annotations,
+        QualificationReport report,
+        QualificationCaseResult freeze)
+    {
+        AddLine(
+            markdown,
+            "| Artifact | Kind | Pinned SHA-256 | Observed SHA-256 | Upstream Last-Modified | Size | Entries | Result |");
+        AddLine(markdown, "|-|-|-|-|-|-|-|-|");
+        int pinned = 0;
+        int changed = 0;
+        foreach (QualificationArtifactResult artifact in report.Artifacts)
+        {
+            string expected = artifact.ExpectedSha256 ?? MissingValue;
+            string actual = artifact.ActualSha256 ?? MissingValue;
+            string lastModified = artifact.PublicationUtc ?? MissingValue;
+            AddLine(
+                markdown,
+                $"| {EscapeMarkdown(artifact.Id)} | {EscapeMarkdown(artifact.Kind)} | {EscapeMarkdown(expected)} | {EscapeMarkdown(actual)} | {EscapeMarkdown(lastModified)} | {FormatCount(artifact.CompressedBytes)} | {FormatCount(artifact.EntryCount)} | {DescribeDriftResult(artifact)} |");
+            if (string.Equals(
+                    artifact.Kind,
+                    FixtureBundle.ImmutableKind,
+                    StringComparison.Ordinal))
+            {
+                pinned++;
+            }
+
+            if (artifact.Success)
+                continue;
+
+            string message = artifact.Failure?.Message
+                ?? "No failure was recorded.";
+            switch (artifact.Failure?.Code)
+            {
+                case QualificationFailureCodes.ImmutableHashMismatch:
+                    changed++;
+                    annotations.Add(FormatError(
+                        $"Fixture changed {artifact.Id}",
+                        $"pinned {expected} observed {actual}"));
+                    break;
+                case QualificationFailureCodes.SourceUnreachable:
+                    annotations.Add(FormatError(
+                        $"Fixture source unreachable {artifact.Id}",
+                        message));
+                    break;
+                default:
+                    annotations.Add(FormatError(
+                        $"Fixture failed {artifact.Id}",
+                        message));
+                    break;
+            }
+        }
+
+        AddLine(markdown);
+        if (!freeze.Success
+            && report.Artifacts.All(artifact => artifact.Success))
+        {
+            string message = DescribeFailures(freeze);
+            AddLine(
+                markdown,
+                $"{EscapeMarkdown(freeze.Id)} failed: {EscapeMarkdown(message)}");
+            AddLine(markdown);
+            annotations.Add(FormatError(
+                $"Qualification case {freeze.Id} failed",
+                message));
+        }
+
+        string? bundleSha256 = freeze.Success
+            ? freeze.Details
+                .FirstOrDefault(detail => string.Equals(
+                    detail.Name,
+                    FixtureBundle.BundleSha256DetailName,
+                    StringComparison.Ordinal))
+                ?.Value
+            : null;
+        string outcome = bundleSha256 is null
+            ? "no bundle frozen"
+            : $"bundle sha256:{EscapeMarkdown(bundleSha256)} frozen";
+        AddLine(
+            markdown,
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"{changed} of {pinned} pinned artifacts changed {MiddleDot} {outcome}"));
+    }
+
+    private static string DescribeDriftResult(
+        QualificationArtifactResult artifact)
+    {
+        if (artifact.Success)
+        {
+            return string.Equals(
+                artifact.Kind,
+                FixtureBundle.MutableKind,
+                StringComparison.Ordinal)
+                ? "captured"
+                : "verified";
+        }
+
+        return artifact.Failure?.Code switch
+        {
+            QualificationFailureCodes.ImmutableHashMismatch =>
+                "**changed**",
+            QualificationFailureCodes.SourceUnreachable =>
+                "**unreachable**",
+            _ => "**failed**"
+        };
+    }
+
+    private static string FormatCount(long? value) =>
+        value is long count
+            ? QualificationFormatting.Invariant(count)
+            : MissingValue;
 
     private static bool IsDependent(QualificationCaseResult result) =>
         result.Failures.Count > 0

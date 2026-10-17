@@ -21,6 +21,7 @@ internal sealed class QualificationRunner
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, QualificationArtifactResult>
         _artifactResults = new(StringComparer.Ordinal);
+    private readonly HttpMessageHandler? _acquisitionHandler;
     private readonly string _workspaceRoot;
     private readonly string _downloadRoot;
     private readonly string _fixtureRoot;
@@ -31,7 +32,8 @@ internal sealed class QualificationRunner
         QualificationBuildSnapshot build,
         ReportSanitizer sanitizer,
         DateTimeOffset startedUtc,
-        string corpusSha256)
+        string corpusSha256,
+        HttpMessageHandler? acquisitionHandler = null)
     {
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentNullException.ThrowIfNull(corpus);
@@ -40,6 +42,7 @@ internal sealed class QualificationRunner
         _corpus = corpus;
         _build = build;
         _sanitizer = sanitizer;
+        _acquisitionHandler = acquisitionHandler;
         _workspaceRoot = Path.Combine(
             arguments.CacheRoot,
             ".qualification");
@@ -80,45 +83,8 @@ internal sealed class QualificationRunner
         CancellationToken cancellationToken)
     {
         EnsureEmptyRoot();
-        Directory.CreateDirectory(_downloadRoot);
-        Directory.CreateDirectory(_fixtureRoot);
-
-        await AcquireLocalFixtureAsync(cancellationToken)
+        await AcquireArtifactsAsync(cancellationToken)
             .ConfigureAwait(false);
-        using (ArtifactDownloader downloader = new(
-            _downloadRoot,
-            _arguments.HttpTimeout))
-        {
-            foreach (ImmutableArtifactDefinition artifact in
-                _corpus.ImmutableArtifacts.OrderBy(
-                    artifact => artifact.Id,
-                    StringComparer.Ordinal))
-            {
-                await AcquireRemoteArtifactAsync(
-                        downloader,
-                        "immutable",
-                        artifact.Id,
-                        artifact.Uri,
-                        artifact.Sha256,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-
-            foreach (MutableArtifactDefinition artifact in
-                _corpus.MutableArtifacts.OrderBy(
-                    artifact => artifact.Id,
-                    StringComparer.Ordinal))
-            {
-                await AcquireRemoteArtifactAsync(
-                        downloader,
-                        "mutable",
-                        artifact.Id,
-                        artifact.Uri,
-                        expectedSha256: null,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-        }
 
         await RunCaseAsync(
             "01-immutable-expected-stream",
@@ -182,6 +148,113 @@ internal sealed class QualificationRunner
             .ConfigureAwait(false);
         return FinalizeReport();
     }
+
+    internal async Task<QualificationReport> FreezeAsync(
+        CancellationToken cancellationToken)
+    {
+        string bundlePath = _arguments.FreezeBundlePath
+            ?? throw new QualificationInvariantException(
+                "Freeze mode requires a bundle output directory.");
+        EnsureEmptyRoot();
+        await AcquireArtifactsAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await RunCaseAsync(
+                FixtureBundle.FreezeCaseId,
+                (context, token) => FreezeBundleAsync(
+                    context,
+                    bundlePath,
+                    token),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return FinalizeReport();
+    }
+
+    private async Task AcquireArtifactsAsync(
+        CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(_downloadRoot);
+        Directory.CreateDirectory(_fixtureRoot);
+
+        await AcquireLocalFixtureAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using (ArtifactDownloader downloader = new(
+            _downloadRoot,
+            _arguments.HttpTimeout,
+            _acquisitionHandler))
+        {
+            foreach (ImmutableArtifactDefinition artifact in
+                _corpus.ImmutableArtifacts.OrderBy(
+                    artifact => artifact.Id,
+                    StringComparer.Ordinal))
+            {
+                await AcquireRemoteArtifactAsync(
+                        downloader,
+                        "immutable",
+                        artifact.Id,
+                        artifact.Uri,
+                        artifact.Sha256,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            foreach (MutableArtifactDefinition artifact in
+                _corpus.MutableArtifacts.OrderBy(
+                    artifact => artifact.Id,
+                    StringComparer.Ordinal))
+            {
+                await AcquireRemoteArtifactAsync(
+                        downloader,
+                        "mutable",
+                        artifact.Id,
+                        artifact.Uri,
+                        expectedSha256: null,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task FreezeBundleAsync(
+        QualificationCaseContext context,
+        string bundlePath,
+        CancellationToken cancellationToken)
+    {
+        QualificationArtifactResult[] failed = _artifactResults.Values
+            .Where(result => !result.Success)
+            .OrderBy(
+                result => result.Kind,
+                StringComparer.Ordinal)
+            .ThenBy(
+                result => result.Id,
+                StringComparer.Ordinal)
+            .ToArray();
+        if (failed.Length > 0)
+        {
+            context.Detail(
+                FixtureBundle.BlockedArtifactsDetailName,
+                string.Join(
+                    ",",
+                    failed.Select(result => result.Id)));
+            throw new FixtureBundleException(
+                QualificationFailureCodes.BundleFreezeBlocked,
+                $"No bundle was frozen because {failed.Length} artifact(s) failed: {string.Join(", ", failed.Select(DescribeBlockedArtifact))}.");
+        }
+
+        string bundleSha256 = await FixtureBundleWriter.WriteFrozenAsync(
+                bundlePath,
+                _corpus,
+                _report.CorpusSha256,
+                _artifacts,
+                cancellationToken)
+            .ConfigureAwait(false);
+        context.Detail(
+            FixtureBundle.BundleSha256DetailName,
+            bundleSha256);
+    }
+
+    private static string DescribeBlockedArtifact(
+        QualificationArtifactResult result) =>
+        $"{result.Id} ({result.Failure?.Code ?? "unclassified"})";
 
     private QualificationReport FinalizeReport()
     {

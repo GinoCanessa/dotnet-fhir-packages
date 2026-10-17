@@ -32,6 +32,11 @@ internal static class QualificationFailureCodes
     internal const string RequiredArtifactUnavailable =
         "RequiredArtifactUnavailable";
 
+    internal const string BundleFreezeBlocked = "BundleFreezeBlocked";
+
+    internal const string BundleVerificationFailed =
+        "BundleVerificationFailed";
+
     internal static string? Classify(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
@@ -41,6 +46,8 @@ internal static class QualificationFailureCodes
                 SourceUnreachable,
             RequiredArtifactUnavailableException =>
                 RequiredArtifactUnavailable,
+            FixtureBundleException bundleException =>
+                bundleException.Code,
             _ => null
         };
     }

@@ -13,6 +13,7 @@ internal sealed record QualificationArguments
         {
             "cache",
             "corpus",
+            "freeze-bundle",
             "http-timeout-seconds",
             "output",
             "process-host",
@@ -28,6 +29,8 @@ internal sealed record QualificationArguments
     internal required string CorpusPath { get; init; }
 
     internal string? ProcessHostPath { get; init; }
+
+    internal string? FreezeBundlePath { get; init; }
 
     internal string? SummaryPath { get; init; }
 
@@ -75,6 +78,22 @@ internal sealed record QualificationArguments
             values,
             "validate-only",
             defaultValue: false);
+        string? freezeBundle = values.GetValueOrDefault("freeze-bundle");
+        if (freezeBundle is not null)
+        {
+            if (string.IsNullOrWhiteSpace(freezeBundle))
+            {
+                throw new ArgumentException(
+                    "Option '--freeze-bundle' requires a value.");
+            }
+
+            if (validateOnly)
+            {
+                throw new ArgumentException(
+                    "Option '--freeze-bundle' cannot be combined with '--validate-only true'.");
+            }
+        }
+
         string cache = values.TryGetValue(
             "cache",
             out string? cacheValue)
@@ -112,6 +131,9 @@ internal sealed record QualificationArguments
                 out string? processHost)
                 ? Path.GetFullPath(processHost)
                 : null,
+            FreezeBundlePath = freezeBundle is null
+                ? null
+                : Path.GetFullPath(freezeBundle),
             SummaryPath = values.TryGetValue(
                 "summary",
                 out string? summary)
