@@ -12,7 +12,10 @@ internal sealed class ReleaseCommandServices
         IReleaseCandidateValidator candidateValidator,
         IReleasePublicationStateValidator publicationStateValidator,
         IPublishedPackageValidator publishedPackageValidator,
+        IFixtureBundleLocator fixtureBundleLocator,
+        IReleaseGitHubClient gitHubClient,
         IGitHubOutputWriter gitHubOutputWriter,
+        IGitHubStepSummaryWriter stepSummaryWriter,
         TextWriter standardOutput,
         TextWriter standardError)
     {
@@ -34,9 +37,18 @@ internal sealed class ReleaseCommandServices
             publishedPackageValidator ??
             throw new ArgumentNullException(
                 nameof(publishedPackageValidator));
+        FixtureBundleLocator =
+            fixtureBundleLocator ??
+            throw new ArgumentNullException(nameof(fixtureBundleLocator));
+        GitHubClient =
+            gitHubClient ??
+            throw new ArgumentNullException(nameof(gitHubClient));
         GitHubOutputWriter =
             gitHubOutputWriter ??
             throw new ArgumentNullException(nameof(gitHubOutputWriter));
+        StepSummaryWriter =
+            stepSummaryWriter ??
+            throw new ArgumentNullException(nameof(stepSummaryWriter));
         StandardOutput =
             standardOutput ??
             throw new ArgumentNullException(nameof(standardOutput));
@@ -46,6 +58,10 @@ internal sealed class ReleaseCommandServices
     }
 
     internal IReleaseCandidateValidator CandidateValidator { get; }
+
+    internal IFixtureBundleLocator FixtureBundleLocator { get; }
+
+    internal IReleaseGitHubClient GitHubClient { get; }
 
     internal IGitHubOutputWriter GitHubOutputWriter { get; }
 
@@ -61,6 +77,8 @@ internal sealed class ReleaseCommandServices
     internal TextWriter StandardError { get; }
 
     internal TextWriter StandardOutput { get; }
+
+    internal IGitHubStepSummaryWriter StepSummaryWriter { get; }
 
     internal IReleaseVersionAvailabilityValidator
         VersionAvailabilityValidator
@@ -94,7 +112,14 @@ internal sealed class ReleaseCommandServices
                 httpClient,
                 publishedPackageValidator,
                 delay);
+        ReleaseGitHubClient gitHubClient =
+            ReleaseGitHubClient.CreateFromEnvironment();
+        FixtureBundleLocator fixtureBundleLocator = new(
+            gitClient,
+            gitClient,
+            gitHubClient);
         GitHubOutputWriter gitHubOutputWriter = new();
+        GitHubStepSummaryWriter stepSummaryWriter = new();
 
         return new ReleaseCommandServices(
             inputValidator,
@@ -102,7 +127,10 @@ internal sealed class ReleaseCommandServices
             candidateValidator,
             publicationStateValidator,
             publishedPackageValidator,
+            fixtureBundleLocator,
+            gitHubClient,
             gitHubOutputWriter,
+            stepSummaryWriter,
             Console.Out,
             Console.Error);
     }

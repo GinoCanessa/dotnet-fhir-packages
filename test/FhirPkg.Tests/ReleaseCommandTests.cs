@@ -9,6 +9,7 @@ using System.Text;
 using FhirPkg.Release;
 using FhirPkg.Release.Infrastructure;
 using FhirPkg.Release.Validation;
+using Moq;
 using Shouldly;
 using Xunit;
 
@@ -19,8 +20,16 @@ public sealed class ReleaseCommandTests
     private static readonly SemaphoreSlim s_consoleGate =
         new(initialCount: 1, maxCount: 1);
 
+    private const string BundleDigest =
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     private const string CliIndexUri =
         "https://packages.example/cli/index.json";
+    private const string CorpusBlob =
+        "89abcdef0123456789abcdef0123456789abcdef";
+    private const string ExpectedDigestError =
+        "--expected-digest must be 'sha256:' followed by 64 lowercase hexadecimal characters.";
+    private const string GitHubRepository =
+        "octo-org/dotnet-fhir-packages";
     private const string SdkIndexUri =
         "https://packages.example/sdk/index.json";
 
@@ -693,13 +702,561 @@ public sealed class ReleaseCommandTests
         }
     }
 
+    [Fact]
+    public async Task LocateFixtureBundleCommand_BindsOptionsAndWritesExpectedOutputs()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            CapturingFixtureBundleLocator locator = new(
+                new LocatedFixtureBundle(
+                    101,
+                    $"fixture-bundle-v1-{CorpusBlob}",
+                    BundleDigest,
+                    501,
+                    $"https://github.test/{GitHubRepository}/actions/runs/501",
+                    CorpusBlob,
+                    new DateTimeOffset(2027, 1, 14, 6, 23, 45, TimeSpan.Zero)));
+            ReleaseCommandServices services = CreateServices(
+                fixtureBundleLocator: locator,
+                standardOutput: stdout,
+                standardError: stderr);
+            DateTimeOffset before = DateTimeOffset.UtcNow;
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "locate-fixture-bundle",
+                    "--repository",
+                    GitHubRepository,
+                    "--commit",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "--tag",
+                    ReleaseValidationFixture.Tag,
+                    "--corpus-path",
+                    "custom/qualification-corpus.json",
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            DateTimeOffset after = DateTimeOffset.UtcNow;
+            result.ExitCode.ShouldBe(0, result.DiagnosticError);
+            stdout.ToString().ShouldBe(
+                $"Located frozen fixture bundle fixture-bundle-v1-{CorpusBlob} (artifact 101, {BundleDigest}) from run 501." +
+                Environment.NewLine);
+            stderr.ToString().ShouldBeEmpty();
+            FixtureBundleLocatorInvocation invocation =
+                locator.Invocations.ShouldHaveSingleItem();
+            invocation.Repository.ShouldBe(GitHubRepository);
+            invocation.Commit.ShouldBe(
+                ReleaseValidationFixture.RepositoryCommit);
+            invocation.Tag.ShouldBe(ReleaseValidationFixture.Tag);
+            invocation.CorpusPath.ShouldBe(
+                "custom/qualification-corpus.json");
+            invocation.Now.ShouldBeInRange(before, after);
+            ReadOutputLines(outputPath).ShouldBe(
+                [
+                    "bundle_artifact_id=101",
+                    $"bundle_artifact_name=fixture-bundle-v1-{CorpusBlob}",
+                    $"bundle_artifact_digest={BundleDigest}",
+                    "bundle_run_id=501",
+                    $"corpus_blob={CorpusBlob}",
+                ]);
+            File.ReadAllText(summaryPath).ShouldBe(
+                $"Frozen fixture bundle `fixture-bundle-v1-{CorpusBlob}` \u00b7 digest `{BundleDigest}` \u00b7 produced by [fixture-drift run 501](https://github.test/{GitHubRepository}/actions/runs/501) \u00b7 expires 2027-01-14T06:23:45Z\n");
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LocateFixtureBundleCommand_DefaultsToTheQualificationCorpus()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            CapturingFixtureBundleLocator locator = new(
+                new LocatedFixtureBundle(
+                    101,
+                    $"fixture-bundle-v1-{CorpusBlob}",
+                    BundleDigest,
+                    501,
+                    $"https://github.test/{GitHubRepository}/actions/runs/501",
+                    CorpusBlob,
+                    new DateTimeOffset(2027, 1, 14, 6, 23, 45, TimeSpan.Zero)));
+            ReleaseCommandServices services = CreateServices(
+                fixtureBundleLocator: locator);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "locate-fixture-bundle",
+                    "--repository",
+                    GitHubRepository,
+                    "--commit",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "--tag",
+                    ReleaseValidationFixture.Tag,
+                    "--github-output",
+                    Path.Combine(workingDirectory, "github-output.txt"),
+                    "--step-summary",
+                    Path.Combine(workingDirectory, "step-summary.md"),
+                ]);
+
+            result.ExitCode.ShouldBe(0, result.DiagnosticError);
+            locator.Invocations.ShouldHaveSingleItem().CorpusPath.ShouldBe(
+                "test/FhirPkg.Qualification/qualification-corpus.json");
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LocateFixtureBundleCommand_FailureWritesAnnotationSummaryAndExitsOne()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            string message =
+                $"No frozen fixture bundle for test/FhirPkg.Qualification/qualification-corpus.json at {ReleaseValidationFixture.RepositoryCommit} (corpus blob {CorpusBlob}). Run 'gh workflow run fixture-drift.yaml --ref {ReleaseValidationFixture.Tag}', wait for it to pass, then re-run this workflow's failed jobs.";
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            ReleaseCommandServices services = CreateServices(
+                fixtureBundleLocator: new ThrowingFixtureBundleLocator(
+                    new ReleaseValidationException(message)),
+                standardOutput: stdout,
+                standardError: stderr);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "locate-fixture-bundle",
+                    "--repository",
+                    GitHubRepository,
+                    "--commit",
+                    ReleaseValidationFixture.RepositoryCommit,
+                    "--tag",
+                    ReleaseValidationFixture.Tag,
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            result.ExitCode.ShouldBe(1);
+            stdout.ToString().ShouldBe(
+                $"::error title=Frozen fixture bundle unavailable::{message}" +
+                Environment.NewLine);
+            stderr.ToString().ShouldBe(message + Environment.NewLine);
+            File.ReadAllText(summaryPath).ShouldBe(
+                $"### Frozen fixture bundle unavailable\n\n{message}\n");
+            File.Exists(outputPath).ShouldBeFalse();
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FetchArtifactCommand_VerifiesDigestExtractsAndWritesSha256(
+        bool destinationExists)
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string destination = Path.Combine(
+                workingDirectory,
+                "fixture-bundle");
+            if (destinationExists)
+            {
+                Directory.CreateDirectory(destination);
+            }
+
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            byte[] archive = CreateZipArchive(
+                ("bundle-manifest.json", "{\"schemaVersion\":1}"),
+                ("blobs/0123.tgz", "blob bytes"));
+            string digest = ComputeDigest(archive);
+            string expectedSha256 = digest["sha256:".Length..];
+            List<string> downloadPaths = [];
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            ReleaseCommandServices services = CreateServices(
+                gitHubClient: CreateDownloadingGitHubClient(
+                    archive,
+                    digest,
+                    downloadPaths).Object,
+                standardOutput: stdout,
+                standardError: stderr);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "fetch-artifact",
+                    "--repository",
+                    GitHubRepository,
+                    "--artifact-id",
+                    "77",
+                    "--expected-digest",
+                    digest,
+                    "--destination",
+                    destination,
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            result.ExitCode.ShouldBe(0, result.DiagnosticError);
+            stdout.ToString().ShouldBe(
+                $"Fetched artifact 77 ({digest}) into {destination}." +
+                Environment.NewLine);
+            stderr.ToString().ShouldBeEmpty();
+            File.ReadAllText(
+                    Path.Combine(destination, "bundle-manifest.json"))
+                .ShouldBe("{\"schemaVersion\":1}");
+            File.ReadAllText(
+                    Path.Combine(destination, "blobs", "0123.tgz"))
+                .ShouldBe("blob bytes");
+            ReadOutputLines(outputPath).ShouldBe(
+                [$"artifact_sha256={expectedSha256}"]);
+            File.Exists(summaryPath).ShouldBeFalse();
+            File.Exists(downloadPaths.ShouldHaveSingleItem())
+                .ShouldBeFalse();
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FetchArtifactCommand_DigestMismatchWritesAnnotationSummaryAndExitsOne()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string destination = Path.Combine(
+                workingDirectory,
+                "fixture-bundle");
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            byte[] archive = CreateZipArchive(
+                ("bundle-manifest.json", "{}"));
+            string downloadedDigest = ComputeDigest(archive);
+            string expectedDigest = ComputeDigest([0x01]);
+            string message =
+                $"Artifact 77 digest mismatch: expected {expectedDigest}, downloaded {downloadedDigest}.";
+            List<string> downloadPaths = [];
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            ReleaseCommandServices services = CreateServices(
+                gitHubClient: CreateDownloadingGitHubClient(
+                    archive,
+                    downloadedDigest,
+                    downloadPaths).Object,
+                standardOutput: stdout,
+                standardError: stderr);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "fetch-artifact",
+                    "--repository",
+                    GitHubRepository,
+                    "--artifact-id",
+                    "77",
+                    "--expected-digest",
+                    expectedDigest,
+                    "--destination",
+                    destination,
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            result.ExitCode.ShouldBe(1);
+            stdout.ToString().ShouldBe(
+                $"::error title=Artifact fetch failed::{message}" +
+                Environment.NewLine);
+            stderr.ToString().ShouldBe(message + Environment.NewLine);
+            File.ReadAllText(summaryPath).ShouldBe(
+                $"### Artifact fetch failed\n\n{message}\n");
+            Directory.Exists(destination).ShouldBeFalse();
+            File.Exists(downloadPaths.ShouldHaveSingleItem())
+                .ShouldBeFalse();
+            File.Exists(outputPath).ShouldBeFalse();
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FetchArtifactCommand_RefusesANonEmptyDestination()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string destination = Path.Combine(
+                workingDirectory,
+                "fixture-bundle");
+            Directory.CreateDirectory(destination);
+            File.WriteAllText(
+                Path.Combine(destination, "stale.txt"),
+                "stale");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            string message =
+                $"Destination '{destination}' must not exist or must be an empty directory.";
+            Mock<IReleaseGitHubClient> gitHubClient =
+                new(MockBehavior.Strict);
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            ReleaseCommandServices services = CreateServices(
+                gitHubClient: gitHubClient.Object,
+                standardOutput: stdout,
+                standardError: stderr);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "fetch-artifact",
+                    "--repository",
+                    GitHubRepository,
+                    "--artifact-id",
+                    "77",
+                    "--expected-digest",
+                    BundleDigest,
+                    "--destination",
+                    destination,
+                    "--github-output",
+                    Path.Combine(workingDirectory, "github-output.txt"),
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            result.ExitCode.ShouldBe(1);
+            stderr.ToString().ShouldBe(message + Environment.NewLine);
+            stdout.ToString().ShouldBe(
+                $"::error title=Artifact fetch failed::{message}" +
+                Environment.NewLine);
+            string summary = File.ReadAllText(summaryPath);
+            summary.ShouldStartWith("### Artifact fetch failed\n\n");
+            summary.ShouldContain(
+                "must not exist or must be an empty directory.");
+            File.ReadAllText(Path.Combine(destination, "stale.txt"))
+                .ShouldBe("stale");
+            gitHubClient.VerifyNoOtherCalls();
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FetchArtifactCommand_RejectsArchiveEntriesOutsideTheDestination()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string destination = Path.Combine(
+                workingDirectory,
+                "fixture-bundle");
+            string outputPath = Path.Combine(
+                workingDirectory,
+                "github-output.txt");
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            byte[] archive = CreateZipArchive(
+                ("bundle-manifest.json", "{}"),
+                ("../escaped.txt", "escaped"));
+            string digest = ComputeDigest(archive);
+            List<string> downloadPaths = [];
+            StringWriter stdout = new();
+            StringWriter stderr = new();
+            ReleaseCommandServices services = CreateServices(
+                gitHubClient: CreateDownloadingGitHubClient(
+                    archive,
+                    digest,
+                    downloadPaths).Object,
+                standardOutput: stdout,
+                standardError: stderr);
+
+            CommandInvocationResult result = await InvokeAsync(
+                services,
+                [
+                    "fetch-artifact",
+                    "--repository",
+                    GitHubRepository,
+                    "--artifact-id",
+                    "77",
+                    "--expected-digest",
+                    digest,
+                    "--destination",
+                    destination,
+                    "--github-output",
+                    outputPath,
+                    "--step-summary",
+                    summaryPath,
+                ]);
+
+            result.ExitCode.ShouldBe(1);
+            stderr.ToString().ShouldStartWith(
+                $"Artifact 77 could not be extracted to '{destination}': ");
+            stdout.ToString().ShouldStartWith(
+                "::error title=Artifact fetch failed::Artifact 77 could not be extracted to ");
+            File.ReadAllText(summaryPath).ShouldStartWith(
+                "### Artifact fetch failed\n\n");
+            File.Exists(Path.Combine(workingDirectory, "escaped.txt"))
+                .ShouldBeFalse();
+            Directory.Exists(destination).ShouldBeFalse();
+            File.Exists(downloadPaths.ShouldHaveSingleItem())
+                .ShouldBeFalse();
+            File.Exists(outputPath).ShouldBeFalse();
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("0", BundleDigest, "--artifact-id must be at least one.")]
+    [InlineData(
+        "77",
+        "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+        ExpectedDigestError)]
+    [InlineData(
+        "77",
+        "sha512:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ExpectedDigestError)]
+    [InlineData("77", "sha256:0123", ExpectedDigestError)]
+    [InlineData(
+        "77",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ExpectedDigestError)]
+    public void FetchArtifactCommand_RejectsAnInvalidArtifactIdOrDigest(
+        string artifactId,
+        string expectedDigest,
+        string expectedError)
+    {
+        ParseResult parseResult =
+            Program.BuildRootCommand(CreateServices()).Parse(
+                [
+                    "fetch-artifact",
+                    "--repository",
+                    GitHubRepository,
+                    "--artifact-id",
+                    artifactId,
+                    "--expected-digest",
+                    expectedDigest,
+                    "--destination",
+                    "unused-destination",
+                ]);
+
+        parseResult.Errors
+            .Select(static error => error.Message)
+            .ToArray()
+            .ShouldBe([expectedError]);
+    }
+
+    [Fact]
+    public void GitHubAnnotations_EscapesTitleAndMessage()
+    {
+        GitHubAnnotations.Error(
+                "Fetch: one, two",
+                "50% done\r\nnext: line, more")
+            .ShouldBe(
+                "::error title=Fetch%3A one%2C two::50%25 done%0D%0Anext: line, more");
+    }
+
+    [Fact]
+    public async Task GitHubStepSummaryWriter_AppendsWithoutTruncating()
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string summaryPath = Path.Combine(
+                workingDirectory,
+                "step-summary.md");
+            File.WriteAllText(summaryPath, "existing\n");
+            GitHubStepSummaryWriter writer = new();
+
+            await writer.AppendAsync(
+                summaryPath,
+                "first line",
+                TestContext.Current.CancellationToken);
+            await writer.AppendAsync(
+                summaryPath,
+                "### Heading\n\nbody\n",
+                TestContext.Current.CancellationToken);
+
+            File.ReadAllText(summaryPath).ShouldBe(
+                "existing\nfirst line\n### Heading\n\nbody\n");
+            File.ReadAllBytes(summaryPath)[0].ShouldBe((byte)'e');
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
     private static ReleaseCommandServices CreateServices(
         IReleaseInputValidator? inputValidator = null,
         IReleaseVersionAvailabilityValidator? versionAvailabilityValidator = null,
         IReleaseCandidateValidator? candidateValidator = null,
         IReleasePublicationStateValidator? publicationStateValidator = null,
         IPublishedPackageValidator? publishedPackageValidator = null,
+        IFixtureBundleLocator? fixtureBundleLocator = null,
+        IReleaseGitHubClient? gitHubClient = null,
         IGitHubOutputWriter? gitHubOutputWriter = null,
+        IGitHubStepSummaryWriter? stepSummaryWriter = null,
         TextWriter? standardOutput = null,
         TextWriter? standardError = null)
     {
@@ -712,7 +1269,11 @@ public sealed class ReleaseCommandTests
             new ThrowingReleasePublicationStateValidator(),
             publishedPackageValidator ??
             new ThrowingPublishedPackageValidator(),
+            fixtureBundleLocator ?? new ThrowingFixtureBundleLocator(),
+            gitHubClient ??
+            new Mock<IReleaseGitHubClient>(MockBehavior.Strict).Object,
             gitHubOutputWriter ?? new GitHubOutputWriter(),
+            stepSummaryWriter ?? new GitHubStepSummaryWriter(),
             standardOutput ?? TextWriter.Null,
             standardError ?? TextWriter.Null);
     }
@@ -807,6 +1368,55 @@ public sealed class ReleaseCommandTests
         }
 
         return memoryStream.ToArray();
+    }
+
+    private static byte[] CreateZipArchive(
+        params (string Name, string Content)[] entries)
+    {
+        using MemoryStream memoryStream = new();
+        using (ZipArchive archive = new(
+            memoryStream,
+            ZipArchiveMode.Create,
+            leaveOpen: true))
+        {
+            foreach ((string Name, string Content) entry in entries)
+            {
+                ZipArchiveEntry archiveEntry = archive.CreateEntry(entry.Name);
+                using Stream entryStream = archiveEntry.Open();
+                entryStream.Write(Encoding.UTF8.GetBytes(entry.Content));
+            }
+        }
+
+        return memoryStream.ToArray();
+    }
+
+    private static string ComputeDigest(byte[] content) =>
+        "sha256:" +
+        Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+
+    private static Mock<IReleaseGitHubClient> CreateDownloadingGitHubClient(
+        byte[] archive,
+        string returnedDigest,
+        List<string> downloadPaths)
+    {
+        Mock<IReleaseGitHubClient> gitHubClient = new(MockBehavior.Strict);
+        gitHubClient
+            .Setup(client => client.DownloadArtifactZipAsync(
+                GitHubRepository,
+                77,
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(
+                (string _,
+                 long _,
+                 string destinationFile,
+                 CancellationToken _) =>
+                {
+                    downloadPaths.Add(destinationFile);
+                    File.WriteAllBytes(destinationFile, archive);
+                    return Task.FromResult(returnedDigest);
+                });
+        return gitHubClient;
     }
 
     private static string[] ReadOutputKeys(string outputPath) =>
@@ -1105,6 +1715,69 @@ public sealed class ReleaseCommandTests
             CancellationToken cancellationToken = default) =>
             throw new ShouldAssertException(
                 "The published package validator should not be called.");
+    }
+
+    private sealed record FixtureBundleLocatorInvocation(
+        string Repository,
+        string Commit,
+        string Tag,
+        string CorpusPath,
+        DateTimeOffset Now);
+
+    private sealed class CapturingFixtureBundleLocator
+        : IFixtureBundleLocator
+    {
+        private readonly LocatedFixtureBundle _result;
+
+        internal CapturingFixtureBundleLocator(
+            LocatedFixtureBundle result)
+        {
+            _result = result;
+        }
+
+        internal List<FixtureBundleLocatorInvocation> Invocations
+        {
+            get;
+        } = [];
+
+        public Task<LocatedFixtureBundle> LocateAsync(
+            string repository,
+            string commit,
+            string tag,
+            string corpusPath,
+            DateTimeOffset now,
+            CancellationToken cancellationToken)
+        {
+            Invocations.Add(new FixtureBundleLocatorInvocation(
+                repository,
+                commit,
+                tag,
+                corpusPath,
+                now));
+            return Task.FromResult(_result);
+        }
+    }
+
+    private sealed class ThrowingFixtureBundleLocator
+        : IFixtureBundleLocator
+    {
+        private readonly Exception _exception;
+
+        internal ThrowingFixtureBundleLocator(
+            Exception? exception = null)
+        {
+            _exception = exception ?? new ShouldAssertException(
+                "The fixture bundle locator should not be called.");
+        }
+
+        public Task<LocatedFixtureBundle> LocateAsync(
+            string repository,
+            string commit,
+            string tag,
+            string corpusPath,
+            DateTimeOffset now,
+            CancellationToken cancellationToken) =>
+            Task.FromException<LocatedFixtureBundle>(_exception);
     }
 
     private sealed class NoOpReleaseDelay : IReleaseDelay
