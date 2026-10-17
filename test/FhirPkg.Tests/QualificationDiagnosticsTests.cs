@@ -20,6 +20,7 @@ public sealed class QualificationDiagnosticsTests : IDisposable
 
     private static readonly string s_pinnedSha256 = new('a', 64);
     private static readonly string s_observedSha256 = new('b', 64);
+    private static readonly string s_corpusSha256 = new('0', 64);
 
     private readonly string _tempRoot = Path.Combine(
         Path.GetTempPath(),
@@ -223,6 +224,8 @@ public sealed class QualificationDiagnosticsTests : IDisposable
         content.Markdown.ShouldBe(
             "### qualify-ubuntu-latest-net10.0 \u2014 FAILED\n"
             + "\n"
+            + $"Qualification inputs: live upstream (no bundle) \u00b7 corpus {s_corpusSha256}\n"
+            + "\n"
             + "#### Rejected artifacts\n"
             + "\n"
             + "| Artifact | Code | Expected SHA-256 | Actual SHA-256 |\n"
@@ -414,7 +417,167 @@ public sealed class QualificationDiagnosticsTests : IDisposable
         content.Markdown.ShouldBe(
             "### qualify-ubuntu-latest-net10.0 \u2014 PASSED\n"
             + "\n"
+            + $"Qualification inputs: live upstream (no bundle) \u00b7 corpus {s_corpusSha256}\n"
+            + "\n"
             + "2 of 2 cases passed \u00b7 full detail: qualification-report.json\n");
+    }
+
+    [Fact]
+    public void Render_PassingBundleVerify_NamesBundleCorpusAndApprovals()
+    {
+        string bundleSha256 = new('f', 64);
+        string corpusSha256 = new('c', 64);
+        QualificationReport report = CreateReport(
+            [],
+            [
+                CreateCase(
+                    "bundle-verify",
+                    [],
+                    [
+                        CreateDetail("approvals", "none"),
+                        CreateDetail("bundleSha256", bundleSha256),
+                        CreateDetail("corpusSha256", corpusSha256)
+                    ]),
+                CreateCase("01-immutable-expected-stream", [])
+            ]);
+
+        QualificationSummaryContent content =
+            QualificationSummaryWriter.Render(
+                report,
+                SummaryTitle,
+                ReportFileName);
+
+        content.Annotations.ShouldBeEmpty();
+        content.Markdown.ShouldBe(
+            "### qualify-ubuntu-latest-net10.0 \u2014 PASSED\n"
+            + "\n"
+            + $"Qualification inputs: bundle sha256:{bundleSha256} \u00b7 corpus {corpusSha256} \u00b7 approvals: none\n"
+            + "\n"
+            + "2 of 2 cases passed \u00b7 full detail: qualification-report.json\n");
+    }
+
+    [Fact]
+    public void Render_WithoutBundleVerify_NamesLiveUpstream()
+    {
+        QualificationReport report = CreateReport(
+            [],
+            [CreateCase("02-directive-exact", [])]);
+
+        QualificationSummaryContent content =
+            QualificationSummaryWriter.Render(
+                report,
+                SummaryTitle,
+                ReportFileName);
+
+        content.Markdown.ShouldContain(
+            $"\n\nQualification inputs: live upstream (no bundle) \u00b7 corpus {s_corpusSha256}\n\n");
+        content.Markdown.ShouldNotContain("bundle sha256:");
+    }
+
+    [Fact]
+    public void Render_FailedBundleVerify_IsAnIndependentFailureWithOneAnnotation()
+    {
+        string message =
+            $"The bundle manifest SHA-256 was {s_observedSha256}, not the expected {s_pinnedSha256}.";
+        QualificationReport report = CreateReport(
+            [],
+            [
+                CreateCase(
+                    "bundle-verify",
+                    [
+                        CreateFailure(
+                            QualificationFailureCodes.BundleVerificationFailed,
+                            message,
+                            nameof(FixtureBundleException))
+                    ])
+            ]);
+
+        QualificationSummaryContent content =
+            QualificationSummaryWriter.Render(
+                report,
+                SummaryTitle,
+                ReportFileName);
+
+        content.Markdown.ShouldBe(
+            "### qualify-ubuntu-latest-net10.0 \u2014 FAILED\n"
+            + "\n"
+            + $"Qualification inputs: bundle sha256:none \u00b7 corpus {s_corpusSha256} \u00b7 approvals: none\n"
+            + "\n"
+            + "#### Failed cases\n"
+            + "\n"
+            + "| Case | Classification | Message |\n"
+            + "|-|-|-|\n"
+            + $"| bundle-verify | independent | {message} |\n"
+            + "\n"
+            + "0 of 1 cases passed \u00b7 full detail: qualification-report.json\n");
+        content.Annotations.ToArray().ShouldBe(
+        [
+            $"::error title=Qualification case bundle-verify failed::{message}"
+        ]);
+    }
+
+    [Fact]
+    public void Render_UnroutedFixtureRequest_IsAnIndependentFailure()
+    {
+        const string message =
+            "Unrouted fixture request(s): GET https://packages2.fhir.org/packages/example.unpinned";
+        QualificationReport report = CreateReport(
+            [],
+            [
+                CreateCase(
+                    "05-dependencies-closure",
+                    [
+                        CreateFailure(
+                            QualificationFailureCodes.UnroutedFixtureRequest,
+                            message)
+                    ])
+            ]);
+
+        QualificationSummaryContent content =
+            QualificationSummaryWriter.Render(
+                report,
+                SummaryTitle,
+                ReportFileName);
+
+        content.Markdown.ShouldContain(
+            $"| 05-dependencies-closure | independent | {message} |\n");
+        content.Annotations.ToArray().ShouldBe(
+        [
+            $"::error title=Qualification case 05-dependencies-closure failed::{message}"
+        ]);
+    }
+
+    [Fact]
+    public void Render_BootstrapFailure_OmitsTheQualificationInputs()
+    {
+        const string message =
+            "Option '--bundle-sha256' is required with '--bundle'.";
+        QualificationReport report = CreateReport(
+            [],
+            [
+                CreateCase(
+                    "bootstrap",
+                    [
+                        CreateFailure(
+                            code: null,
+                            message,
+                            nameof(ArgumentException))
+                    ])
+            ]);
+
+        QualificationSummaryContent content =
+            QualificationSummaryWriter.Render(
+                report,
+                SummaryTitle,
+                ReportFileName);
+
+        content.Markdown.ShouldStartWith(
+            "### qualify-ubuntu-latest-net10.0 \u2014 FAILED\n\n#### Failed cases\n");
+        content.Markdown.ShouldNotContain("Qualification inputs");
+        content.Annotations.ToArray().ShouldBe(
+        [
+            $"::error title=Qualification case bootstrap failed::{message}"
+        ]);
     }
 
     [Theory]
@@ -653,7 +816,7 @@ public sealed class QualificationDiagnosticsTests : IDisposable
             Mode = "source",
             ValidationOnly = validationOnly,
             FhirPkgAssemblyVersion = "1.0.0.0",
-            CorpusSha256 = new string('0', 64),
+            CorpusSha256 = s_corpusSha256,
             CorpusHashAlgorithm = "canonical-json-sha256-v1",
             Framework = ".NET",
             OperatingSystem = "test",
@@ -731,6 +894,15 @@ public sealed class QualificationDiagnosticsTests : IDisposable
         {
             Name = "requiredArtifact",
             Value = id
+        };
+
+    private static QualificationDetail CreateDetail(
+        string name,
+        string value) =>
+        new()
+        {
+            Name = name,
+            Value = value
         };
 
     private sealed class StubHttpMessageHandler(

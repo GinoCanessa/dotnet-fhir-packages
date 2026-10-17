@@ -23,7 +23,15 @@ internal static class FixtureBundle
 
     internal const string FreezeCaseId = "bundle-freeze";
 
+    internal const string VerifyCaseId = "bundle-verify";
+
     internal const string BundleSha256DetailName = "bundleSha256";
+
+    internal const string CorpusSha256DetailName = "corpusSha256";
+
+    internal const string ApprovalsDetailName = "approvals";
+
+    internal const string NoApprovals = "none";
 
     internal const string BlockedArtifactsDetailName =
         "blockedArtifacts";
@@ -112,7 +120,23 @@ internal sealed record VerifiedFixtureBundle(
     string Digest,
     FixtureBundleManifest Manifest,
     IReadOnlyDictionary<string, string> BlobPaths,
-    QualificationCorpus EffectiveCorpus);
+    QualificationCorpus EffectiveCorpus)
+{
+    internal FixtureBundleArtifact GetArtifact(string id) =>
+        Manifest.Artifacts.FirstOrDefault(
+            artifact => string.Equals(
+                artifact.Id,
+                id,
+                StringComparison.Ordinal))
+        ?? throw new QualificationInvariantException(
+            $"The verified bundle lists no artifact '{id}'.");
+
+    internal string GetBlobPath(string id) =>
+        BlobPaths.TryGetValue(id, out string? path)
+            ? path
+            : throw new QualificationInvariantException(
+                $"The verified bundle holds no blob for artifact '{id}'.");
+}
 
 internal sealed class FixtureBundleException(
     string code,

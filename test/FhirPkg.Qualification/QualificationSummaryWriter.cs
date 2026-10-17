@@ -59,6 +59,7 @@ internal static class QualificationSummaryWriter
                 annotations);
         }
 
+        AddQualificationInputs(markdown, report);
         AddRejectedArtifacts(markdown, annotations, report);
         AddFailedCases(markdown, annotations, report);
         AddLine(
@@ -119,6 +120,62 @@ internal static class QualificationSummaryWriter
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    private static void AddQualificationInputs(
+        StringBuilder markdown,
+        QualificationReport report)
+    {
+        // A bootstrap failure report cannot tell which inputs were requested.
+        if (report.Cases.Any(result => string.Equals(
+                result.Id,
+                Program.BootstrapCaseId,
+                StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        QualificationCaseResult? verify = report.Cases.FirstOrDefault(
+            result => string.Equals(
+                result.Id,
+                FixtureBundle.VerifyCaseId,
+                StringComparison.Ordinal));
+        string inputs;
+        if (verify is null)
+        {
+            inputs =
+                $"live upstream (no bundle) {MiddleDot} corpus {EscapeMarkdown(report.CorpusSha256)}";
+        }
+        else
+        {
+            string bundleSha256 = FindDetail(
+                    verify,
+                    FixtureBundle.BundleSha256DetailName)
+                ?? MissingValue;
+            string corpusSha256 = FindDetail(
+                    verify,
+                    FixtureBundle.CorpusSha256DetailName)
+                ?? report.CorpusSha256;
+            string approvals = FindDetail(
+                    verify,
+                    FixtureBundle.ApprovalsDetailName)
+                ?? FixtureBundle.NoApprovals;
+            inputs =
+                $"bundle sha256:{EscapeMarkdown(bundleSha256)} {MiddleDot} corpus {EscapeMarkdown(corpusSha256)} {MiddleDot} approvals: {EscapeMarkdown(approvals)}";
+        }
+
+        AddLine(markdown, $"Qualification inputs: {inputs}");
+        AddLine(markdown);
+    }
+
+    private static string? FindDetail(
+        QualificationCaseResult result,
+        string name) =>
+        result.Details
+            .FirstOrDefault(detail => string.Equals(
+                detail.Name,
+                name,
+                StringComparison.Ordinal))
+            ?.Value;
 
     private static void AddRejectedArtifacts(
         StringBuilder markdown,

@@ -37,6 +37,9 @@ internal static class QualificationFailureCodes
     internal const string BundleVerificationFailed =
         "BundleVerificationFailed";
 
+    internal const string UnroutedFixtureRequest =
+        "UnroutedFixtureRequest";
+
     internal static string? Classify(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);

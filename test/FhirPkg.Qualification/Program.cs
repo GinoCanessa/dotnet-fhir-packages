@@ -9,6 +9,8 @@ namespace FhirPkg.Qualification;
 
 internal static class Program
 {
+    internal const string BootstrapCaseId = "bootstrap";
+
     private static async Task<int> Main(string[] args)
     {
         DateTimeOffset startedUtc = DateTimeOffset.UtcNow;
@@ -54,6 +56,7 @@ internal static class Program
                 arguments.CorpusPath,
                 arguments.ProcessHostPath,
                 arguments.FreezeBundlePath,
+                arguments.BundlePath,
                 Environment.CurrentDirectory,
                 AppContext.BaseDirectory
             ]);
@@ -89,9 +92,17 @@ internal static class Program
                     ? await runner.FreezeAsync(
                             cancellationSource.Token)
                         .ConfigureAwait(false)
-                    : await runner.RunAsync(
-                            cancellationSource.Token)
-                        .ConfigureAwait(false);
+                    : arguments.BundlePath is string bundlePath
+                        ? await runner.RunBundleAsync(
+                                bundlePath,
+                                arguments.BundleSha256
+                                    ?? throw new QualificationInvariantException(
+                                        "Bundle mode requires the expected bundle SHA-256."),
+                                cancellationSource.Token)
+                            .ConfigureAwait(false)
+                        : await runner.RunAsync(
+                                cancellationSource.Token)
+                            .ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -203,7 +214,7 @@ internal static class Program
             [
                 new QualificationCaseResult
                 {
-                    Id = "bootstrap",
+                    Id = BootstrapCaseId,
                     Success = false,
                     DurationMilliseconds = 0,
                     Details = [],

@@ -11,6 +11,8 @@ internal sealed record QualificationArguments
     private static readonly HashSet<string> s_supportedOptions =
         new(StringComparer.OrdinalIgnoreCase)
         {
+            "bundle",
+            "bundle-sha256",
             "cache",
             "corpus",
             "freeze-bundle",
@@ -31,6 +33,10 @@ internal sealed record QualificationArguments
     internal string? ProcessHostPath { get; init; }
 
     internal string? FreezeBundlePath { get; init; }
+
+    internal string? BundlePath { get; init; }
+
+    internal string? BundleSha256 { get; init; }
 
     internal string? SummaryPath { get; init; }
 
@@ -94,6 +100,46 @@ internal sealed record QualificationArguments
             }
         }
 
+        string? bundle = values.GetValueOrDefault("bundle");
+        string? bundleSha256 = values.GetValueOrDefault("bundle-sha256");
+        if (bundle is not null)
+        {
+            if (string.IsNullOrWhiteSpace(bundle))
+            {
+                throw new ArgumentException(
+                    "Option '--bundle' requires a value.");
+            }
+
+            if (validateOnly)
+            {
+                throw new ArgumentException(
+                    "Option '--bundle' cannot be combined with '--validate-only true'.");
+            }
+
+            if (freezeBundle is not null)
+            {
+                throw new ArgumentException(
+                    "Option '--bundle' cannot be combined with '--freeze-bundle'.");
+            }
+
+            if (bundleSha256 is null)
+            {
+                throw new ArgumentException(
+                    "Option '--bundle-sha256' is required with '--bundle'.");
+            }
+
+            if (!FixtureBundle.IsSha256(bundleSha256))
+            {
+                throw new ArgumentException(
+                    "Option '--bundle-sha256' must be exactly 64 lowercase hexadecimal characters.");
+            }
+        }
+        else if (bundleSha256 is not null)
+        {
+            throw new ArgumentException(
+                "Option '--bundle-sha256' requires '--bundle'.");
+        }
+
         string cache = values.TryGetValue(
             "cache",
             out string? cacheValue)
@@ -134,6 +180,10 @@ internal sealed record QualificationArguments
             FreezeBundlePath = freezeBundle is null
                 ? null
                 : Path.GetFullPath(freezeBundle),
+            BundlePath = bundle is null
+                ? null
+                : Path.GetFullPath(bundle),
+            BundleSha256 = bundleSha256,
             SummaryPath = values.TryGetValue(
                 "summary",
                 out string? summary)
