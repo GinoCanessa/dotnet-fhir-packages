@@ -392,3 +392,5 @@ msbuild.wrn
 
 !docs/releases/
 !docs/releases/**
+
+.codegraph
