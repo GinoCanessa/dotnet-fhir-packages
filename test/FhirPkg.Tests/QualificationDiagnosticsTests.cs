@@ -3,6 +3,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using FhirPkg.Qualification;
 using FhirPkg.Qualification.Models;
 using Shouldly;
@@ -936,6 +937,157 @@ public sealed class QualificationDiagnosticsTests : IDisposable
         exception.Message.ShouldBe("Option '--summary' requires a value.");
     }
 
+    [Fact]
+    public async Task EntryPoint_BadBundleArguments_WritesBootstrapSummary()
+    {
+        const string title = "bootstrap-arguments";
+        const string message =
+            "Option '--bundle-sha256' is required with '--bundle'.";
+        string corpusPath = CopyEntryPointCorpus();
+        string summaryPath = Path.Combine(_tempRoot, "bootstrap-summary.md");
+
+        int exitCode = await FhirPkg.Qualification.Program.Main(
+            CreateEntryPointArguments(
+                corpusPath,
+                "bootstrap",
+                summaryPath,
+                validateOnly: false,
+                summaryTitle: title));
+
+        exitCode.ShouldBe(1);
+        QualificationReport report = await ReadReportAsync(
+            Path.Combine(_tempRoot, "bootstrap", ReportFileName));
+        report.Success.ShouldBeFalse();
+        report.ValidationOnly.ShouldBeFalse();
+        report.Artifacts.ShouldBeEmpty();
+        report.Summary.ShouldBe(new QualificationSummary
+        {
+            ArtifactCount = 0,
+            ArtifactFailures = 0,
+            CaseCount = 1,
+            CaseFailures = 1
+        });
+        QualificationCaseResult bootstrap =
+            report.Cases.ShouldHaveSingleItem();
+        bootstrap.Id.ShouldBe("bootstrap");
+        bootstrap.Success.ShouldBeFalse();
+        bootstrap.Details.ShouldBeEmpty();
+        QualificationFailure failure = bootstrap.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBeNull();
+        failure.Stage.ShouldBeNull();
+        failure.ExceptionType.ShouldBe(nameof(ArgumentException));
+        failure.Message.ShouldBe(message);
+        string summary = File.ReadAllText(summaryPath);
+        summary.ShouldStartWith($"### {title} \u2014 FAILED\n");
+        summary.ShouldContain(message);
+        summary.ShouldContain("0 of 1 cases passed");
+        summary.ShouldNotContain("Qualification inputs");
+        summary.ShouldNotContain("live upstream");
+        summary.ShouldBe(QualificationSummaryWriter.Render(
+            report,
+            title,
+            ReportFileName).Markdown);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task EntryPoint_SummaryWriteFailure_PreservesExitCode(
+        bool validateOnly)
+    {
+        string corpusPath = CopyEntryPointCorpus();
+        string baselineSummaryPath = Path.Combine(
+            _tempRoot,
+            "baseline-summary.md");
+        string summaryDirectory = Path.Combine(_tempRoot, "summary-directory");
+        Directory.CreateDirectory(summaryDirectory);
+
+        int baselineExitCode = await FhirPkg.Qualification.Program.Main(
+            CreateEntryPointArguments(
+                corpusPath,
+                "baseline",
+                baselineSummaryPath,
+                validateOnly));
+        int exitCode = await FhirPkg.Qualification.Program.Main(
+            CreateEntryPointArguments(
+                corpusPath,
+                "summary-failure",
+                summaryDirectory,
+                validateOnly));
+
+        baselineExitCode.ShouldBe(validateOnly ? 0 : 1);
+        exitCode.ShouldBe(baselineExitCode);
+        QualificationReport baseline = await ReadReportAsync(
+            Path.Combine(_tempRoot, "baseline", ReportFileName));
+        QualificationReport report = await ReadReportAsync(
+            Path.Combine(_tempRoot, "summary-failure", ReportFileName));
+        baseline.Success.ShouldBe(validateOnly);
+        report.Success.ShouldBe(baseline.Success);
+        report.ValidationOnly.ShouldBe(validateOnly);
+        report.ValidationOnly.ShouldBe(baseline.ValidationOnly);
+        report.CorpusSha256.ShouldBe(baseline.CorpusSha256);
+        report.Mode.ShouldBe(baseline.Mode);
+        report.Summary.ShouldBe(baseline.Summary);
+        report.Summary.ShouldBe(new QualificationSummary
+        {
+            ArtifactCount = validateOnly ? 1 : 0,
+            ArtifactFailures = 0,
+            CaseCount = 1,
+            CaseFailures = validateOnly ? 0 : 1
+        });
+        report.Artifacts.ToArray().ShouldBe(baseline.Artifacts.ToArray());
+        QualificationCaseResult result = report.Cases.ShouldHaveSingleItem();
+        QualificationCaseResult baselineResult =
+            baseline.Cases.ShouldHaveSingleItem();
+        result.Id.ShouldBe(validateOnly ? "validate-only" : "bootstrap");
+        result.Id.ShouldBe(baselineResult.Id);
+        result.Success.ShouldBe(validateOnly);
+        result.Success.ShouldBe(baselineResult.Success);
+        result.Details.ToArray().ShouldBe(baselineResult.Details.ToArray());
+        result.Failures.ToArray().ShouldBe(baselineResult.Failures.ToArray());
+        if (validateOnly)
+        {
+            result.Failures.ShouldBeEmpty();
+            QualificationCorpus corpus = await QualificationCorpus.LoadAsync(
+                corpusPath,
+                TestContext.Current.CancellationToken);
+            byte[] localArchive = DeterministicPackageArchive.Create(
+                corpus.LocalFixture.Name,
+                corpus.LocalFixture.ManifestVersion,
+                "local-dev");
+            string localSha256 = Convert.ToHexString(
+                    SHA256.HashData(localArchive))
+                .ToLowerInvariant();
+            localSha256.ShouldBe(corpus.LocalFixture.Sha256);
+            QualificationArtifactResult local =
+                report.Artifacts.ShouldHaveSingleItem();
+            local.Kind.ShouldBe("local");
+            local.Id.ShouldBe(corpus.LocalFixture.Id);
+            local.Success.ShouldBeTrue();
+            local.ExpectedSha256.ShouldBe(localSha256);
+            local.ActualSha256.ShouldBe(localSha256);
+            local.Failure.ShouldBeNull();
+            report.CorpusSha256.ShouldBe(
+                await QualificationCorpusHash.ComputeFileAsync(
+                    corpusPath,
+                    TestContext.Current.CancellationToken));
+        }
+        else
+        {
+            QualificationFailure failure =
+                result.Failures.ShouldHaveSingleItem();
+            failure.ExceptionType.ShouldBe(nameof(ArgumentException));
+            failure.Message.ShouldBe(
+                "Option '--bundle-sha256' is required with '--bundle'.");
+        }
+
+        File.ReadAllText(baselineSummaryPath).ShouldStartWith(
+            $"### {SummaryTitle} \u2014 {(validateOnly ? "PASSED" : "FAILED")}\n");
+        Directory.Exists(summaryDirectory).ShouldBeTrue();
+        Directory.EnumerateFileSystemEntries(summaryDirectory).ShouldBeEmpty();
+        File.Exists(summaryDirectory).ShouldBeFalse();
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_tempRoot))
@@ -949,6 +1101,55 @@ public sealed class QualificationDiagnosticsTests : IDisposable
         "--output",
         Path.Combine(_tempRoot, ReportFileName)
     ];
+
+    private string CopyEntryPointCorpus()
+    {
+        string path = Path.Combine(_tempRoot, "qualification-corpus.json");
+        File.Copy(
+            Path.Combine(AppContext.BaseDirectory, "qualification-corpus.json"),
+            path);
+        return path;
+    }
+
+    private string[] CreateEntryPointArguments(
+        string corpusPath,
+        string invocation,
+        string summaryPath,
+        bool validateOnly,
+        string summaryTitle = SummaryTitle)
+    {
+        string[] modeOptions = validateOnly
+            ? ["--validate-only", "true"]
+            : ["--bundle", Path.Combine(_tempRoot, invocation, "bundle")];
+        return
+        [
+            "--cache",
+            Path.Combine(_tempRoot, invocation, "cache"),
+            "--output",
+            Path.Combine(_tempRoot, invocation, ReportFileName),
+            "--corpus",
+            corpusPath,
+            "--summary",
+            summaryPath,
+            "--summary-title",
+            summaryTitle,
+            .. modeOptions
+        ];
+    }
+
+    private static async Task<QualificationReport> ReadReportAsync(string path)
+    {
+        string json = await File.ReadAllTextAsync(
+            path,
+            TestContext.Current.CancellationToken);
+        QualificationSchemaValidator.ValidateJson(
+            json,
+            QualificationSchemaPaths.Report);
+        return JsonSerializer.Deserialize<QualificationReport>(
+                json,
+                QualificationJson.SerializerOptions)
+            ?? throw new InvalidDataException("The report was empty.");
+    }
 
     private QualificationRunner CreateRunner()
     {

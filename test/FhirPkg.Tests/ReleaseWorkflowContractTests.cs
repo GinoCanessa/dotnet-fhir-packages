@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Text.RegularExpressions;
+using FhirPkg.Release.Validation;
 using Shouldly;
 using Xunit;
 
@@ -10,6 +11,8 @@ public class ReleaseWorkflowContractTests
 {
     private const string ReleaseToolProject =
         "tools/FhirPkg.Release/FhirPkg.Release.csproj";
+    private const string RecoveryVersionBypass =
+        "${{ steps.inputs.outputs.mode == 'recovery' && '--allow-published-version' || '' }}";
 
     [Fact]
     public void ReleaseWorkflow_UsesDirectReleaseToolCommandsAndPreservesReleaseSafety()
@@ -516,6 +519,151 @@ public class ReleaseWorkflowContractTests
     }
 
     [Fact]
+    public void ReleaseWorkflow_PublishGateIsExactAndVersionBypassIsScoped()
+    {
+        AssertPublicationSafetyContract(ReadContract("nuget-generator.yaml"));
+    }
+
+    [Fact]
+    public void ReleaseWorkflow_PublicationSafetyAssertions_RejectCounterexamples()
+    {
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string branchOnlyDryRunGuard = releaseWorkflow.Replace(
+            "        needs.validate.outputs.validation_only == 'false' &&\n"
+            + "        (\n"
+            + "          (github.event_name == 'release' &&",
+            "        (\n"
+            + "          (needs.validate.outputs.validation_only == 'false' &&\n"
+            + "           github.event_name == 'release' &&",
+            StringComparison.Ordinal);
+        branchOnlyDryRunGuard.ShouldNotBe(releaseWorkflow);
+        Should.Throw<ShouldAssertException>(
+            () => AssertPublicationSafetyContract(branchOnlyDryRunGuard));
+
+        string unconditionalInitialBypass = releaseWorkflow.Replace(
+            RecoveryVersionBypass,
+            "--allow-published-version",
+            StringComparison.Ordinal);
+        unconditionalInitialBypass.ShouldNotBe(releaseWorkflow);
+        Should.Throw<ShouldAssertException>(
+            () => AssertPublicationSafetyContract(unconditionalInitialBypass));
+    }
+
+    [Fact]
+    public void ReleaseWorkflow_IdentityAndJobNamesMatchToolContracts()
+    {
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string driftSection = GetSection(
+            ReadContract("fixture-drift.yaml"),
+            "  fixture-drift:\n",
+            "  live-registry-interop:\n");
+        string sourceCiSection = GetSection(
+            releaseWorkflow,
+            "  source-ci:\n",
+            "  pack:\n");
+        string packSection = GetSection(
+            releaseWorkflow,
+            "  pack:\n",
+            "  retrieve:\n");
+        string retrieveSection = GetSection(
+            releaseWorkflow,
+            "  retrieve:\n",
+            "  release-identity:\n");
+        string identitySection = GetSection(
+            releaseWorkflow,
+            "  release-identity:\n",
+            "  package-qualification:\n");
+
+        GetSection(driftSection, "    name: ", "\n")
+            ["    name: ".Length..].ShouldBe(FixtureBundleLocator.DriftJobName);
+        GetSection(packSection, "    name: ", "\n")
+            ["    name: ".Length..].ShouldBe(ReleaseRecoveryVerifier.PackJobName);
+        (GetSection(sourceCiSection, "    name: ", "\n")
+            ["    name: ".Length..] + " / ")
+            .ShouldBe(ReleaseRecoveryVerifier.SourceCiJobPrefix);
+
+        identitySection.ShouldContain(
+            "          PACK_ARTIFACT_DIGEST: ${{ needs.pack.outputs.artifact_digest }}\n");
+        identitySection.ShouldContain(
+            "          RETRIEVE_ARTIFACT_DIGEST: ${{ needs.retrieve.outputs.artifact_digest }}\n");
+        string recoveryIdentity = GetSection(
+            identitySection,
+            "          if ($env:MODE -ceq 'recovery')\n",
+            "          else\n");
+        string packIdentity = GetSection(
+            identitySection,
+            "          else\n",
+            "          $sha256Values = [ordered]@{\n");
+        recoveryIdentity.Split('\n')
+            .Where(line => line.TrimStart().StartsWith(
+                "$artifactDigest =",
+                StringComparison.Ordinal))
+            .ShouldHaveSingleItem().Trim()
+            .ShouldBe("$artifactDigest = $env:RETRIEVE_ARTIFACT_DIGEST");
+        packIdentity.Split('\n')
+            .Where(line => line.TrimStart().StartsWith(
+                "$artifactDigest =",
+                StringComparison.Ordinal))
+            .ShouldHaveSingleItem().Trim()
+            .ShouldBe("$artifactDigest = \"sha256:$env:PACK_ARTIFACT_DIGEST\"");
+
+        string extractApproval = GetSection(
+            retrieveSection,
+            "      - name: Extract fixture approval\n",
+            "      - name: Restore qualification harness\n");
+        string deriveInputs = GetSection(
+            retrieveSection,
+            "      - name: Derive approved qualification inputs\n",
+            "      - name: Reuse original qualification inputs\n");
+        foreach (string step in new[] { extractApproval, deriveInputs })
+        {
+            step.ShouldContain(
+                "        if: ${{ needs.validate.outputs.approval_commit != '' }}\n");
+            step.ShouldContain(
+                "          APPROVAL_COMMIT: ${{ needs.validate.outputs.approval_commit }}\n");
+            step.ShouldContain(
+                "          RELEASE_TAG: ${{ needs.validate.outputs.tag }}\n");
+        }
+
+        extractApproval.ShouldContain("        shell: bash\n");
+        GetRunBlocks(extractApproval).ShouldHaveSingleItem().Trim()
+            .ShouldBe(
+                "git show \"${APPROVAL_COMMIT}:docs/releases/approvals/${RELEASE_TAG}.json\" > \"${RUNNER_TEMP}/fixture-approval.json\"");
+        deriveInputs.ShouldContain("        shell: pwsh\n");
+        deriveInputs.ShouldContain(
+            "          BASE_BUNDLE_SHA256: ${{ steps.base_identity.outputs.base_bundle_sha256 }}\n");
+        GetRunBlocks(deriveInputs).ShouldHaveSingleItem().Trim()
+            .Split('\n')
+            .Select(line => line.Trim())
+            .ToArray()
+            .ShouldBe(
+            [
+                "$bundle = Join-Path '${{ runner.temp }}' 'fixture-bundle'",
+                "$baseBundle = Join-Path '${{ runner.temp }}' 'original-fixture-bundle'",
+                "$approval = Join-Path '${{ runner.temp }}' 'fixture-approval.json'",
+                "$cache = Join-Path '${{ runner.temp }}' 'derive-cache'",
+                "$report = Join-Path '${{ runner.temp }}' 'derive-report.json'",
+                "dotnet run `",
+                "--project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `",
+                "--configuration Release `",
+                "--framework net10.0 `",
+                "--no-restore `",
+                "-- `",
+                "--derive-bundle $bundle `",
+                "--bundle $baseBundle `",
+                "--bundle-sha256 $env:BASE_BUNDLE_SHA256 `",
+                "--approval $approval `",
+                "--approval-commit $env:APPROVAL_COMMIT `",
+                "--release-tag $env:RELEASE_TAG `",
+                "--cache $cache `",
+                "--output $report `",
+                "--corpus test/FhirPkg.Qualification/qualification-corpus.json `",
+                "--summary $env:GITHUB_STEP_SUMMARY `",
+                "--summary-title retrieve-release-candidate"
+            ]);
+    }
+
+    [Fact]
     public void ReleaseWorkflow_NoDispatchInputExpandedInRunScripts()
     {
         const string dispatchInputExpansionPattern =
@@ -814,6 +962,69 @@ public class ReleaseWorkflowContractTests
 
     private static string NormalizeContractText(string value) =>
         value.ReplaceLineEndings("\n");
+
+    private static void AssertPublicationSafetyContract(string workflow)
+    {
+        const string conditionMarker = "    if: >-\n";
+        const string expectedCondition = """
+            ${{
+              !cancelled() &&
+              needs.release-identity.result == 'success' &&
+              needs.package-qualification.result == 'success' &&
+              needs.validate.outputs.validation_only == 'false' &&
+              (
+                (github.event_name == 'release' &&
+                 github.event.action == 'published' &&
+                 github.event.release.tag_name == needs.validate.outputs.tag &&
+                 needs.validate.outputs.mode == 'release') ||
+                (github.event_name == 'workflow_dispatch' &&
+                 needs.validate.outputs.mode == 'recovery' &&
+                 needs.validate.outputs.release_published == 'true')
+              )
+            }}
+            """;
+        workflow = NormalizeContractText(workflow);
+        string validateSection = GetSection(
+            workflow,
+            "  validate:\n",
+            "  source-ci:\n");
+        string publishSection = GetSection(
+            workflow,
+            "  publish:\n",
+            null);
+        string publishCondition = GetSection(
+            publishSection,
+            conditionMarker,
+            "    runs-on: ubuntu-latest\n")[conditionMarker.Length..];
+        Regex.Replace(publishCondition, @"\s+", string.Empty)
+            .ShouldBe(Regex.Replace(expectedCondition, @"\s+", string.Empty));
+
+        string initialValidation = GetSection(
+            validateSection,
+            "      - name: Validate release inputs, tag, and main ancestry\n",
+            "      - name: Locate frozen fixture bundle\n");
+        string revalidation = GetSection(
+            publishSection,
+            "      - name: Revalidate release tag and main ancestry\n",
+            "      - name: Verify GitHub Release is published\n");
+        CountOccurrences(initialValidation, "--allow-published-version")
+            .ShouldBe(1);
+        GetRunBlocks(initialValidation).ShouldHaveSingleItem()
+            .Split('\n')
+            .Where(line => line.Contains(
+                "--allow-published-version",
+                StringComparison.Ordinal))
+            .ShouldHaveSingleItem().Trim().ShouldBe(RecoveryVersionBypass);
+        CountOccurrences(revalidation, "--allow-published-version")
+            .ShouldBe(1);
+        GetRunBlocks(revalidation).ShouldHaveSingleItem()
+            .Split('\n')
+            .Where(line => line.Contains(
+                "--allow-published-version",
+                StringComparison.Ordinal))
+            .ShouldHaveSingleItem().Trim().ShouldBe("--allow-published-version");
+        CountOccurrences(workflow, "--allow-published-version").ShouldBe(2);
+    }
 
     private static string ReadTestProject() =>
         File.ReadAllText(

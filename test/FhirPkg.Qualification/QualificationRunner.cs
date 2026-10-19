@@ -35,7 +35,8 @@ internal sealed class QualificationRunner
         ReportSanitizer sanitizer,
         DateTimeOffset startedUtc,
         string corpusSha256,
-        HttpMessageHandler? acquisitionHandler = null)
+        HttpMessageHandler? acquisitionHandler = null,
+        FixtureRequestLog? requestLog = null)
     {
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentNullException.ThrowIfNull(corpus);
@@ -45,6 +46,7 @@ internal sealed class QualificationRunner
         _build = build;
         _sanitizer = sanitizer;
         _acquisitionHandler = acquisitionHandler;
+        _requestLog = requestLog;
         _workspaceRoot = Path.Combine(
             arguments.CacheRoot,
             ".qualification");
@@ -612,7 +614,7 @@ internal sealed class QualificationRunner
         return bundle;
     }
 
-    private QualificationReport FinalizeReport()
+    internal QualificationReport FinalizeReport()
     {
         _report.Artifacts.AddRange(
             _artifactResults.Values
@@ -870,7 +872,7 @@ internal sealed class QualificationRunner
         result.Success = hashMatch is not false;
     }
 
-    private async Task RunCaseAsync(
+    internal async Task RunCaseAsync(
         string id,
         Func<QualificationCaseContext, CancellationToken, Task> action,
         CancellationToken cancellationToken)

@@ -646,6 +646,85 @@ public sealed class QualificationFixtureRegistryTests : IDisposable
     }
 
     [Fact]
+    public async Task RunCaseAsync_CleanSuccessfulAction_PassesReport()
+    {
+        FixtureRegistry registry =
+            await CreateRegistryAsync(s_registryPackages);
+        FixtureRequestLog log = new();
+        QualificationRunner runner = CreateCaseRunner(registry.Corpus, log);
+
+        await runner.RunCaseAsync(
+            "clean-action",
+            (context, _) =>
+            {
+                context.Detail("actionCompleted", true);
+                return Task.CompletedTask;
+            },
+            TestContext.Current.CancellationToken);
+        QualificationReport report = runner.FinalizeReport();
+
+        QualificationCaseResult result = report.Cases.ShouldHaveSingleItem();
+        result.Id.ShouldBe("clean-action");
+        result.Success.ShouldBeTrue();
+        result.Failures.ShouldBeEmpty();
+        QualificationDetail detail = result.Details.ShouldHaveSingleItem();
+        detail.Name.ShouldBe("actionCompleted");
+        detail.Value.ShouldBe("true");
+        report.Artifacts.ShouldBeEmpty();
+        report.Summary.ArtifactCount.ShouldBe(0);
+        report.Summary.ArtifactFailures.ShouldBe(0);
+        report.Summary.CaseCount.ShouldBe(1);
+        report.Summary.CaseFailures.ShouldBe(0);
+        report.Success.ShouldBeTrue();
+        log.Drain().ShouldBeEmpty();
+        AssertReportMatchesSchema(report);
+    }
+
+    [Fact]
+    public async Task RunCaseAsync_UnroutedRequestAfterSuccessfulAction_FailsReport()
+    {
+        const string unknownUri =
+            "https://packages2.fhir.org/packages/example.registry.missing";
+        FixtureRegistry registry =
+            await CreateRegistryAsync(s_registryPackages);
+        FixtureRequestLog log = new();
+        QualificationRunner runner = CreateCaseRunner(registry.Corpus, log);
+        using HttpClient client = CreateClient(registry.Routes, log);
+
+        await runner.RunCaseAsync(
+            "unrouted-action",
+            async (context, token) =>
+            {
+                using HttpResponseMessage response = await client.GetAsync(
+                    unknownUri,
+                    token);
+                response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+                context.Detail("actionCompleted", true);
+            },
+            TestContext.Current.CancellationToken);
+        QualificationReport report = runner.FinalizeReport();
+
+        QualificationCaseResult result = report.Cases.ShouldHaveSingleItem();
+        result.Id.ShouldBe("unrouted-action");
+        QualificationDetail detail = result.Details.ShouldHaveSingleItem();
+        detail.Name.ShouldBe("actionCompleted");
+        detail.Value.ShouldBe("true");
+        result.Success.ShouldBeFalse();
+        QualificationFailure failure = result.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(QualificationFailureCodes.UnroutedFixtureRequest);
+        failure.ExceptionType.ShouldBe(nameof(QualificationInvariantException));
+        failure.Message.ShouldBe($"Unrouted fixture request(s): GET {unknownUri}");
+        report.Artifacts.ShouldBeEmpty();
+        report.Summary.ArtifactCount.ShouldBe(0);
+        report.Summary.ArtifactFailures.ShouldBe(0);
+        report.Summary.CaseCount.ShouldBe(1);
+        report.Summary.CaseFailures.ShouldBe(1);
+        report.Success.ShouldBeFalse();
+        log.Drain().ShouldBeEmpty();
+        AssertReportMatchesSchema(report);
+    }
+
+    [Fact]
     public async Task RunBundleAsync_DigestMismatch_StopsBeforeAcquisition()
     {
         FixtureRegistry registry = await CreateRegistryAsync(
@@ -1059,6 +1138,23 @@ public sealed class QualificationFixtureRegistryTests : IDisposable
             MaxParallelRegistryQueries = 3,
             ResourceCacheSize = 0
         };
+
+    private QualificationRunner CreateCaseRunner(
+        QualificationCorpus corpus,
+        FixtureRequestLog requestLog) =>
+        new(
+            QualificationArguments.Parse(CreateRequiredArguments()),
+            corpus,
+            new QualificationBuildSnapshot(
+                "source",
+                RequestedPackageVersion: null,
+                PackageVersion: null,
+                FhirPkgAssemblyVersion: "1.0.0.0",
+                FhirPkgInformationalVersion: null),
+            new ReportSanitizer([_tempRoot]),
+            DateTimeOffset.UnixEpoch,
+            s_corpusSha256,
+            requestLog: requestLog);
 
     private QualificationRunner CreateBundleRunner(
         FixtureRegistry registry,

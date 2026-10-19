@@ -11,7 +11,11 @@ internal static class Program
 {
     internal const string BootstrapCaseId = "bootstrap";
 
-    private static async Task<int> Main(string[] args)
+    internal static Task<int> Main(string[] args) => RunAsync(args);
+
+    internal static async Task<int> RunAsync(
+        string[] args,
+        HttpMessageHandler? acquisitionHandler = null)
     {
         DateTimeOffset startedUtc = DateTimeOffset.UtcNow;
         string? outputPath = TryGetOption(args, "output");
@@ -85,7 +89,8 @@ internal static class Program
                 build,
                 sanitizer,
                 startedUtc,
-                corpusSha256);
+                corpusSha256,
+                acquisitionHandler: acquisitionHandler);
             report = arguments.ValidateOnly
                 ? await runner.ValidateOnlyAsync(
                         cancellationSource.Token)

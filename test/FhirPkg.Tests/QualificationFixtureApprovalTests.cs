@@ -16,6 +16,7 @@ namespace FhirPkg.Tests;
 public sealed class QualificationFixtureApprovalTests : IDisposable
 {
     private const string ReportFileName = "qualification-report.json";
+    private const string EntryPointTitle = "recover-entrypoint-derive";
     private const string Release = "v2026.1016.1417";
     private const string OtherRelease = "v2026.1016.1500";
     private const string ApprovalCommit =
@@ -541,6 +542,203 @@ public sealed class QualificationFixtureApprovalTests : IDisposable
                 + $"| {CoreId} | {pinned} | {approved} | {approved} | verified |\n"
                 + "\n"
                 + $"derived bundle sha256:{derivedDigest} from base sha256:{baseDigest}\n");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task EntryPoint_DeriveWithBaseBundle_DerivesInsteadOfQualifying(
+        bool deriveFirst)
+    {
+        EntryPointFixture fixture = await CreateEntryPointFixtureAsync();
+        ImmutableArtifactDefinition definition =
+            fixture.Corpus.GetImmutable(UsCoreId);
+        FixtureBundleManifest baseManifest = ReadManifest(_baseRoot);
+        string summaryPath = Path.Combine(_tempRoot, "entrypoint-summary.md");
+        using FixtureHttpMessageHandler upstream = new();
+        upstream.Serve(
+            definition.Uri,
+            fixture.ApprovedPackage.Archive,
+            s_republishedUtc);
+
+        int exitCode = await FhirPkg.Qualification.Program.RunAsync(
+            CreateEntryPointArguments(fixture, summaryPath, deriveFirst),
+            acquisitionHandler: upstream);
+
+        exitCode.ShouldBe(0);
+        QualificationReport report = await ReadReportAsync(
+            Path.Combine(_tempRoot, ReportFileName));
+        report.Success.ShouldBeTrue();
+        report.ValidationOnly.ShouldBeFalse();
+        report.CorpusSha256.ShouldBe(fixture.CorpusSha256);
+        report.Summary.ShouldBe(new QualificationSummary
+        {
+            ArtifactCount = 1,
+            ArtifactFailures = 0,
+            CaseCount = 1,
+            CaseFailures = 0
+        });
+        QualificationCaseResult derive = report.Cases.ShouldHaveSingleItem();
+        derive.Id.ShouldBe("bundle-derive");
+        derive.Success.ShouldBeTrue();
+        derive.Failures.ShouldBeEmpty();
+        string approvedSha256 = Sha256(fixture.ApprovedPackage.Archive);
+        QualificationArtifactResult fetched =
+            report.Artifacts.ShouldHaveSingleItem();
+        fetched.Id.ShouldBe(UsCoreId);
+        fetched.Kind.ShouldBe("immutable");
+        fetched.SourceUri.ShouldBe(definition.Uri);
+        fetched.ExpectedSha256.ShouldBe(approvedSha256);
+        fetched.ActualSha256.ShouldBe(approvedSha256);
+        fetched.HashMatch.ShouldBe(true);
+        fetched.Success.ShouldBeTrue();
+        fetched.Failure.ShouldBeNull();
+        upstream.Requests.ToArray().ShouldBe([$"GET {definition.Uri}"]);
+
+        string derivedDigest = Sha256(File.ReadAllBytes(
+            Path.Combine(_derivedRoot, "bundle-manifest.json")));
+        DescribeDetails(derive).ShouldBe(
+        [
+            $"approval.{UsCoreId}={DescribeApproval(definition.Sha256, approvedSha256)}",
+            $"baseBundleSha256={fixture.BaseDigest}",
+            $"derivedBundleSha256={derivedDigest}"
+        ]);
+        FixtureBundleManifest manifest = ReadManifest(_derivedRoot);
+        manifest.CorpusSha256.ShouldBe(fixture.CorpusSha256);
+        manifest.BaseBundleSha256.ShouldBe(fixture.BaseDigest);
+        manifest.Artifacts.Count.ShouldBe(17);
+        manifest.Approvals.ShouldNotBeNull();
+        FixtureBundleApproval recorded =
+            manifest.Approvals!.ShouldHaveSingleItem();
+        recorded.ShouldBe(new FixtureBundleApproval
+        {
+            Artifact = UsCoreId,
+            PinnedSha256 = definition.Sha256,
+            ApprovedSha256 = approvedSha256,
+            Release = Release,
+            ApprovedBy = ApprovedBy,
+            Reason = Reason,
+            ApprovalCommit = ApprovalCommit,
+            ObservedLastModified = s_republishedUtc
+        });
+        manifest.Artifacts
+            .Where(artifact => artifact.Id != UsCoreId)
+            .ToArray()
+            .ShouldBe(baseManifest.Artifacts
+                .Where(artifact => artifact.Id != UsCoreId)
+                .ToArray());
+        GetEntryNames(_derivedRoot).ShouldBe(
+            ["blobs", "bundle-manifest.json"]);
+        GetEntryNames(Path.Combine(_derivedRoot, "blobs")).ShouldBe(
+            manifest.Artifacts
+                .Select(artifact => $"{artifact.Sha256}.tgz")
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray());
+        VerifiedFixtureBundle verified =
+            await FixtureBundleVerifier.VerifyAsync(
+                _derivedRoot,
+                derivedDigest,
+                fixture.Corpus,
+                fixture.CorpusSha256,
+                Release,
+                TestContext.Current.CancellationToken);
+        verified.Digest.ShouldBe(derivedDigest);
+        verified.Approvals.ShouldHaveSingleItem().ShouldBe(recorded);
+        verified.EffectiveCorpus.GetImmutable(UsCoreId).Sha256
+            .ShouldBe(approvedSha256);
+        File.ReadAllBytes(verified.GetBlobPath(UsCoreId))
+            .SequenceEqual(fixture.ApprovedPackage.Archive)
+            .ShouldBeTrue();
+        File.ReadAllText(summaryPath).ShouldContain(
+            $"derived bundle sha256:{derivedDigest} from base sha256:{fixture.BaseDigest}");
+    }
+
+    [Fact]
+    public async Task EntryPoint_DeriveWithUnapprovedObservedBytes_FailsWithoutDerivedBundle()
+    {
+        EntryPointFixture fixture = await CreateEntryPointFixtureAsync();
+        ImmutableArtifactDefinition definition =
+            fixture.Corpus.GetImmutable(UsCoreId);
+        byte[] baseManifestBytes = File.ReadAllBytes(
+            Path.Combine(_baseRoot, "bundle-manifest.json"));
+        VerifiedFixtureBundle original =
+            await FixtureBundleVerifier.VerifyAsync(
+                _baseRoot,
+                fixture.BaseDigest,
+                fixture.Corpus,
+                fixture.CorpusSha256,
+                TestContext.Current.CancellationToken);
+        byte[] unapprovedArchive = CreateManifestArchive(
+            definition.Name,
+            definition.Version,
+            "4.0.1",
+            "republished-again");
+        string approvedSha256 = Sha256(fixture.ApprovedPackage.Archive);
+        string observedSha256 = Sha256(unapprovedArchive);
+        observedSha256.ShouldNotBe(approvedSha256);
+        string summaryPath = Path.Combine(_tempRoot, "entrypoint-summary.md");
+        using FixtureHttpMessageHandler upstream = new();
+        upstream.Serve(definition.Uri, unapprovedArchive, s_republishedUtc);
+
+        int exitCode = await FhirPkg.Qualification.Program.RunAsync(
+            CreateEntryPointArguments(fixture, summaryPath),
+            acquisitionHandler: upstream);
+
+        exitCode.ShouldBe(1);
+        QualificationReport report = await ReadReportAsync(
+            Path.Combine(_tempRoot, ReportFileName));
+        report.Success.ShouldBeFalse();
+        report.CorpusSha256.ShouldBe(fixture.CorpusSha256);
+        report.Summary.ShouldBe(new QualificationSummary
+        {
+            ArtifactCount = 1,
+            ArtifactFailures = 1,
+            CaseCount = 1,
+            CaseFailures = 1
+        });
+        QualificationCaseResult derive = report.Cases.ShouldHaveSingleItem();
+        derive.Id.ShouldBe("bundle-derive");
+        derive.Success.ShouldBeFalse();
+        DescribeDetails(derive).ShouldBe(
+        [
+            $"approval.{UsCoreId}={DescribeApproval(definition.Sha256, approvedSha256)}",
+            $"baseBundleSha256={fixture.BaseDigest}"
+        ]);
+        QualificationFailure failure = derive.Failures.ShouldHaveSingleItem();
+        failure.Code.ShouldBe(
+            QualificationFailureCodes.ApprovedBytesUnavailable);
+        failure.ExceptionType.ShouldBe(nameof(FixtureBundleException));
+        failure.Message.ShouldBe(
+            $"upstream no longer serves the approved bytes for {UsCoreId}: observed {observedSha256}");
+        QualificationArtifactResult fetched =
+            report.Artifacts.ShouldHaveSingleItem();
+        fetched.Id.ShouldBe(UsCoreId);
+        fetched.ExpectedSha256.ShouldBe(approvedSha256);
+        fetched.ActualSha256.ShouldBe(observedSha256);
+        fetched.HashMatch.ShouldBe(false);
+        fetched.Success.ShouldBeFalse();
+        fetched.Failure.ShouldBe(failure);
+        upstream.Requests.ToArray().ShouldBe([$"GET {definition.Uri}"]);
+        File.Exists(Path.Combine(_derivedRoot, "bundle-manifest.json"))
+            .ShouldBeFalse();
+        Directory.Exists(_derivedRoot).ShouldBeFalse();
+        File.ReadAllText(summaryPath).ShouldContain("no bundle derived");
+        File.ReadAllBytes(Path.Combine(_baseRoot, "bundle-manifest.json"))
+            .SequenceEqual(baseManifestBytes)
+            .ShouldBeTrue();
+        VerifiedFixtureBundle preserved =
+            await FixtureBundleVerifier.VerifyAsync(
+                _baseRoot,
+                fixture.BaseDigest,
+                fixture.Corpus,
+                fixture.CorpusSha256,
+                TestContext.Current.CancellationToken);
+        preserved.Digest.ShouldBe(fixture.BaseDigest);
+        preserved.Manifest.Artifacts.ToArray()
+            .ShouldBe(original.Manifest.Artifacts.ToArray());
+        preserved.EffectiveCorpus.GetImmutable(UsCoreId).Sha256
+            .ShouldBe(definition.Sha256);
     }
 
     [Theory]
@@ -1191,6 +1389,20 @@ public sealed class QualificationFixtureApprovalTests : IDisposable
                 QualificationJson.SerializerOptions),
             QualificationSchemaPaths.Report);
 
+    private static async Task<QualificationReport> ReadReportAsync(string path)
+    {
+        string json = await File.ReadAllTextAsync(
+            path,
+            TestContext.Current.CancellationToken);
+        QualificationSchemaValidator.ValidateJson(
+            json,
+            QualificationSchemaPaths.Report);
+        return JsonSerializer.Deserialize<QualificationReport>(
+                json,
+                QualificationJson.SerializerOptions)
+            ?? throw new InvalidDataException("The report was empty.");
+    }
+
     // The same check source CI applies to every committed approval record.
     private static void AssertApprovalRecordsAreWellFormed(string directory)
     {
@@ -1381,9 +1593,102 @@ public sealed class QualificationFixtureApprovalTests : IDisposable
         return archives;
     }
 
+    private async Task<EntryPointFixture> CreateEntryPointFixtureAsync()
+    {
+        QualificationCorpus repositoryCorpus =
+            await QualificationCorpus.LoadAsync(
+                Path.Combine(
+                    AppContext.BaseDirectory,
+                    "qualification-corpus.json"),
+                TestContext.Current.CancellationToken);
+        Dictionary<string, byte[]> archives = new(StringComparer.Ordinal);
+        List<ImmutableArtifactDefinition> immutableArtifacts = [];
+        foreach (ImmutableArtifactDefinition definition in
+            repositoryCorpus.ImmutableArtifacts)
+        {
+            string fhirVersion = definition.Name switch
+            {
+                "hl7.fhir.r4b.core" => "4.3.0",
+                "hl7.fhir.r5.core" => "5.0.0",
+                _ => "4.0.1"
+            };
+            byte[] archive = CreateManifestArchive(
+                definition.Name,
+                definition.Version,
+                fhirVersion,
+                "entrypoint-pinned");
+            archives[definition.Id] = archive;
+            immutableArtifacts.Add(definition with { Sha256 = Sha256(archive) });
+        }
+
+        foreach (MutableArtifactDefinition definition in
+            repositoryCorpus.MutableArtifacts)
+        {
+            archives[definition.Id] = CreateManifestArchive(
+                definition.Name,
+                "6.0.0-ballot3",
+                "6.0.0-ballot3",
+                $"captured-{definition.Id}");
+        }
+
+        QualificationCorpus syntheticCorpus = repositoryCorpus with
+        {
+            ImmutableArtifacts = immutableArtifacts
+        };
+        string corpusPath = Path.Combine(_tempRoot, "qualification-corpus.json");
+        await File.WriteAllBytesAsync(
+            corpusPath,
+            JsonSerializer.SerializeToUtf8Bytes(
+                syntheticCorpus,
+                QualificationJson.SerializerOptions),
+            TestContext.Current.CancellationToken);
+        await QualificationSchemaValidator.ValidateFileAsync(
+            corpusPath,
+            QualificationSchemaPaths.Corpus,
+            TestContext.Current.CancellationToken);
+        QualificationCorpus corpus = await QualificationCorpus.LoadAsync(
+            corpusPath,
+            TestContext.Current.CancellationToken);
+        string corpusSha256 = await QualificationCorpusHash.ComputeFileAsync(
+            corpusPath,
+            TestContext.Current.CancellationToken);
+        string baseDigest = await FreezeBaseBundleAsync(
+            corpus,
+            archives,
+            corpusSha256);
+        ImmutableArtifactDefinition approvedDefinition =
+            corpus.GetImmutable(UsCoreId);
+        SyntheticPackage approved = CreateSyntheticPackage(
+            approvedDefinition.Name,
+            approvedDefinition.Version,
+            "4.0.1",
+            "entrypoint-republished");
+        string approvedSha256 = Sha256(approved.Archive);
+        approvedSha256.ShouldNotBe(approvedDefinition.Sha256);
+        WriteApproval(
+            _approvalPath,
+            CreateApproval(
+            [
+                new FixtureApprovalReplacement
+                {
+                    Artifact = approvedDefinition.Id,
+                    PinnedSha256 = approvedDefinition.Sha256,
+                    ApprovedSha256 = approvedSha256,
+                    ObservedLastModified = s_republishedUtc
+                }
+            ]));
+        return new EntryPointFixture(
+            corpus,
+            corpusPath,
+            corpusSha256,
+            baseDigest,
+            approved);
+    }
+
     private async Task<string> FreezeBaseBundleAsync(
         QualificationCorpus corpus,
-        IReadOnlyDictionary<string, byte[]> archives)
+        IReadOnlyDictionary<string, byte[]> archives,
+        string? corpusSha256 = null)
     {
         string directory = Path.Combine(_tempRoot, "downloads");
         Directory.CreateDirectory(directory);
@@ -1414,7 +1719,7 @@ public sealed class QualificationFixtureApprovalTests : IDisposable
         return await FixtureBundleWriter.WriteFrozenAsync(
             _baseRoot,
             corpus,
-            s_corpusSha256,
+            corpusSha256 ?? s_corpusSha256,
             artifacts,
             s_noEnvironment,
             TestContext.Current.CancellationToken);
@@ -1427,6 +1732,43 @@ public sealed class QualificationFixtureApprovalTests : IDisposable
         "--output",
         Path.Combine(_tempRoot, ReportFileName)
     ];
+
+    private string[] CreateEntryPointArguments(
+        EntryPointFixture fixture,
+        string summaryPath,
+        bool deriveFirst = false)
+    {
+        string[] bundleOptions =
+        [
+            "--bundle",
+            _baseRoot,
+            "--bundle-sha256",
+            fixture.BaseDigest
+        ];
+        string[] deriveOptions = ["--derive-bundle", _derivedRoot];
+        string[] modeOptions = deriveFirst
+            ? [.. deriveOptions, .. bundleOptions]
+            : [.. bundleOptions, .. deriveOptions];
+        return
+        [
+            .. CreateRequiredArguments("entrypoint-cache"),
+            "--corpus",
+            fixture.CorpusPath,
+            "--summary",
+            summaryPath,
+            "--summary-title",
+            EntryPointTitle,
+            "--http-timeout-seconds",
+            "30",
+            .. modeOptions,
+            "--approval",
+            _approvalPath,
+            "--approval-commit",
+            ApprovalCommit,
+            "--release-tag",
+            Release
+        ];
+    }
 
     private static string[] CreateDeriveOptions(string? without = null)
     {
@@ -1734,6 +2076,13 @@ public sealed class QualificationFixtureApprovalTests : IDisposable
         string BaseDigest,
         string DerivedDigest,
         QualificationReport Report);
+
+    private sealed record EntryPointFixture(
+        QualificationCorpus Corpus,
+        string CorpusPath,
+        string CorpusSha256,
+        string BaseDigest,
+        SyntheticPackage ApprovedPackage);
 
     private sealed record FixtureResponse(
         HttpStatusCode StatusCode,
