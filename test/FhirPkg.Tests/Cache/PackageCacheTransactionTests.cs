@@ -6,6 +6,7 @@ using FhirPkg.Models;
 using FhirPkg.Tests.Support;
 using FhirPkg.Utilities;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using Shouldly;
 using Xunit;
@@ -207,18 +208,52 @@ public sealed class PackageCacheTransactionTests : IDisposable
         using (MemoryStream replacement = CreateGenerationArchive("new", newRawRoot))
         {
             await Should.ThrowAsync<PackageCacheInjectedFaultException>(
-                () => faultingCache.InstallAsync(
-                    s_reference,
-                    replacement,
-                    new InstallCacheOptions
+                async () =>
+                {
+                    try
                     {
-                        VerifyChecksum = false,
-                        OverwriteExisting = true,
-                        Unmodified = newRawRoot,
-                        ArchiveSha256 = "new-hash",
-                        SourcePublicationDate = GenerationPublicationDate("new")
-                    },
-                    TestContext.Current.CancellationToken));
+                        await faultingCache.InstallAsync(
+                            s_reference,
+                            replacement,
+                            new InstallCacheOptions
+                            {
+                                VerifyChecksum = false,
+                                OverwriteExisting = true,
+                                Unmodified = newRawRoot,
+                                ArchiveSha256 = "new-hash",
+                                SourcePublicationDate = GenerationPublicationDate("new")
+                            },
+                            TestContext.Current.CancellationToken);
+                    }
+                    catch (Exception exception) when (exception is not PackageCacheInjectedFaultException)
+                    {
+                        try
+                        {
+                            ITestOutputHelper? output = TestContext.Current.TestOutputHelper;
+                            if (output is not null)
+                            {
+                                output.WriteLine(
+                                    $"Unexpected installation exception in {nameof(Overwrite_InjectedCrash_RecoversCoherentState)}: " +
+                                    $"(pointName: \"{pointName}\", stateName: \"{stateName}\", " +
+                                    $"expectedValue: \"{expectedValue}\", oldRawRoot: {oldRawRoot}, newRawRoot: {newRawRoot})");
+                                output.WriteLine(
+                                    $"UTC: {DateTimeOffset.UtcNow:O}; ProcessId: {Environment.ProcessId}; " +
+                                    $"Runtime: {RuntimeInformation.FrameworkDescription}");
+                                output.WriteLine($"CacheRoot: {_cacheRoot}");
+                                if (observer.OperationId is string operationId)
+                                    output.WriteLine($"OperationId: {operationId}");
+                                output.WriteLine(exception.ToString());
+                                WriteExceptionDetails(output, exception, "Exception");
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Best-effort diagnostics must not replace the installation exception.
+                        }
+
+                        throw;
+                    }
+                });
         }
 
         using DiskPackageCache recoveredCache = CreateCache();
@@ -1672,6 +1707,38 @@ public sealed class PackageCacheTransactionTests : IDisposable
             Directory.Delete(_cacheRoot, recursive: true);
 
         GC.SuppressFinalize(this);
+    }
+
+    private static void WriteExceptionDetails(
+        ITestOutputHelper output,
+        Exception exception,
+        string path)
+    {
+        output.WriteLine(
+            $"{path}: {exception.GetType().FullName}; HResult: {exception.HResult} (0x{exception.HResult:X8})");
+        if (exception is PackageInstallException installException)
+        {
+            output.WriteLine(
+                $"{path}: ErrorCode: {installException.ErrorCode}; Stage: {installException.Stage}; " +
+                $"Directive: {installException.Directive ?? "<null>"}");
+        }
+        if (exception is Win32Exception win32Exception)
+            output.WriteLine($"{path}: NativeErrorCode: {win32Exception.NativeErrorCode}");
+
+        if (exception is AggregateException aggregateException)
+        {
+            for (int index = 0; index < aggregateException.InnerExceptions.Count; index++)
+            {
+                WriteExceptionDetails(
+                    output,
+                    aggregateException.InnerExceptions[index],
+                    $"{path}.InnerExceptions[{index}]");
+            }
+        }
+        else if (exception.InnerException is Exception innerException)
+        {
+            WriteExceptionDetails(output, innerException, $"{path}.InnerException");
+        }
     }
 
     private async Task CreateCorruptTargetAsync()
