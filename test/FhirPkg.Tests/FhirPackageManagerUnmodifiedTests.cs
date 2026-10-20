@@ -1,8 +1,10 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Formats.Tar;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
@@ -82,52 +84,101 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
         stream.Position = 2;
         Uri uri = new("https://source.example.test/package.tgz");
         PackageRecord? installed;
-        switch (source)
+        try
         {
-            case "directive":
-                installed = await manager.InstallAsync(
-                    root.Reference.FhirDirective, options, TestContext.Current.CancellationToken);
-                break;
-            case "expected-stream":
-                installed = await manager.InstallAsync(
-                    root.Reference, stream, options, TestContext.Current.CancellationToken);
-                break;
-            case "discovered-stream":
-                installed = await manager.ImportAsync(
-                    stream, options, TestContext.Current.CancellationToken);
-                break;
-            case "expected-uri":
-                installed = await manager.InstallAsync(
-                    root.Reference, uri, options, TestContext.Current.CancellationToken);
-                break;
-            case "discovered-uri":
-                installed = await manager.ImportAsync(
-                    uri, options, TestContext.Current.CancellationToken);
-                break;
-            case "local-archive":
-                string archivePath = Path.Combine(_root, "package.tgz");
-                await File.WriteAllBytesAsync(
-                    archivePath, root.ArchiveBytes, TestContext.Current.CancellationToken);
-                await using (FileStream localArchive = File.OpenRead(archivePath))
-                {
+            switch (source)
+            {
+                case "directive":
+                    installed = await manager.InstallAsync(
+                        root.Reference.FhirDirective, options, TestContext.Current.CancellationToken);
+                    break;
+                case "expected-stream":
+                    installed = await manager.InstallAsync(
+                        root.Reference, stream, options, TestContext.Current.CancellationToken);
+                    break;
+                case "discovered-stream":
                     installed = await manager.ImportAsync(
-                        localArchive, options, TestContext.Current.CancellationToken);
-                    localArchive.CanRead.ShouldBeTrue();
-                    localArchive.Position.ShouldBe(localArchive.Length);
+                        stream, options, TestContext.Current.CancellationToken);
+                    break;
+                case "expected-uri":
+                    installed = await manager.InstallAsync(
+                        root.Reference, uri, options, TestContext.Current.CancellationToken);
+                    break;
+                case "discovered-uri":
+                    installed = await manager.ImportAsync(
+                        uri, options, TestContext.Current.CancellationToken);
+                    break;
+                case "local-archive":
+                    string archivePath = Path.Combine(_root, "package.tgz");
+                    await File.WriteAllBytesAsync(
+                        archivePath, root.ArchiveBytes, TestContext.Current.CancellationToken);
+                    await using (FileStream localArchive = File.OpenRead(archivePath))
+                    {
+                        installed = await manager.ImportAsync(
+                            localArchive, options, TestContext.Current.CancellationToken);
+                        localArchive.CanRead.ShouldBeTrue();
+                        localArchive.Position.ShouldBe(localArchive.Length);
+                    }
+                    break;
+                case "batch":
+                    IReadOnlyList<PackageInstallResult> results = await manager.InstallManyAsync(
+                        [root.Reference.FhirDirective, batchSibling.Reference.FhirDirective],
+                        options,
+                        TestContext.Current.CancellationToken);
+                    results.Count.ShouldBe(2);
+                    results.ShouldAllBe(result => result.Status == PackageInstallStatus.Installed);
+                    installed = results.Single(result => result.Directive == root.Reference.FhirDirective).Package;
+                    await AssertFixtureAsync(cache, batchSibling, unmodified, fileOperations);
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unknown source fixture '{source}'.");
+            }
+        }
+        catch (DependencyInstallationException exception)
+        {
+            ITestOutputHelper? output = null;
+            try
+            {
+                output = TestContext.Current.TestOutputHelper;
+                if (output is not null)
+                {
+                    output.WriteLine(
+                        $"Dependency installation exception in {nameof(AllSourceModes_ApplySnapshotToRootAndDependencies)}: " +
+                        $"(unmodified: {unmodified}, rootLayout: {rootLayout}, source: \"{source}\")");
+                    output.WriteLine(
+                        $"UTC: {DateTimeOffset.UtcNow:O}; ProcessId: {Environment.ProcessId}; " +
+                        $"Runtime: {RuntimeInformation.FrameworkDescription}");
+                    output.WriteLine($"_root: {_root}; CachePath: {CachePath}");
+                    output.WriteLine($"Exception.RootPackage.Reference: {exception.RootPackage.Reference}");
+                    output.WriteLine(
+                        "Diagnostics are best-effort: an unavailable output helper yields no output; " +
+                        "formatting/output failures may leave partial output. Context is not native operation/handle attribution.");
+                    output.WriteLine(exception.ToString());
+                    WriteExceptionDetails(output, exception, "Exception");
+                    output.WriteLine(
+                        "Dependency failure snapshots do not retain original child exception objects, stacks or native codes; " +
+                        "those details are unavailable, not reconstructed. Registry failures retain only sanitized snapshots.");
+                    WriteDependencyFailures(output, exception.DependencyFailures, "Exception.DependencyFailures");
+                    WriteDependencyResolutionFailures(
+                        output, exception.DependencyResolutionFailures, "Exception.DependencyResolutionFailures");
                 }
-                break;
-            case "batch":
-                IReadOnlyList<PackageInstallResult> results = await manager.InstallManyAsync(
-                    [root.Reference.FhirDirective, batchSibling.Reference.FhirDirective],
-                    options,
-                    TestContext.Current.CancellationToken);
-                results.Count.ShouldBe(2);
-                results.ShouldAllBe(result => result.Status == PackageInstallStatus.Installed);
-                installed = results.Single(result => result.Directive == root.Reference.FhirDirective).Package;
-                await AssertFixtureAsync(cache, batchSibling, unmodified, fileOperations);
-                break;
-            default:
-                throw new InvalidOperationException($"Unknown source fixture '{source}'.");
+            }
+            catch (Exception)
+            {
+                // Best-effort diagnostics must not replace the installation exception.
+                try
+                {
+                    output?.WriteLine(
+                        "Diagnostic capture failed; output may be partial or absent. " +
+                        "The original dependency installation exception is rethrown unchanged.");
+                }
+                catch (Exception)
+                {
+                    // The existing output helper may remain unavailable.
+                }
+            }
+
+            throw;
         }
 
         installed.ShouldNotBeNull();
@@ -497,6 +548,99 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
         if (Directory.Exists(_root))
             Directory.Delete(_root, recursive: true);
     }
+
+    private static void WriteExceptionDetails(
+        ITestOutputHelper output,
+        Exception exception,
+        string path)
+    {
+        output.WriteLine(
+            $"{path}: {exception.GetType().FullName}; HResult: {exception.HResult} (0x{exception.HResult:X8})");
+        if (exception is PackageInstallException installException)
+        {
+            output.WriteLine(
+                $"{path}: ErrorCode: {installException.ErrorCode}; Stage: {installException.Stage}; " +
+                $"Directive: {FormatDiagnosticValue(installException.Directive)}");
+        }
+        if (exception is Win32Exception win32Exception)
+        {
+            output.WriteLine($"{path}: NativeErrorCode: {win32Exception.NativeErrorCode}");
+        }
+
+        if (exception is AggregateException aggregateException)
+        {
+            for (int index = 0; index < aggregateException.InnerExceptions.Count; index++)
+            {
+                WriteExceptionDetails(
+                    output,
+                    aggregateException.InnerExceptions[index],
+                    $"{path}.InnerExceptions[{index}]");
+            }
+        }
+        else if (exception.InnerException is Exception innerException)
+        {
+            WriteExceptionDetails(output, innerException, $"{path}.InnerException");
+        }
+    }
+
+    private static void WriteDependencyFailures(
+        ITestOutputHelper output,
+        IReadOnlyList<PackageInstallResult> failures,
+        string path)
+    {
+        output.WriteLine($"{path}.Count: {failures.Count}");
+        for (int index = 0; index < failures.Count; index++)
+        {
+            PackageInstallResult failure = failures[index];
+            string entryPath = $"{path}[{index}]";
+            output.WriteLine(
+                $"{entryPath}: Directive: {FormatDiagnosticValue(failure.Directive)}; Status: {failure.Status}; " +
+                $"ErrorCode: {failure.ErrorCode?.ToString() ?? "<null>"}; " +
+                $"ErrorStage: {failure.ErrorStage?.ToString() ?? "<null>"}; " +
+                $"ErrorMessage: {FormatDiagnosticValue(failure.ErrorMessage)}");
+            WriteDependencyFailures(output, failure.DependencyFailures, $"{entryPath}.DependencyFailures");
+        }
+    }
+
+    private static void WriteDependencyResolutionFailures(
+        ITestOutputHelper output,
+        IReadOnlyList<DependencyResolutionFailure> failures,
+        string path)
+    {
+        output.WriteLine($"{path}.Count: {failures.Count}");
+        for (int index = 0; index < failures.Count; index++)
+        {
+            DependencyResolutionFailure failure = failures[index];
+            string entryPath = $"{path}[{index}]";
+            output.WriteLine(
+                $"{entryPath}: Code: {failure.Code}; PackageId: {FormatDiagnosticValue(failure.PackageId)}; " +
+                $"Message: {FormatDiagnosticValue(failure.Message)}; " +
+                $"VersionSpecifier: {FormatDiagnosticValue(failure.VersionSpecifier)}; " +
+                $"SelectedVersion: {FormatDiagnosticValue(failure.SelectedVersion)}; " +
+                $"ParentPackageId: {FormatDiagnosticValue(failure.ParentPackageId)}; " +
+                $"ParentVersion: {FormatDiagnosticValue(failure.ParentVersion)}; " +
+                $"Depth: {failure.Depth?.ToString() ?? "<null>"}; MaxDepth: {failure.MaxDepth?.ToString() ?? "<null>"}");
+            output.WriteLine($"{entryPath}.RequestedVersions.Count: {failure.RequestedVersions.Count}");
+            for (int versionIndex = 0; versionIndex < failure.RequestedVersions.Count; versionIndex++)
+            {
+                output.WriteLine(
+                    $"{entryPath}.RequestedVersions[{versionIndex}]: " +
+                    FormatDiagnosticValue(failure.RequestedVersions[versionIndex]));
+            }
+            output.WriteLine($"{entryPath}.RegistryFailures.Count: {failure.RegistryFailures.Count}");
+            for (int registryIndex = 0; registryIndex < failure.RegistryFailures.Count; registryIndex++)
+            {
+                RegistryAttemptFailure registryFailure = failure.RegistryFailures[registryIndex];
+                output.WriteLine(
+                    $"{entryPath}.RegistryFailures[{registryIndex}]: " +
+                    $"EndpointOrigin: {FormatDiagnosticValue(registryFailure.EndpointOrigin)}; " +
+                    $"Category: {registryFailure.Category}; Message: {FormatDiagnosticValue(registryFailure.Message)}");
+            }
+        }
+    }
+
+    private static string FormatDiagnosticValue(string? value) =>
+        value is null ? "<null>" : $"\"{value}\"";
 
     private DiskPackageCache CreateCache(RecordingFileOperations fileOperations) =>
         new(
