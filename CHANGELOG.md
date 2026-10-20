@@ -10,6 +10,8 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+## [2026.1020.1119] - 2026-10-20
+
 ### Added
 - Added a weekly, dispatchable fixture drift check
   (`.github/workflows/fixture-drift.yaml`) that downloaded and verified every
@@ -28,8 +30,6 @@ qualification evidence) lives alongside this file under
   every case offline from that bundle.
 - Qualification jobs wrote job summaries and error annotations that listed
   rejected artifacts and separated dependent from independent case failures.
-
-## [2026.1016.1417] - 2026-10-16
 
 ### Added
 - Added opt-in SDK `FhirPackageManagerOptions.Unmodified` and
