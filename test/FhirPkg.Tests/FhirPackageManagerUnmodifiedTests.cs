@@ -13,6 +13,7 @@ using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
 using FhirPkg.Tests.Support;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Shouldly;
@@ -73,7 +74,8 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
         FixtureHttpHandler handler = new(root.ArchiveBytes);
         using HttpClient httpClient = new(handler);
         FhirPackageManagerOptions configured = new() { Unmodified = unmodified };
-        using FhirPackageManager manager = CreateManager(cache, registry, configured, httpClient);
+        BufferedExceptionLogger logger = new();
+        using FhirPackageManager manager = CreateManager(cache, registry, configured, httpClient, logger);
         configured.Unmodified = !unmodified;
         PackageSourceInstallOptions options = new()
         {
@@ -125,6 +127,8 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
                         [root.Reference.FhirDirective, batchSibling.Reference.FhirDirective],
                         options,
                         TestContext.Current.CancellationToken);
+                    if (results.Any(HasInstallationFailure))
+                        WriteBatchFailureDiagnostics(results, logger, unmodified, rootLayout, source);
                     results.Count.ShouldBe(2);
                     results.ShouldAllBe(result => result.Status == PackageInstallStatus.Installed);
                     installed = results.Single(result => result.Directive == root.Reference.FhirDirective).Package;
@@ -157,10 +161,12 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
                     WriteExceptionDetails(output, exception, "Exception");
                     output.WriteLine(
                         "Dependency failure snapshots do not retain original child exception objects, stacks or native codes; " +
-                        "those details are unavailable, not reconstructed. Registry failures retain only sanitized snapshots.");
+                        "see buffered original manager exceptions below when available, not reconstructed exceptions. " +
+                        "Registry failures retain only sanitized snapshots.");
                     WriteDependencyFailures(output, exception.DependencyFailures, "Exception.DependencyFailures");
                     WriteDependencyResolutionFailures(
                         output, exception.DependencyResolutionFailures, "Exception.DependencyResolutionFailures");
+                    logger.WriteExceptions(output);
                 }
             }
             catch (Exception)
@@ -270,6 +276,7 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
             restore ? project : root.Manifest,
             cancellationToken: TestContext.Current.CancellationToken);
         before.BootstrapInstallOrder.ShouldContain(alias);
+        BufferedExceptionLogger logger = new();
         using FhirPackageManager manager = new(
             cache,
             registry,
@@ -277,7 +284,7 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
             dependencyResolver,
             new PackageIndexer(NullLogger<PackageIndexer>.Instance),
             new FhirPackageManagerOptions { Unmodified = unmodified },
-            NullLogger<FhirPackageManager>.Instance);
+            logger);
 
         if (restore)
         {
@@ -300,10 +307,65 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
         }
         else
         {
-            PackageRecord? installed = await manager.InstallAsync(
-                root.Reference.FhirDirective,
-                new InstallOptions { IncludeDependencies = true },
-                TestContext.Current.CancellationToken);
+            PackageRecord? installed;
+            try
+            {
+                installed = await manager.InstallAsync(
+                    root.Reference.FhirDirective,
+                    new InstallOptions { IncludeDependencies = true },
+                    TestContext.Current.CancellationToken);
+            }
+            catch (DependencyInstallationException exception)
+            {
+                ITestOutputHelper? output = null;
+                try
+                {
+                    output = TestContext.Current.TestOutputHelper;
+                    if (output is not null)
+                    {
+                        output.WriteLine(
+                            $"Dependency installation exception in {nameof(DependencyBootstrapClosureAndRestore_InheritMode)}: " +
+                            $"(unmodified: {unmodified}, rootLayout: {rootLayout}, restore: {restore})");
+                        output.WriteLine(
+                            $"UTC: {DateTimeOffset.UtcNow:O}; ProcessId: {Environment.ProcessId}; " +
+                            $"Runtime: {RuntimeInformation.FrameworkDescription}");
+                        output.WriteLine($"_root: {_root}; CachePath: {CachePath}");
+                        output.WriteLine($"Exception.RootPackage.Reference: {exception.RootPackage.Reference}");
+                        output.WriteLine(
+                            "Diagnostics are best-effort: an unavailable output helper yields no output; " +
+                            "formatting/output failures may leave partial output. UTC is output time, not native-call timing. " +
+                            "Context is not native operation/handle attribution.");
+                        output.WriteLine(exception.ToString());
+                        WriteExceptionDetails(output, exception, "Exception");
+                        output.WriteLine(
+                            "Dependency failure snapshots do not retain original child exception objects, stacks or native codes. " +
+                            "Buffered original manager exceptions may be unavailable; missing details are not reconstructed. " +
+                            "Zero logged exceptions is missing evidence, not evidence of successful installation. " +
+                            "Registry failures retain only sanitized snapshots.");
+                        WriteDependencyFailures(output, exception.DependencyFailures, "Exception.DependencyFailures");
+                        WriteDependencyResolutionFailures(
+                            output, exception.DependencyResolutionFailures, "Exception.DependencyResolutionFailures");
+                        logger.WriteExceptions(output);
+                    }
+                }
+                catch (Exception)
+                {
+                    // Best-effort diagnostics must not replace the installation exception.
+                    try
+                    {
+                        output?.WriteLine(
+                            "Diagnostic capture failed; output may be partial or absent. " +
+                            "The original dependency installation exception is rethrown unchanged.");
+                    }
+                    catch (Exception)
+                    {
+                        // The existing output helper may remain unavailable.
+                    }
+                }
+
+                throw;
+            }
+
             installed.ShouldNotBeNull();
         }
 
@@ -549,6 +611,54 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
             Directory.Delete(_root, recursive: true);
     }
 
+    private static bool HasInstallationFailure(PackageInstallResult result) =>
+        result.Status != PackageInstallStatus.Installed
+        || result.DependencyFailures.Any(HasInstallationFailure);
+
+    private void WriteBatchFailureDiagnostics(
+        IReadOnlyList<PackageInstallResult> results,
+        BufferedExceptionLogger logger,
+        bool unmodified,
+        bool rootLayout,
+        string source)
+    {
+        ITestOutputHelper? output = null;
+        try
+        {
+            output = TestContext.Current.TestOutputHelper;
+            if (output is not null)
+            {
+                output.WriteLine(
+                    $"Returned batch failure in {nameof(AllSourceModes_ApplySnapshotToRootAndDependencies)}: " +
+                    $"(unmodified: {unmodified}, rootLayout: {rootLayout}, source: \"{source}\")");
+                output.WriteLine(
+                    $"UTC: {DateTimeOffset.UtcNow:O}; ProcessId: {Environment.ProcessId}; " +
+                    $"Runtime: {RuntimeInformation.FrameworkDescription}");
+                output.WriteLine($"_root: {_root}; CachePath: {CachePath}");
+                output.WriteLine(
+                    "Results are printed in returned order, including recursive dependency snapshots. " +
+                    "Original exceptions are buffered separately from manager logging; missing details are not reconstructed. " +
+                    "Diagnostics are best-effort and do not identify an obstructing handle's owner.");
+                WriteDependencyFailures(output, results, "Results");
+                logger.WriteExceptions(output);
+            }
+        }
+        catch (Exception)
+        {
+            // Best-effort diagnostics must not replace the existing success assertion.
+            try
+            {
+                output?.WriteLine(
+                    "Batch diagnostic capture failed; output may be partial or absent. " +
+                    "The original returned results will still be asserted.");
+            }
+            catch (Exception)
+            {
+                // The existing output helper may remain unavailable.
+            }
+        }
+    }
+
     private static void WriteExceptionDetails(
         ITestOutputHelper output,
         Exception exception,
@@ -566,6 +676,8 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
         {
             output.WriteLine($"{path}: NativeErrorCode: {win32Exception.NativeErrorCode}");
         }
+        foreach (System.Collections.DictionaryEntry entry in exception.Data)
+            output.WriteLine($"{path}.Data[{entry.Key}]: {entry.Value ?? "<null>"}");
 
         if (exception is AggregateException aggregateException)
         {
@@ -655,19 +767,98 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
         DiskPackageCache cache,
         FixtureRegistry registry,
         FhirPackageManagerOptions options,
-        HttpClient? httpClient = null)
+        HttpClient? httpClient = null,
+        ILogger<FhirPackageManager>? logger = null)
     {
         VersionResolver versionResolver = new(registry, NullLogger.Instance);
         DependencyResolver dependencyResolver = new(registry, versionResolver, cache, NullLogger.Instance);
         PackageIndexer indexer = new(NullLogger<PackageIndexer>.Instance);
+        logger ??= NullLogger<FhirPackageManager>.Instance;
         return httpClient is null
             ? new FhirPackageManager(
                 cache, registry, versionResolver, dependencyResolver, indexer,
-                options, NullLogger<FhirPackageManager>.Instance, new MemoryResourceCache(10))
+                options, logger, new MemoryResourceCache(10))
             : FhirPackageManager.CreateWithHttpClient(
                 cache, registry, versionResolver, dependencyResolver, indexer,
-                options, NullLogger<FhirPackageManager>.Instance, new MemoryResourceCache(10),
+                options, logger, new MemoryResourceCache(10),
                 PackageInstallLimits.ResolveManager(options.InstallLimits), httpClient);
+    }
+
+    private sealed record LoggedException(
+        DateTimeOffset Timestamp,
+        LogLevel Level,
+        EventId EventId,
+        string Message,
+        Exception Exception);
+
+    private sealed class BufferedExceptionLogger : ILogger<FhirPackageManager>
+    {
+        private readonly ConcurrentQueue<LoggedException> _exceptions = new();
+        private int _captureFailures;
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull =>
+            null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (exception is null)
+                return;
+
+            try
+            {
+                string message;
+                try
+                {
+                    message = formatter(state, exception);
+                }
+                catch (Exception)
+                {
+                    message = "<log message formatting unavailable>";
+                    Interlocked.Increment(ref _captureFailures);
+                }
+
+                _exceptions.Enqueue(new LoggedException(
+                    DateTimeOffset.UtcNow, logLevel, eventId, message, exception));
+            }
+            catch (Exception)
+            {
+                // Logging must not turn a failed install into a different outcome.
+                Interlocked.Increment(ref _captureFailures);
+            }
+        }
+
+        internal void WriteExceptions(ITestOutputHelper output)
+        {
+            LoggedException[] entries = _exceptions.ToArray();
+            output.WriteLine(
+                $"Original manager exceptions: {entries.Length}; " +
+                $"Diagnostic capture/formatting failures: {Volatile.Read(ref _captureFailures)}");
+            for (int index = 0; index < entries.Length; index++)
+            {
+                LoggedException entry = entries[index];
+                string path = $"ManagerExceptions[{index}]";
+                output.WriteLine(
+                    $"{path}: UTC: {entry.Timestamp:O}; Level: {entry.Level}; " +
+                    $"EventId: {entry.EventId}; Message: {entry.Message}");
+                output.WriteLine(entry.Exception.ToString());
+                WriteExceptionDetails(output, entry.Exception, path);
+                if (entry.Exception is DependencyInstallationException dependencyException)
+                {
+                    WriteDependencyFailures(
+                        output, dependencyException.DependencyFailures, $"{path}.DependencyFailures");
+                    WriteDependencyResolutionFailures(
+                        output, dependencyException.DependencyResolutionFailures, $"{path}.DependencyResolutionFailures");
+                }
+            }
+        }
     }
 
     private static FhirPackageManager CreateInjectedManager(
