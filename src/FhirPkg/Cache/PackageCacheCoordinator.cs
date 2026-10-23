@@ -1,10 +1,9 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Collections.Concurrent;
-using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
-using System.Runtime.InteropServices;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 
 namespace FhirPkg.Cache;
 
@@ -561,86 +560,16 @@ internal sealed class PackageCacheLease :
 
 internal static class PackageCacheFileLock
 {
-    private const int MacLockExclusive = 2;
-    private const int MacLockNonBlocking = 4;
-    private const int MacLockUnlock = 8;
-    private const int MacWouldBlock = 35;
+    // Extraction only: the coordinator still owns its original contention loop.
+    internal static bool TryLock(FileStream stream) =>
+        ResilientFileSystem.ValueOrThrow(SystemFileSystemPrimitives.Instance.TryLock(stream));
 
-    internal static bool TryLock(FileStream stream)
-    {
-        ArgumentNullException.ThrowIfNull(stream);
-        if (OperatingSystem.IsMacOS())
-        {
-            int descriptor = stream.SafeFileHandle
-                .DangerousGetHandle()
-                .ToInt32();
-            if (Flock(
-                    descriptor,
-                    MacLockExclusive | MacLockNonBlocking) == 0)
-            {
-                return true;
-            }
+    internal static void Unlock(FileStream stream) =>
+        ResilientFileSystem.ValueOrThrow(SystemFileSystemPrimitives.Instance.Unlock(stream));
 
-            int error = Marshal.GetLastPInvokeError();
-            if (error == MacWouldBlock)
-                return false;
+    internal static bool IsMacOpenContention(IOException exception) =>
+        SystemFileSystemPrimitives.IsMacOpenContention(exception);
 
-            throw new IOException(
-                "The macOS package cache lock could not be acquired.",
-                new Win32Exception(error));
-        }
-
-        try
-        {
-            stream.Lock(0, 1);
-            return true;
-        }
-        catch (IOException exception)
-            when (IsManagedLockContention(exception))
-        {
-            return false;
-        }
-    }
-
-    internal static void Unlock(FileStream stream)
-    {
-        ArgumentNullException.ThrowIfNull(stream);
-        if (OperatingSystem.IsMacOS())
-        {
-            int descriptor = stream.SafeFileHandle
-                .DangerousGetHandle()
-                .ToInt32();
-            if (Flock(descriptor, MacLockUnlock) != 0)
-            {
-                throw new IOException(
-                    "The macOS package cache lock could not be released.",
-                    new Win32Exception(Marshal.GetLastPInvokeError()));
-            }
-
-            return;
-        }
-
-        stream.Unlock(0, 1);
-    }
-
-    [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
-    private static extern int Flock(int descriptor, int operation);
-
-    internal static bool IsMacOpenContention(
-        IOException exception)
-    {
-        ArgumentNullException.ThrowIfNull(exception);
-        return (exception.HResult & 0xFFFF) == MacWouldBlock;
-    }
-
-    internal static bool IsManagedLockContention(
-        IOException exception)
-    {
-        ArgumentNullException.ThrowIfNull(exception);
-        int nativeError = exception.HResult & 0xFFFF;
-        return OperatingSystem.IsWindows()
-            ? nativeError is 32 or 33
-            : !OperatingSystem.IsMacOS()
-                && nativeError is 11 or 13;
-    }
+    internal static bool IsManagedLockContention(IOException exception) =>
+        SystemFileSystemPrimitives.IsManagedLockContention(exception);
 }

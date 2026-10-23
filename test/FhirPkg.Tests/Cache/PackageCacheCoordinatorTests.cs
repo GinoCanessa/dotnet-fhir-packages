@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Text;
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Utilities;
 using Shouldly;
@@ -659,6 +660,38 @@ public sealed class PackageCacheCoordinatorTests
             PackageCacheFileLock.IsManagedLockContention(
                     CreateNativeIOException(nativeError))
                 .ShouldBe(acceptedCodes.Contains(nativeError));
+        }
+    }
+
+    [Theory]
+    [InlineData(35, true)]
+    [InlineData(13, false)]
+    [InlineData(123456, false)]
+    public void RawMacLock_ClassifiesContentionBeforeFaultScheduling(int error, bool contended)
+    {
+        int calls = 0;
+        FileSystemReplayOutcome<bool> outcome = NativeFileSystemPrimitives.TryLockDescriptor(
+            73,
+            (descriptor, flags) =>
+            {
+                descriptor.ShouldBe(73);
+                flags.ShouldBe(2 | 4);
+                calls++;
+                return -1;
+            },
+            () => error);
+
+        calls.ShouldBe(1);
+        outcome.Kind.ShouldBe(contended
+            ? FileSystemReplayOutcomeKind.Contended
+            : FileSystemReplayOutcomeKind.PrimitiveFailure);
+        if (!contended)
+        {
+            FileSystemFailureContext.TryGetOrigin(
+                outcome.PrimitiveFailure!.Exception, out FileSystemFailureContext? failure).ShouldBeTrue();
+            failure!.NativeErrorCode.ShouldBe(error);
+            outcome.PrimitiveFailure.ReplaySafety.ShouldBe(FileSystemReplaySafety.Safe);
+            FileSystemFailureContext.TryGetTerminal(outcome.PrimitiveFailure.Exception, out _).ShouldBeFalse();
         }
     }
 

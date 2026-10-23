@@ -2,6 +2,7 @@
 
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Tests.Support;
 using FhirPkg.Utilities;
@@ -966,7 +967,8 @@ public sealed class PackageCacheTransactionTests : IDisposable
                     CancellationToken cancellationToken) =>
                 {
                     delayCalls++;
-                    delay.ShouldBe(TimeSpan.FromMilliseconds(10));
+                    delay.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(10));
+                    delay.ShouldBeLessThanOrEqualTo(TimeSpan.FromMilliseconds(20));
                     delayStarted.TrySetResult();
                     await releaseDelay.Task.WaitAsync(cancellationToken)
                         .ConfigureAwait(false);
@@ -986,7 +988,7 @@ public sealed class PackageCacheTransactionTests : IDisposable
     }
 
     [Fact]
-    public async Task WindowsFileReplace_NonTransientErrorFailsImmediately()
+    public async Task WindowsFileReplace_BroadSafeErrorsUseSharedBudget()
     {
         int attempts = 0;
         int delayCalls = 0;
@@ -1013,11 +1015,14 @@ public sealed class PackageCacheTransactionTests : IDisposable
                     CancellationToken.None)
                 .AsTask());
 
-        attempts.ShouldBe(1);
-        delayCalls.ShouldBe(0);
+        attempts.ShouldBe(6);
+        delayCalls.ShouldBe(5);
         Win32Exception nativeException =
             exception.InnerException.ShouldBeOfType<Win32Exception>();
         nativeException.NativeErrorCode.ShouldBe(87);
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? failure).ShouldBeTrue();
+        failure!.RetriesUsed.ShouldBe(5);
+        failure.NativeFlags.ShouldBe(0x00000009);
     }
 
     [Fact]
@@ -1039,18 +1044,19 @@ public sealed class PackageCacheTransactionTests : IDisposable
                         attempts++;
                         return false;
                     },
-                    () => attempts == 20 ? 33 : 5,
+                    () => attempts == 6 ? 33 : 5,
                     (TimeSpan delay, CancellationToken cancellationToken) =>
                     {
                         delayCalls++;
-                        delay.ShouldBe(TimeSpan.FromMilliseconds(10));
+                        delay.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(10));
+                        delay.ShouldBeLessThanOrEqualTo(TimeSpan.FromMilliseconds(20));
                         return ValueTask.CompletedTask;
                     },
                     CancellationToken.None)
                 .AsTask());
 
-        attempts.ShouldBe(20);
-        delayCalls.ShouldBe(19);
+        attempts.ShouldBe(6);
+        delayCalls.ShouldBe(5);
         Win32Exception nativeException =
             exception.InnerException.ShouldBeOfType<Win32Exception>();
         nativeException.NativeErrorCode.ShouldBe(33);
@@ -1092,8 +1098,8 @@ public sealed class PackageCacheTransactionTests : IDisposable
                     source.Token)
                 .AsTask());
 
-        attempts.ShouldBe(1);
-        delayCalls.ShouldBe(1);
+        attempts.ShouldBe(0);
+        delayCalls.ShouldBe(0);
     }
 
     [Fact]

@@ -1,7 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
-using System.ComponentModel;
-using System.Runtime.InteropServices;
+using FhirPkg.IO;
 using FhirPkg.Utilities;
 
 namespace FhirPkg.Cache;
@@ -40,77 +39,61 @@ internal sealed class SystemPackageCacheFileOperations :
 {
     private const int BufferSize = 16_384;
 
-    internal static SystemPackageCacheFileOperations Instance { get; } = new();
+    // Retain the process-host access shape, without process-global configuration.
+    internal static SystemPackageCacheFileOperations Instance =>
+        new SystemPackageCacheFileOperations(FileSystemContext.CreateDefault());
 
-    private SystemPackageCacheFileOperations()
+    internal SystemPackageCacheFileOperations(FileSystemContext context)
     {
+        ArgumentNullException.ThrowIfNull(context);
+        Context = context;
     }
 
-    public bool DirectoryExists(string path) => Directory.Exists(path);
+    internal FileSystemContext Context { get; }
 
-    public bool FileExists(string path) => File.Exists(path);
+    public bool DirectoryExists(string path) =>
+        Context.FileSystem.ProbeFollowing(path).Kind is FileSystemEntryKind.Directory
+            or FileSystemEntryKind.DirectorySymbolicLink;
+
+    public bool FileExists(string path) =>
+        Context.FileSystem.ProbeFollowing(path).Kind is FileSystemEntryKind.File
+            or FileSystemEntryKind.Other or FileSystemEntryKind.SymbolicLink;
 
     public FileStream OpenRead(string path) =>
-        PackageCacheRegularFile.OpenRead(path);
+        Context.FileSystem.OpenRegularRead(path);
 
-    public void CreateDirectory(string path)
-    {
-        string fullPath = Path.GetFullPath(path);
-        List<string> missingDirectories = [];
-        string? candidate = fullPath;
-        while (candidate is not null && !Directory.Exists(candidate))
-        {
-            missingDirectories.Add(candidate);
-            candidate = Path.GetDirectoryName(candidate);
-        }
-
-        Directory.CreateDirectory(fullPath);
-        for (int index = missingDirectories.Count - 1; index >= 0; index--)
-        {
-            string createdPath = missingDirectories[index];
-            SynchronizeDirectory(createdPath);
-            string? parent = Path.GetDirectoryName(createdPath);
-            if (parent is not null)
-                SynchronizeDirectory(parent);
-        }
-    }
+    public void CreateDirectory(string path) =>
+        Context.FileSystem.CreateDirectory(path);
 
     public void MoveDirectory(string sourcePath, string destinationPath) =>
-        PackageCacheNativeFileSystem.MovePathDurably(
-            sourcePath,
-            destinationPath);
+        Context.FileSystem.MovePath(sourcePath, destinationPath);
 
     public void MoveFile(string sourcePath, string destinationPath) =>
-        PackageCacheNativeFileSystem.MovePathDurably(
-            sourcePath,
-            destinationPath);
+        Context.FileSystem.MovePath(sourcePath, destinationPath);
 
-    public void DeleteDirectory(string path, bool recursive)
-    {
-        Directory.Delete(path, recursive);
-        SynchronizeParent(path);
-    }
+    public void DeleteDirectory(string path, bool recursive) =>
+        Context.FileSystem.DeleteDirectory(path, recursive);
 
-    public void DeleteFile(string path)
-    {
-        File.Delete(path);
-        SynchronizeParent(path);
-    }
+    public void DeleteFile(string path) =>
+        Context.FileSystem.DeleteFile(path);
 
     public async ValueTask WriteFileAndFlushAsync(
         string path,
         ReadOnlyMemory<byte> content,
         CancellationToken cancellationToken)
     {
-        await using FileStream stream = new FileStream(
-            path,
-            FileMode.CreateNew,
-            FileAccess.Write,
-            FileShare.None,
-            BufferSize,
-            FileOptions.Asynchronous | FileOptions.WriteThrough);
-        await stream.WriteAsync(content, cancellationToken)
+        // Stream-block replay and explicit live-handle flush move in Phase 3.
+        // A create-new constructor failure is not reconciled from path existence.
+        await using FileStream stream = await Context.FileSystem.OpenFileAsync(
+                path,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                BufferSize,
+                FileOptions.Asynchronous | FileOptions.WriteThrough,
+                cancellationToken)
             .ConfigureAwait(false);
+        await stream.WriteAsync(content, cancellationToken).ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
         stream.Flush(flushToDisk: true);
     }
@@ -119,102 +102,50 @@ internal sealed class SystemPackageCacheFileOperations :
         string sourcePath,
         string destinationPath,
         CancellationToken cancellationToken) =>
-        PackageCacheNativeFileSystem.ReplaceFileDurablyAsync(
-            sourcePath,
-            destinationPath,
-            cancellationToken);
+        Context.FileSystem.ReplaceFileAsync(sourcePath, destinationPath, cancellationToken);
 
     public void SynchronizeDirectory(string directoryPath) =>
-        PackageCacheNativeFileSystem.SynchronizeDirectory(directoryPath);
+        Context.FileSystem.SynchronizeDirectory(directoryPath);
 
-    public PackageCacheArtifactKind GetArtifactKind(string path)
-    {
-        if (!OperatingSystem.IsWindows()
-            && PackageCacheNativeFileSystem.IsSymbolicLinkNoFollow(path))
+    public PackageCacheArtifactKind GetArtifactKind(string path) =>
+        Context.FileSystem.Probe(path).Kind switch
         {
-            return PackageCacheArtifactKind.SymbolicLink;
-        }
+            FileSystemEntryKind.Missing => PackageCacheArtifactKind.Missing,
+            FileSystemEntryKind.Directory => PackageCacheArtifactKind.Directory,
+            FileSystemEntryKind.SymbolicLink => PackageCacheArtifactKind.SymbolicLink,
+            FileSystemEntryKind.DirectorySymbolicLink => PackageCacheArtifactKind.DirectorySymbolicLink,
+            _ => PackageCacheArtifactKind.File,
+        };
 
-        try
-        {
-            FileAttributes attributes = File.GetAttributes(path);
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                return attributes.HasFlag(FileAttributes.Directory)
-                    ? PackageCacheArtifactKind.DirectorySymbolicLink
-                    : PackageCacheArtifactKind.SymbolicLink;
-            }
-
-            return attributes.HasFlag(FileAttributes.Directory)
-                ? PackageCacheArtifactKind.Directory
-                : PackageCacheArtifactKind.File;
-        }
-        catch (FileNotFoundException)
-        {
-            return PackageCacheNativeFileSystem.PathExistsNoFollow(path)
-                ? PackageCacheArtifactKind.SymbolicLink
-                : PackageCacheArtifactKind.Missing;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return PackageCacheNativeFileSystem.PathExistsNoFollow(path)
-                ? PackageCacheArtifactKind.SymbolicLink
-                : PackageCacheArtifactKind.Missing;
-        }
-    }
-
-    public bool ArtifactExists(
-        string path,
-        PackageCacheArtifactKind artifactKind) =>
+    public bool ArtifactExists(string path, PackageCacheArtifactKind artifactKind) =>
         artifactKind != PackageCacheArtifactKind.Missing
-        && PackageCacheNativeFileSystem.PathExistsNoFollow(path);
+        && Context.FileSystem.Probe(path).Exists;
 
     public void MoveArtifact(
         string sourcePath,
         string destinationPath,
         PackageCacheArtifactKind artifactKind)
     {
+        if (artifactKind != PackageCacheArtifactKind.Missing)
+            Context.FileSystem.MovePath(sourcePath, destinationPath);
+    }
+
+    public void DeleteArtifact(string path, PackageCacheArtifactKind artifactKind)
+    {
         if (artifactKind == PackageCacheArtifactKind.Missing)
             return;
 
-        PackageCacheNativeFileSystem.MovePathDurably(
-            sourcePath,
-            destinationPath);
-    }
-
-    public void DeleteArtifact(
-        string path,
-        PackageCacheArtifactKind artifactKind)
-    {
-        if (artifactKind == PackageCacheArtifactKind.Missing
-            || !PackageCacheNativeFileSystem.PathExistsNoFollow(path))
+        FileSystemEntryKind kind = artifactKind switch
         {
-            return;
-        }
-
-        switch (artifactKind)
-        {
-            case PackageCacheArtifactKind.Directory:
-                DeleteDirectory(path, recursive: true);
-                break;
-            case PackageCacheArtifactKind.File:
-                DeleteFile(path);
-                break;
-            case PackageCacheArtifactKind.SymbolicLink:
-            case PackageCacheArtifactKind.DirectorySymbolicLink:
-                PackageCacheNativeFileSystem.DeleteSymbolicLink(
-                    path,
-                    artifactKind
-                        == PackageCacheArtifactKind.DirectorySymbolicLink);
-                break;
-        }
-    }
-
-    private void SynchronizeParent(string path)
-    {
-        string? parent = Path.GetDirectoryName(Path.GetFullPath(path));
-        if (parent is not null)
-            SynchronizeDirectory(parent);
+            PackageCacheArtifactKind.Directory => FileSystemEntryKind.Directory,
+            PackageCacheArtifactKind.SymbolicLink => FileSystemEntryKind.SymbolicLink,
+            PackageCacheArtifactKind.DirectorySymbolicLink => FileSystemEntryKind.DirectorySymbolicLink,
+            _ => FileSystemEntryKind.File,
+        };
+        Context.FileSystem.Delete(
+            path, kind,
+            recursive: kind == FileSystemEntryKind.Directory,
+            missingAllowed: true);
     }
 }
 
@@ -233,612 +164,73 @@ internal enum PackageCacheLinuxStatxOutcome
     Failure = 3
 }
 
+// Compatibility entry points delegate once. Context-bound adapters do not use
+// these entry points and therefore never resolve a second policy/budget.
 internal static class PackageCacheNativeFileSystem
 {
-    private const uint MoveFileReplaceExisting = 0x00000001;
-    private const uint MoveFileWriteThrough = 0x00000008;
-    private const uint InvalidFileAttributes = 0xFFFFFFFF;
-    private const int ErrorFileNotFound = 2;
-    private const int ErrorPathNotFound = 3;
-    private const int ErrorAccessDenied = 5;
-    private const int ErrorSharingViolation = 32;
-    private const int ErrorLockViolation = 33;
-    private const int WindowsReplaceRetryCount = 20;
-    private const int WindowsReplaceRetryDelayMilliseconds = 10;
-    private const int UnixInvalidArgument = 22;
-    private const int UnixInappropriateIoControl = 25;
-    private const int UnixFunctionNotImplemented = 38;
-    private const int MacOperationNotSupported = 45;
-    private const int UnixNotDirectory = 20;
-    private const int UnixFileTypeMask = 0xF000;
-    private const int UnixSymbolicLinkType = 0xA000;
-    private const int UnixOpenReadOnly = 0;
-    private const int MacFullFileSync = 51;
-    private const int AtFileDescriptorCurrentWorkingDirectory = -100;
-    private const int AtSymbolicLinkNoFollow = 0x100;
-    private const int AtEmptyPath = 0x1000;
-    private const uint StatxType = 0x00000001;
-
     internal static ValueTask ReplaceFileDurablyAsync(
         string sourcePath,
         string destinationPath,
-        CancellationToken cancellationToken)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            return ReplaceWindowsFileDurablyAsync(
-                ToWindowsExtendedPath(sourcePath),
-                ToWindowsExtendedPath(destinationPath),
-                static (
-                    string existingFileName,
-                    string newFileName,
-                    uint flags) =>
-                    MoveFileEx(
-                        existingFileName,
-                        newFileName,
-                        flags),
-                Marshal.GetLastPInvokeError,
-                static (
-                    TimeSpan delay,
-                    CancellationToken currentCancellationToken) =>
-                    new ValueTask(
-                        Task.Delay(
-                            delay,
-                            currentCancellationToken)),
-                cancellationToken);
-        }
+        CancellationToken cancellationToken) =>
+        FileSystemContext.CreateDefault().FileSystem.ReplaceFileAsync(
+            sourcePath, destinationPath, cancellationToken);
 
-        EnsureSupportedUnix();
-        if (Rename(sourcePath, destinationPath) != 0)
-            throw NativeIOException("The atomic file replacement failed.");
-
-        return ValueTask.CompletedTask;
-    }
-
-    internal static async ValueTask ReplaceWindowsFileDurablyAsync(
+    internal static ValueTask ReplaceWindowsFileDurablyAsync(
         string sourcePath,
         string destinationPath,
         Func<string, string, uint, bool> moveFileEx,
         Func<int> getLastError,
         Func<TimeSpan, CancellationToken, ValueTask> delayAsync,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(moveFileEx);
-        ArgumentNullException.ThrowIfNull(getLastError);
-        ArgumentNullException.ThrowIfNull(delayAsync);
+        CancellationToken cancellationToken) =>
+        ResilientFileSystem.ReplaceWindowsFileDurablyAsync(
+            sourcePath, destinationPath, moveFileEx, getLastError, delayAsync, cancellationToken);
 
-        TimeSpan retryDelay = TimeSpan.FromMilliseconds(
-            WindowsReplaceRetryDelayMilliseconds);
-        int error = 0;
-        for (int attempt = 0;
-             attempt < WindowsReplaceRetryCount;
-             attempt++)
-        {
-            if (moveFileEx(
-                sourcePath,
-                destinationPath,
-                MoveFileReplaceExisting | MoveFileWriteThrough))
-            {
-                return;
-            }
+    internal static void MovePathDurably(string sourcePath, string destinationPath) =>
+        FileSystemContext.CreateDefault().FileSystem.MovePath(sourcePath, destinationPath);
 
-            error = getLastError();
-            if (!IsTransientWindowsReplaceError(error))
-            {
-                throw NativeIOException(
-                    "The durable file replacement failed.",
-                    error);
-            }
-
-            if (attempt < WindowsReplaceRetryCount - 1)
-            {
-                await delayAsync(
-                        retryDelay,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-        }
-
-        throw NativeIOException(
-            "The durable file replacement failed.",
-            error);
-    }
-
-    internal static void MovePathDurably(
-        string sourcePath,
-        string destinationPath)
-    {
-        if (PathExistsNoFollow(destinationPath))
-        {
-            throw new IOException(
-                $"The destination path '{destinationPath}' already exists.");
-        }
-
-        string sourceDirectory = Path.GetDirectoryName(
-                Path.GetFullPath(sourcePath))
-            ?? throw new IOException("The source path has no parent directory.");
-        string destinationDirectory = Path.GetDirectoryName(
-                Path.GetFullPath(destinationPath))
-            ?? throw new IOException(
-                "The destination path has no parent directory.");
-
-        if (OperatingSystem.IsWindows())
-        {
-            if (!MoveFileEx(
-                ToWindowsExtendedPath(sourcePath),
-                ToWindowsExtendedPath(destinationPath),
-                MoveFileWriteThrough))
-            {
-                int error = Marshal.GetLastPInvokeError();
-                IOException exception = NativeIOException(
-                    $"The durable path rename failed. Source: '{sourcePath}'; " +
-                    $"Destination: '{destinationPath}'; Operation: MoveFileExW; " +
-                    $"NativeFlags: 0x{MoveFileWriteThrough:X8}; NativeErrorCode: {error}.",
-                    error);
-                exception.Data["SourcePath"] = sourcePath;
-                exception.Data["DestinationPath"] = destinationPath;
-                exception.Data["Operation"] = "MoveFileExW";
-                exception.Data["NativeFlags"] = MoveFileWriteThrough;
-                exception.Data["NativeErrorCode"] = error;
-                throw exception;
-            }
-
-            return;
-        }
-
-        EnsureSupportedUnix();
-        if (Rename(sourcePath, destinationPath) != 0)
-            throw NativeIOException("The durable path rename failed.");
-
-        SynchronizeDirectory(sourceDirectory);
-        if (!string.Equals(
-            sourceDirectory,
-            destinationDirectory,
-            StringComparison.Ordinal))
-        {
-            SynchronizeDirectory(destinationDirectory);
-        }
-    }
-
-    internal static void SynchronizeDirectory(string directoryPath)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            // MoveFileEx with MOVEFILE_WRITE_THROUGH provides the Windows
-            // durability barrier for both replacements and path renames.
-            return;
-        }
-
-        EnsureSupportedUnix();
-        int descriptor = Open(directoryPath, UnixOpenReadOnly, 0);
-        if (descriptor < 0)
-            throw NativeIOException("The destination directory could not be opened for synchronization.");
-
-        try
-        {
-            if (OperatingSystem.IsMacOS())
-            {
-                _ = SynchronizeMacDirectory(
-                    () => Fcntl(descriptor, MacFullFileSync),
-                    () => Fsync(descriptor),
-                    Marshal.GetLastPInvokeError);
-            }
-            else if (Fsync(descriptor) != 0)
-            {
-                throw NativeIOException("The destination directory synchronization failed.");
-            }
-        }
-        finally
-        {
-            _ = Close(descriptor);
-        }
-    }
+    internal static void SynchronizeDirectory(string directoryPath) =>
+        FileSystemContext.CreateDefault().FileSystem.SynchronizeDirectory(directoryPath);
 
     internal static PackageCacheDirectorySyncOutcome SynchronizeMacDirectory(
         Func<int> fullSync,
         Func<int> standardSync,
-        Func<int> getLastError)
+        Func<int> getLastError) =>
+        (PackageCacheDirectorySyncOutcome)ResilientFileSystem.SynchronizeMacDirectory(fullSync, standardSync, getLastError);
+
+    internal static bool PathExistsNoFollow(string path) =>
+        FileSystemContext.CreateDefault().FileSystem.Probe(path).Exists;
+
+    internal static bool IsSymbolicLinkNoFollow(string path) =>
+        FileSystemContext.CreateDefault().FileSystem.Probe(path).IsLink;
+
+    internal static void DeleteSymbolicLink(string path, bool directoryLink) =>
+        FileSystemContext.CreateDefault().FileSystem.Delete(
+            path,
+            directoryLink && OperatingSystem.IsWindows()
+                ? FileSystemEntryKind.DirectorySymbolicLink
+                : FileSystemEntryKind.SymbolicLink,
+            recursive: false,
+            missingAllowed: true);
+
+    internal static bool TryGetLinuxPathModeNoFollow(string path, out int mode)
     {
-        ArgumentNullException.ThrowIfNull(fullSync);
-        ArgumentNullException.ThrowIfNull(standardSync);
-        ArgumentNullException.ThrowIfNull(getLastError);
-
-        if (fullSync() == 0)
-            return PackageCacheDirectorySyncOutcome.Full;
-
-        int fullSyncError = getLastError();
-        if (!IsUnsupportedMacFullSyncError(fullSyncError))
-        {
-            throw NativeIOException(
-                "The macOS full directory synchronization failed.",
-                fullSyncError);
-        }
-
-        if (standardSync() == 0)
-            return PackageCacheDirectorySyncOutcome.Standard;
-
-        int standardSyncError = getLastError();
-        if (IsUnsupportedMacStandardSyncError(standardSyncError))
-            return PackageCacheDirectorySyncOutcome.Unsupported;
-
-        throw NativeIOException(
-            "The macOS directory synchronization failed.",
-            standardSyncError);
-    }
-
-    internal static bool PathExistsNoFollow(string path)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            uint attributes = GetFileAttributes(
-                ToWindowsExtendedPath(path));
-            if (attributes != InvalidFileAttributes)
-                return true;
-
-            int error = Marshal.GetLastPInvokeError();
-            if (error is ErrorFileNotFound or ErrorPathNotFound)
-                return false;
-
-            throw NativeIOException(
-                "The path could not be inspected without following links.",
-                error);
-        }
-
-        if (OperatingSystem.IsLinux())
-        {
-            return TryGetLinuxPathModeNoFollow(path, out int _);
-        }
-
-        EnsureSupportedUnix();
-        IntPtr buffer = Marshal.AllocHGlobal(512);
-        try
-        {
-            if (LStat(path, buffer) == 0)
-                return true;
-
-            int error = Marshal.GetLastPInvokeError();
-            if (error is ErrorFileNotFound or UnixNotDirectory)
-                return false;
-
-            throw NativeIOException(
-                "The path could not be inspected without following links.",
-                error);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
-    }
-
-    internal static bool IsSymbolicLinkNoFollow(string path)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            uint attributes = GetFileAttributes(
-                ToWindowsExtendedPath(path));
-            if (attributes != InvalidFileAttributes)
-            {
-                return ((FileAttributes)attributes)
-                    .HasFlag(FileAttributes.ReparsePoint);
-            }
-
-            int error = Marshal.GetLastPInvokeError();
-            if (error is ErrorFileNotFound or ErrorPathNotFound)
-                return false;
-
-            throw NativeIOException(
-                "The path could not be inspected without following links.",
-                error);
-        }
-
-        if (OperatingSystem.IsLinux())
-        {
-            return TryGetLinuxPathModeNoFollow(path, out int mode)
-                && (mode & UnixFileTypeMask) == UnixSymbolicLinkType;
-        }
-
-        EnsureSupportedUnix();
-        IntPtr buffer = Marshal.AllocHGlobal(512);
-        try
-        {
-            if (LStat(path, buffer) != 0)
-            {
-                int error = Marshal.GetLastPInvokeError();
-                if (error is ErrorFileNotFound or UnixNotDirectory)
-                    return false;
-
-                throw NativeIOException(
-                    "The path could not be inspected without following links.",
-                    error);
-            }
-
-            int mode = ReadMacMode(buffer);
-            return (mode & UnixFileTypeMask) == UnixSymbolicLinkType;
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
-    }
-
-    internal static void DeleteSymbolicLink(
-        string path,
-        bool directoryLink)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            bool succeeded = directoryLink
-                ? RemoveDirectory(ToWindowsExtendedPath(path))
-                : DeleteFileNative(ToWindowsExtendedPath(path));
-            if (!succeeded)
-                throw NativeIOException("The symbolic link could not be deleted.");
-
-            return;
-        }
-
-        EnsureSupportedUnix();
-        if (Unlink(path) != 0)
-            throw NativeIOException("The symbolic link could not be deleted.");
-
-        string? parent = Path.GetDirectoryName(Path.GetFullPath(path));
-        if (parent is not null)
-            SynchronizeDirectory(parent);
-    }
-
-    private static void EnsureSupportedUnix()
-    {
-        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
-        {
-            throw new PlatformNotSupportedException(
-                "Durable package-cache renames require Windows, Linux, or macOS.");
-        }
-    }
-
-    private static bool IsTransientWindowsReplaceError(
-        int error) =>
-        error is ErrorAccessDenied
-            or ErrorSharingViolation
-            or ErrorLockViolation;
-
-    internal static bool TryGetLinuxPathModeNoFollow(
-        string path,
-        out int mode)
-    {
-        if (!OperatingSystem.IsLinux())
-        {
-            throw new PlatformNotSupportedException(
-                "Linux statx inspection is only available on Linux.");
-        }
-
-        IntPtr buffer = Marshal.AllocHGlobal(256);
-        try
-        {
-            int result;
-            try
-            {
-                result = Statx(
-                    AtFileDescriptorCurrentWorkingDirectory,
-                    path,
-                    AtSymbolicLinkNoFollow,
-                    StatxType,
-                    buffer);
-            }
-            catch (EntryPointNotFoundException exception)
-            {
-                throw StatxUnavailable(exception);
-            }
-
-            int error = Marshal.GetLastPInvokeError();
-            PackageCacheLinuxStatxOutcome outcome =
-                ClassifyLinuxStatxResult(result, error);
-            if (outcome == PackageCacheLinuxStatxOutcome.Success)
-            {
-                mode = ReadStatxMode(buffer);
-                return true;
-            }
-
-            if (outcome == PackageCacheLinuxStatxOutcome.Missing)
-            {
-                mode = 0;
-                return false;
-            }
-
-            if (outcome == PackageCacheLinuxStatxOutcome.Unsupported)
-                throw StatxUnavailable(new Win32Exception(error));
-
-            throw NativeIOException(
-                "The Linux path could not be inspected with statx.",
-                error);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+        FileSystemProbeResult probe = FileSystemContext.CreateDefault().FileSystem.Execute(
+            "InspectLinuxPath", () => NativeFileSystemPrimitives.ProbeLinuxPath(path));
+        mode = probe.Mode;
+        return probe.Exists;
     }
 
     internal static int GetLinuxDescriptorMode(int descriptor)
     {
         if (!OperatingSystem.IsLinux())
-        {
-            throw new PlatformNotSupportedException(
-                "Linux statx inspection is only available on Linux.");
-        }
+            throw new PlatformNotSupportedException("Linux statx inspection is only available on Linux.");
 
-        IntPtr buffer = Marshal.AllocHGlobal(256);
-        try
-        {
-            int result;
-            try
-            {
-                result = Statx(
-                    descriptor,
-                    string.Empty,
-                    AtEmptyPath,
-                    StatxType,
-                    buffer);
-            }
-            catch (EntryPointNotFoundException exception)
-            {
-                throw StatxUnavailable(exception);
-            }
-
-            int error = Marshal.GetLastPInvokeError();
-            PackageCacheLinuxStatxOutcome outcome =
-                ClassifyLinuxStatxResult(result, error);
-            if (outcome == PackageCacheLinuxStatxOutcome.Success)
-                return ReadStatxMode(buffer);
-
-            if (outcome == PackageCacheLinuxStatxOutcome.Unsupported)
-                throw StatxUnavailable(new Win32Exception(error));
-
-            throw NativeIOException(
-                "The Linux file descriptor could not be inspected with statx.",
-                error);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
+        return FileSystemContext.CreateDefault().FileSystem.Execute(
+            "InspectLinuxDescriptor", () => NativeFileSystemPrimitives.InspectDescriptor(descriptor)).Mode;
     }
 
-    private static int ReadStatxMode(IntPtr statxBuffer)
-    {
-        uint mask = unchecked((uint)Marshal.ReadInt32(statxBuffer, 0));
-        if ((mask & StatxType) == 0)
-        {
-            throw new IOException(
-                "Linux statx did not return the requested file type.");
-        }
-
-        return unchecked((ushort)Marshal.ReadInt16(statxBuffer, 28));
-    }
-
-    internal static PackageCacheLinuxStatxOutcome ClassifyLinuxStatxResult(
-        int nativeResult,
-        int error)
-    {
-        if (nativeResult == 0)
-            return PackageCacheLinuxStatxOutcome.Success;
-
-        return error switch
-        {
-            ErrorFileNotFound or UnixNotDirectory =>
-                PackageCacheLinuxStatxOutcome.Missing,
-            UnixFunctionNotImplemented =>
-                PackageCacheLinuxStatxOutcome.Unsupported,
-            _ => PackageCacheLinuxStatxOutcome.Failure
-        };
-    }
-
-    private static int ReadMacMode(IntPtr statBuffer) =>
-        unchecked((ushort)Marshal.ReadInt16(statBuffer, 4));
-
-    private static bool IsUnsupportedMacFullSyncError(int error) =>
-        error is UnixInvalidArgument
-            or UnixInappropriateIoControl
-            or MacOperationNotSupported;
-
-    private static bool IsUnsupportedMacStandardSyncError(int error) =>
-        error is UnixInvalidArgument or MacOperationNotSupported;
-
-    private static PlatformNotSupportedException StatxUnavailable(
-        Exception innerException) =>
-        new(
-            "Linux statx is required for ABI-stable package-cache file-type inspection.",
-            innerException);
-
-    private static string ToWindowsExtendedPath(string path)
-    {
-        string fullPath = Path.GetFullPath(path);
-        if (fullPath.StartsWith(
-            @"\\?\",
-            StringComparison.Ordinal))
-        {
-            return fullPath;
-        }
-
-        if (fullPath.StartsWith(
-            @"\\",
-            StringComparison.Ordinal))
-        {
-            return $@"\\?\UNC\{fullPath[2..]}";
-        }
-
-        return $@"\\?\{fullPath}";
-    }
-
-    private static IOException NativeIOException(string message) =>
-        new(
-            message,
-            new Win32Exception(Marshal.GetLastPInvokeError()));
-
-    private static IOException NativeIOException(
-        string message,
-        int error) =>
-        new(message, new Win32Exception(error));
-
-    [DllImport(
-        "kernel32.dll",
-        EntryPoint = "MoveFileExW",
-        CharSet = CharSet.Unicode,
-        SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool MoveFileEx(
-        string existingFileName,
-        string newFileName,
-        uint flags);
-
-    [DllImport(
-        "kernel32.dll",
-        EntryPoint = "GetFileAttributesW",
-        CharSet = CharSet.Unicode,
-        SetLastError = true)]
-    private static extern uint GetFileAttributes(string fileName);
-
-    [DllImport(
-        "kernel32.dll",
-        EntryPoint = "DeleteFileW",
-        CharSet = CharSet.Unicode,
-        SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DeleteFileNative(string fileName);
-
-    [DllImport(
-        "kernel32.dll",
-        EntryPoint = "RemoveDirectoryW",
-        CharSet = CharSet.Unicode,
-        SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool RemoveDirectory(string pathName);
-
-    [DllImport("libc", EntryPoint = "rename", SetLastError = true)]
-    private static extern int Rename(string oldPath, string newPath);
-
-    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
-    private static extern int Open(string path, int flags, uint mode);
-
-    [DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
-    private static extern int Fsync(int descriptor);
-
-    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
-    private static extern int Fcntl(int descriptor, int command);
-
-    [DllImport("libc", EntryPoint = "close", SetLastError = true)]
-    private static extern int Close(int descriptor);
-
-    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
-    private static extern int Statx(
-        int directoryDescriptor,
-        string path,
-        int flags,
-        uint mask,
-        IntPtr statxBuffer);
-
-    [DllImport("libc", EntryPoint = "lstat", SetLastError = true)]
-    private static extern int LStat(string path, IntPtr statBuffer);
-
-    [DllImport("libc", EntryPoint = "unlink", SetLastError = true)]
-    private static extern int Unlink(string path);
+    internal static PackageCacheLinuxStatxOutcome ClassifyLinuxStatxResult(int nativeResult, int error) =>
+        (PackageCacheLinuxStatxOutcome)NativeFileSystemPrimitives.ClassifyLinuxStatxResult(nativeResult, error);
 }
 
 internal enum PackageCacheFaultPoint
