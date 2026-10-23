@@ -369,7 +369,18 @@ internal static class PackageCacheNativeFileSystem
                 ToWindowsExtendedPath(destinationPath),
                 MoveFileWriteThrough))
             {
-                throw NativeIOException("The durable path rename failed.");
+                int error = Marshal.GetLastPInvokeError();
+                IOException exception = NativeIOException(
+                    $"The durable path rename failed. Source: '{sourcePath}'; " +
+                    $"Destination: '{destinationPath}'; Operation: MoveFileExW; " +
+                    $"NativeFlags: 0x{MoveFileWriteThrough:X8}; NativeErrorCode: {error}.",
+                    error);
+                exception.Data["SourcePath"] = sourcePath;
+                exception.Data["DestinationPath"] = destinationPath;
+                exception.Data["Operation"] = "MoveFileExW";
+                exception.Data["NativeFlags"] = MoveFileWriteThrough;
+                exception.Data["NativeErrorCode"] = error;
+                throw exception;
             }
 
             return;

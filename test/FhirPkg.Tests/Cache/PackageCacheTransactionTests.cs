@@ -876,6 +876,69 @@ public sealed class PackageCacheTransactionTests : IDisposable
     }
 
     [Fact]
+    public void WindowsPathRename_FailureRetainsPathsFlagsAndNativeError()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        Directory.CreateDirectory(_cacheRoot);
+        string sourcePath = Path.Combine(_cacheRoot, "missing-source");
+        string destinationPath = Path.Combine(_cacheRoot, "destination");
+
+        IOException exception = Should.Throw<IOException>(() =>
+            SystemPackageCacheFileOperations.Instance.MoveDirectory(
+                sourcePath,
+                destinationPath));
+
+        AssertWindowsRenameFailure(exception, sourcePath, destinationPath);
+        Directory.Exists(sourcePath).ShouldBeFalse();
+        Directory.Exists(destinationPath).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void WindowsPathRename_NonDeleteSharedHandleBlocksMoveUntilReleased()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        string sourcePath = Path.Combine(_cacheRoot, "source");
+        string destinationPath = Path.Combine(_cacheRoot, "destination");
+        Directory.CreateDirectory(Path.Combine(sourcePath, "empty"));
+        File.WriteAllText(Path.Combine(sourcePath, "value.txt"), "payload");
+
+        // Open the directory itself: a child file handle need not block an
+        // ancestor rename. Successful open, move, disposal and move are ordered
+        // on this thread; no timing window or assumed native error is needed.
+        SafeFileHandle blocker = OpenDirectoryWithoutDeleteSharing(sourcePath);
+        using (blocker)
+        {
+            blocker.IsInvalid.ShouldBeFalse();
+            blocker.IsClosed.ShouldBeFalse();
+            IOException exception = Should.Throw<IOException>(() =>
+                SystemPackageCacheFileOperations.Instance.MoveDirectory(
+                    sourcePath,
+                    destinationPath));
+
+            AssertWindowsRenameFailure(exception, sourcePath, destinationPath);
+            Directory.Exists(sourcePath).ShouldBeTrue();
+            Directory.Exists(destinationPath).ShouldBeFalse();
+            File.ReadAllText(Path.Combine(sourcePath, "value.txt")).ShouldBe("payload");
+        }
+
+        blocker.IsClosed.ShouldBeTrue();
+        SystemPackageCacheFileOperations.Instance.MoveDirectory(
+            sourcePath,
+            destinationPath);
+
+        Directory.Exists(sourcePath).ShouldBeFalse();
+        Directory.Exists(Path.Combine(destinationPath, "empty")).ShouldBeTrue();
+        File.ReadAllText(Path.Combine(destinationPath, "value.txt")).ShouldBe("payload");
+        TestContext.Current.TestOutputHelper?.WriteLine(
+            "The identical MoveDirectory succeeded after disposing the owned directory handle. " +
+            "This establishes a mechanism, not ownership of the reported intermittent failure.");
+    }
+
+    [Fact]
     public async Task WindowsFileReplace_RetriesTransientErrorsAsynchronously()
     {
         TaskCompletionSource delayStarted =
@@ -1709,6 +1772,75 @@ public sealed class PackageCacheTransactionTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    private static void AssertWindowsRenameFailure(
+        IOException exception,
+        string sourcePath,
+        string destinationPath)
+    {
+        Win32Exception nativeException =
+            exception.InnerException.ShouldBeOfType<Win32Exception>();
+        nativeException.NativeErrorCode.ShouldNotBe(0);
+        exception.Data["SourcePath"].ShouldBe(sourcePath);
+        exception.Data["DestinationPath"].ShouldBe(destinationPath);
+        exception.Data["Operation"].ShouldBe("MoveFileExW");
+        exception.Data["NativeFlags"].ShouldBe(0x00000008u);
+        exception.Data["NativeErrorCode"].ShouldBe(nativeException.NativeErrorCode);
+        exception.Message.ShouldContain(sourcePath);
+        exception.Message.ShouldContain(destinationPath);
+        exception.Message.ShouldContain("MoveFileExW");
+        exception.Message.ShouldContain("0x00000008");
+        exception.Message.ShouldContain($"NativeErrorCode: {nativeException.NativeErrorCode}");
+
+        ITestOutputHelper? output = TestContext.Current.TestOutputHelper;
+        if (output is not null)
+        {
+            output.WriteLine(
+                $"UTC: {DateTimeOffset.UtcNow:O}; ProcessId: {Environment.ProcessId}; " +
+                $"Runtime: {RuntimeInformation.FrameworkDescription}");
+            output.WriteLine(exception.ToString());
+            WriteExceptionDetails(output, exception, "Exception");
+        }
+    }
+
+    private static SafeFileHandle OpenDirectoryWithoutDeleteSharing(string path)
+    {
+        const uint GenericRead = 0x80000000;
+        const uint OpenExisting = 3;
+        const uint FileFlagBackupSemantics = 0x02000000;
+        SafeFileHandle handle = CreateFile(
+            path,
+            GenericRead,
+            FileShare.ReadWrite,
+            IntPtr.Zero,
+            OpenExisting,
+            FileFlagBackupSemantics,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            throw new IOException(
+                "The test directory handle could not be opened.",
+                new Win32Exception(error));
+        }
+
+        return handle;
+    }
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "CreateFileW",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        FileShare shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
     private static void WriteExceptionDetails(
         ITestOutputHelper output,
         Exception exception,
@@ -1724,6 +1856,8 @@ public sealed class PackageCacheTransactionTests : IDisposable
         }
         if (exception is Win32Exception win32Exception)
             output.WriteLine($"{path}: NativeErrorCode: {win32Exception.NativeErrorCode}");
+        foreach (System.Collections.DictionaryEntry entry in exception.Data)
+            output.WriteLine($"{path}.Data[{entry.Key}]: {entry.Value ?? "<null>"}");
 
         if (exception is AggregateException aggregateException)
         {
