@@ -1,5 +1,8 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Runtime.ExceptionServices;
+using FhirPkg.IO;
+
 namespace FhirPkg.Utilities;
 
 /// <summary>
@@ -25,49 +28,46 @@ public static class TempDirectory
     /// <exception cref="IOException">
     /// Thrown when the directory could not be created in any location.
     /// </exception>
-    public static string Create(string prefix, string? fallbackRoot = null)
+    public static string Create(string prefix, string? fallbackRoot = null) =>
+        Create(prefix, fallbackRoot, FileSystemContext.CreateDefault());
+
+    internal static string Create(string prefix, string? fallbackRoot, FileSystemContext context)
     {
-        if (TryCreateInSystemTemp(prefix, out string? path))
+        ArgumentNullException.ThrowIfNull(context);
+
+        // One primary attempt sequence: discovery and creation share no renewed budget.
+        ExceptionDispatchInfo? primaryFailure = null;
+        try
         {
-            return path;
+            string tempRoot = context.FileSystem.GetTempPath();
+            if (!string.IsNullOrEmpty(tempRoot))
+            {
+                string path = Path.Combine(tempRoot, $"{prefix}-{Guid.NewGuid():N}");
+                context.FileSystem.CreateDirectory(path);
+                return path;
+            }
+        }
+        catch (Exception exception) when (IsFileSystemFailure(exception))
+        {
+            primaryFailure = ExceptionDispatchInfo.Capture(exception);
         }
 
         if (fallbackRoot is not null)
         {
+            // A distinct destination: an independent operation, not a retry of the primary.
             string dir = Path.Combine(fallbackRoot, FallbackSubdirectory, $"{prefix}-{Guid.NewGuid():N}");
-            Directory.CreateDirectory(dir);
+            context.FileSystem.CreateDirectory(dir);
             return dir;
         }
 
-        // No fallback available — force the system temp path so the original exception propagates.
-        string forcedDir = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(forcedDir);
-        return forcedDir;
+        // No fallback available: surface the captured primary failure rather than
+        // starting a second system-temp sequence.
+        primaryFailure?.Throw();
+        throw new IOException("The system temporary directory path is empty, so no temporary directory could be created.");
     }
 
-    /// <summary>
-    /// Attempts to create a temporary directory under the system temp path.
-    /// Returns <c>false</c> if the system temp path is empty or the directory cannot be created.
-    /// </summary>
-    private static bool TryCreateInSystemTemp(string prefix, out string path)
-    {
-        path = string.Empty;
-        try
-        {
-            string tempRoot = Path.GetTempPath();
-            if (string.IsNullOrEmpty(tempRoot))
-            {
-                return false;
-            }
-
-            path = Path.Combine(tempRoot, $"{prefix}-{Guid.NewGuid():N}");
-            Directory.CreateDirectory(path);
-            return true;
-        }
-        catch
-        {
-            path = string.Empty;
-            return false;
-        }
-    }
+    // Invalid input and cancellation never become fallback signals.
+    private static bool IsFileSystemFailure(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException
+        || FileSystemFailureContext.TryGetOrigin(exception, out _);
 }

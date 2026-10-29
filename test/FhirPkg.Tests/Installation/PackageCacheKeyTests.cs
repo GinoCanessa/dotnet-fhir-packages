@@ -3,7 +3,9 @@
 using System.Security.Cryptography;
 using System.Text;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
+using FhirPkg.Tests.Support;
 using Shouldly;
 using Xunit;
 
@@ -195,5 +197,54 @@ public class PackageCacheKeyTests
         relative.ShouldBe(Path.Combine(
             "@scope",
             "package#current%24feature%2ffix"));
+    }
+
+    [Fact]
+    public void GetPackageDirectoryPath_RelativeRootUsesProtectedResolution()
+    {
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives();
+        primitives.UseSystemFiles();
+        primitives.Enqueue<string>(
+            "GetFullPath",
+            _ => ScriptedFileSystemPrimitives.NativeFailure<string>(5, "GetFullPath"));
+        FileSystemContext context = primitives.CreateContext(retries: 2);
+        PackageCacheKey key = PackageCacheKey.Create(new PackageReference("hl7.fhir.r4.core", "4.0.1"));
+
+        string packageDirectory = key.GetPackageDirectoryPath("relative-cache", context);
+
+        packageDirectory.ShouldBe(Path.Combine(
+            Path.GetFullPath("relative-cache"),
+            "hl7.fhir.r4.core#4.0.1"));
+        primitives.Count("GetFullPath").ShouldBe(2);
+        primitives.Waits.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public void GetPackageDirectoryPath_FullyQualifiedRootIsPureContainment()
+    {
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives();
+        FileSystemContext context = primitives.CreateContext();
+        string cacheRoot = Path.Combine(Path.GetTempPath(), $"cache-{Guid.NewGuid():N}");
+        PackageCacheKey key = PackageCacheKey.Create(new PackageReference("pkg", "1.0.0"));
+
+        string packageDirectory = key.GetPackageDirectoryPath(cacheRoot, context);
+
+        packageDirectory.ShouldBe(Path.Combine(Path.GetFullPath(cacheRoot), "pkg#1.0.0"));
+        primitives.Calls.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void GetPackageDirectoryPath_ExhaustedResolutionRethrowsFinalFailure()
+    {
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives();
+        primitives.Set<string>(
+            "GetFullPath",
+            _ => ScriptedFileSystemPrimitives.NativeFailure<string>(5, "GetFullPath"));
+        FileSystemContext context = primitives.CreateContext(retries: 1);
+        PackageCacheKey key = PackageCacheKey.Create(new PackageReference("pkg", "1.0.0"));
+
+        Should.Throw<IOException>(() => key.GetPackageDirectoryPath("relative-cache", context));
+
+        primitives.Count("GetFullPath").ShouldBe(2);
     }
 }

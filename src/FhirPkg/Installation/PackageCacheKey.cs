@@ -3,6 +3,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using FhirPkg.IO;
 using FhirPkg.Models;
 
 namespace FhirPkg.Installation;
@@ -133,7 +134,20 @@ public sealed class PackageCacheKey : IEquatable<PackageCacheKey>
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
 
-        string fullRoot = Path.GetFullPath(cacheRoot);
+        // Only an implicit, OS-backed relative root needs a filesystem context.
+        return GetPackageDirectoryPath(
+            cacheRoot,
+            Path.IsPathFullyQualified(cacheRoot) ? null : FileSystemContext.CreateDefault());
+    }
+
+    internal string GetPackageDirectoryPath(string cacheRoot, FileSystemContext? context)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
+
+        // Fully qualified roots are pure path manipulation and stay unretried.
+        string fullRoot = Path.IsPathFullyQualified(cacheRoot) || context is null
+            ? Path.GetFullPath(cacheRoot)
+            : context.FileSystem.GetFullPath(cacheRoot);
         string candidate = Path.GetFullPath(Path.Combine([fullRoot, .. _relativePathSegments]));
         string relative = Path.GetRelativePath(fullRoot, candidate);
 
