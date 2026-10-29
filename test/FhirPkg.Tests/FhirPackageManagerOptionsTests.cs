@@ -1,10 +1,13 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Tests.Support;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Shouldly;
 using Xunit;
 
@@ -15,6 +18,75 @@ public class FhirPackageManagerOptionsTests : IDisposable
     private readonly string _cacheRoot = Path.Combine(
         AppContext.BaseDirectory,
         $"fhir-manager-options-{Guid.NewGuid():N}");
+
+    [Fact]
+    public void FileSystemRetry_DefaultsRemainUnspecified()
+    {
+        FhirPackageManagerOptions options = new();
+
+        options.FileSystemRetry.ShouldNotBeNull();
+        options.FileSystemRetry.HasExplicitValues.ShouldBeFalse();
+        options.FileSystemRetry.RetryCount.ShouldBe(5);
+        options.FileSystemRetry.MinimumDelayMilliseconds.ShouldBe(10);
+        options.FileSystemRetry.MaximumJitterMilliseconds.ShouldBe(10);
+        options.FileSystemRetry.ShouldNotBeSameAs(new FhirPackageManagerOptions().FileSystemRetry);
+    }
+
+    [Theory]
+    [InlineData("count", 0)]
+    [InlineData("count", 5)]
+    [InlineData("minimum", 0)]
+    [InlineData("minimum", 10)]
+    [InlineData("jitter", 0)]
+    [InlineData("jitter", 10)]
+    public void CreateConfiguration_RetainsOriginallyAssignedRetryProperty(string setting, int value)
+    {
+        FhirPackageManagerOptions options = new();
+        switch (setting)
+        {
+            case "count":
+                options.FileSystemRetry.RetryCount = value;
+                break;
+            case "minimum":
+                options.FileSystemRetry.MinimumDelayMilliseconds = value;
+                break;
+            case "jitter":
+                options.FileSystemRetry.MaximumJitterMilliseconds = value;
+                break;
+        }
+
+        FhirPackageManagerConfiguration configuration = FhirPackageManagerConfiguration.Create(options);
+        FhirPackageManagerOptions copy = configuration.CreateOptionsSnapshot();
+        options.FileSystemRetry.RetryCount = 99;
+        copy.FileSystemRetry.RetryCount = 100;
+
+        configuration.HasExplicitFileSystemRetry.ShouldBeTrue();
+        configuration.FileSystemContext.HasExplicitValues.ShouldBeTrue();
+        configuration.Options.FileSystemRetry.RetryCount.ShouldBe(configuration.FileSystemContext.Policy.RetryCount);
+        configuration.Options.FileSystemRetry.MinimumDelayMilliseconds
+            .ShouldBe(configuration.FileSystemContext.Policy.MinimumDelayMilliseconds);
+        configuration.Options.FileSystemRetry.MaximumJitterMilliseconds
+            .ShouldBe(configuration.FileSystemContext.Policy.MaximumJitterMilliseconds);
+        configuration.Options.FileSystemRetry.ShouldNotBeSameAs(copy.FileSystemRetry);
+    }
+
+    [Fact]
+    public void AlreadyResolvedConfiguration_DoesNotInferExplicitnessFromFilledOptions()
+    {
+        FileSystemRetryPolicy policy = FileSystemRetryPolicy.Resolve(
+            new FileSystemRetryOptions(), _ => "0", out bool explicitValues);
+        ScriptedFileSystemPrimitives files = new();
+        FileSystemContext context = new(policy, explicitValues, files, files.CreateExecutor());
+        FhirPackageManagerOptions populated = new() { FileSystemRetry = context.ToOptionsSnapshot() };
+
+        FhirPackageManagerConfiguration configuration =
+            FhirPackageManagerConfiguration.CreateResolved(populated, context);
+
+        configuration.HasExplicitFileSystemRetry.ShouldBeFalse();
+        configuration.FileSystemContext.ShouldBeSameAs(context);
+        configuration.Options.FileSystemRetry.HasExplicitValues.ShouldBeTrue();
+        files.Calls.ShouldBeEmpty();
+    }
 
     [Fact]
     public void Unmodified_DefaultsFalse()
@@ -113,6 +185,54 @@ public class FhirPackageManagerOptionsTests : IDisposable
             .Unmodified = !unmodified;
 
         await AssertRootInstallationAsync(manager, unmodified);
+    }
+
+    [Theory]
+    [InlineData("clear")]
+    [InlineData("remove")]
+    [InlineData("replace")]
+    public async Task DependencyInjection_BuiltProviderIgnoresSourceCollectionChanges(string change)
+    {
+        ServiceCollection services = new();
+        services.AddLogging();
+        services.AddFhirPackageManagement(options =>
+        {
+            options.CachePath = _cacheRoot;
+            options.IncludeCiBuilds = false;
+            options.IncludeHl7WebsiteFallback = false;
+            options.FileSystemRetry = new FileSystemRetryOptions
+            {
+                RetryCount = 0,
+                MinimumDelayMilliseconds = 0,
+                MaximumJitterMilliseconds = 0,
+            };
+        });
+        using ServiceProvider provider = services.BuildServiceProvider();
+
+        switch (change)
+        {
+            case "clear":
+                services.Clear();
+                break;
+            case "remove":
+                services.RemoveAll<IPackageCache>();
+                break;
+            case "replace":
+                services.Replace(ServiceDescriptor.Singleton<IPackageCache>(_ =>
+                    throw new InvalidOperationException("The replacement cache factory must not run.")));
+                break;
+        }
+
+        IFhirPackageManager manager = provider.GetRequiredService<IFhirPackageManager>();
+        DiskPackageCache cache = provider.GetRequiredService<IPackageCache>()
+            .ShouldBeOfType<DiskPackageCache>();
+        FhirPackageManagerConfiguration configuration =
+            provider.GetRequiredService<FhirPackageManagerConfiguration>();
+
+        cache.CacheDirectory.ShouldBe(_cacheRoot);
+        cache.FileSystemContext.ShouldBeSameAs(configuration.FileSystemContext);
+        provider.GetRequiredService<IFhirPackageManager>().ShouldBeSameAs(manager);
+        await AssertRootInstallationAsync(manager, unmodified: false);
     }
 
     [Fact]

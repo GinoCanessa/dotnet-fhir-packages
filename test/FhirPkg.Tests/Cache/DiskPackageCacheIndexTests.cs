@@ -59,6 +59,36 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
     }
 
     [Fact]
+    public async Task GetIndex_MissingOptionalIndex_DoesNotOpenOrSpendFaultRetries()
+    {
+        string indexPath = GetIndexPath();
+        string contentPath = Path.GetDirectoryName(indexPath)!;
+        Directory.CreateDirectory(contentPath);
+        await File.WriteAllTextAsync(
+            Path.Combine(contentPath, "package.json"),
+            """{"name":"example.package","version":"1.0.0"}""",
+            TestContext.Current.CancellationToken);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 2);
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), context);
+        files.Calls.Clear();
+
+        PackageIndex? index = await cache.GetIndexAsync(
+            s_reference, TestContext.Current.CancellationToken);
+
+        index.ShouldBeNull();
+        File.Exists(indexPath).ShouldBeFalse();
+        FileSystemPrimitiveCall probe = files.Calls
+            .Where(call => call.Path == indexPath)
+            .ShouldHaveSingleItem();
+        probe.Operation.ShouldBe("Probe");
+        probe.Flags.ShouldBe(0);
+        files.Waits.ShouldBeEmpty();
+        files.AsyncWaits.ShouldBeEmpty();
+    }
+
+    [Fact]
     public async Task InternalReadPort_ProtectsIndexLengthAndReadsWithItsContext()
     {
         Directory.CreateDirectory(_cacheRoot);
@@ -220,7 +250,8 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         if (!persistIndex || reusesPublisherIndex)
         {
             fileOperations.AssertNoPayloadWrites(installed.DirectoryPath);
-            fileOperations.ReadPaths.Count(path => path == indexPath).ShouldBe(1);
+            fileOperations.ReadPaths.Count(path => path == indexPath)
+                .ShouldBe(state == "missing" ? 0 : 1);
             if (state == "valid")
             {
                 (await File.ReadAllBytesAsync(indexPath, TestContext.Current.CancellationToken))

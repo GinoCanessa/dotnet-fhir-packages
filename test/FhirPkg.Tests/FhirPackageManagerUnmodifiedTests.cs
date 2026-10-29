@@ -9,6 +9,7 @@ using System.Security.Cryptography;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
@@ -29,6 +30,71 @@ public sealed class FhirPackageManagerUnmodifiedTests : IDisposable
         $"fhir-manager-unmodified-{Guid.NewGuid():N}");
 
     private string CachePath => Path.Combine(_root, "cache");
+
+    [Fact]
+    public async Task Unmodified_RetryDoesNotIntroducePayloadOrIndexWrites()
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_root);
+        FileSystemContext context = files.CreateContext(retries: 1);
+        using FhirPackageManager manager = FhirPackageManager.CreateResolved(
+            FhirPackageManagerConfiguration.CreateResolved(
+                new FhirPackageManagerOptions
+                {
+                    CachePath = CachePath,
+                    Unmodified = true,
+                    IncludeCiBuilds = false,
+                    IncludeHl7WebsiteFallback = false,
+                },
+                context));
+        Dictionary<string, string> payload = new()
+        {
+            ["package.json"] = """{"name":"unmodified.retry","version":"1.0.0"}""",
+            ["patient.json"] = """{"resourceType":"Patient","id":"retained"}""",
+            [".index.json"] = "invalid distributed index: preserve these bytes",
+            ["other/payload.txt"] = "distributed sibling",
+        };
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            payload.Select(pair => ArbitraryTarBuilder.File(pair.Key, pair.Value)).ToArray());
+        files.Enqueue("WriteAtAsync", ScriptedFileSystemPrimitives.NativeFailure<bool>(1117, "spool write"));
+        PackageRecord record = await manager.ImportAsync(
+            archive, options: null, TestContext.Current.CancellationToken);
+        record.ContentPath.ShouldBe(record.DirectoryPath);
+        int writes = files.Count("WriteAtAsync");
+        string resourcePath = Path.Combine(record.ContentPath, "patient.json");
+        bool failed = false;
+        files.Set<int>("ReadAtAsync", call =>
+        {
+            if (call.Path == resourcePath && !failed)
+            {
+                failed = true;
+                return ScriptedFileSystemPrimitives.NativeFailure<int>(5, "unmodified index read", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.ReadAt(
+                call.Handle!, call.Buffer, call.Offset!.Value, call.Path!);
+        });
+
+        PackageIndex? index = await manager.IndexPackageAsync(
+            record.Reference, new IndexingOptions { ForceReindex = true }, TestContext.Current.CancellationToken);
+        IReadOnlyList<ResourceInfo> resources = await manager.FindByResourceTypeAsync(
+            "Patient", record.Reference.FhirDirective, TestContext.Current.CancellationToken);
+
+        index!.Files.Single().Id.ShouldBe("retained");
+        resources.ShouldHaveSingleItem().Id.ShouldBe("retained");
+        files.Count("WriteAtAsync").ShouldBe(writes);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        Directory.GetFiles(record.DirectoryPath, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(record.DirectoryPath, path).Replace('\\', '/'))
+            .ShouldBe(payload.Keys, ignoreOrder: true);
+        foreach ((string relativePath, string content) in payload)
+        {
+            (await File.ReadAllTextAsync(
+                Path.Combine(record.DirectoryPath, relativePath), TestContext.Current.CancellationToken))
+                .ShouldBe(content);
+        }
+        files.Calls.ShouldNotContain(call => (call.Operation == "WriteAt" || call.Operation == "WriteAtAsync")
+            && call.Path!.StartsWith(record.DirectoryPath + Path.DirectorySeparatorChar, StringComparison.Ordinal));
+    }
 
     public static TheoryData<bool, bool, string> SourceModes
     {

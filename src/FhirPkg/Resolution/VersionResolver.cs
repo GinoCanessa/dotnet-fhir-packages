@@ -32,6 +32,8 @@ public class VersionResolver : IVersionResolver
     private readonly IRegistryClient _registryClient;
     private readonly ILogger _logger;
 
+    internal IRegistryClient RegistryClient => _registryClient;
+
     /// <summary>
     /// Initializes a new instance of the <see cref="VersionResolver"/> class.
     /// </summary>

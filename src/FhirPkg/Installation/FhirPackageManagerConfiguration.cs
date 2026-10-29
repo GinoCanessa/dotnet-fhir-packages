@@ -1,6 +1,10 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using FhirPkg.Cache;
+using FhirPkg.Indexing;
+using FhirPkg.IO;
 using FhirPkg.Registry;
+using FhirPkg.Resolution;
 using FhirPkg.Utilities;
 
 namespace FhirPkg.Installation;
@@ -16,11 +20,31 @@ internal sealed record FhirPackageManagerConfiguration
 
     internal required PackageFixupPolicy FixupPolicy { get; init; }
 
+    internal required FileSystemContext FileSystemContext { get; init; }
+
+    internal required bool HasExplicitFileSystemRetry { get; init; }
+
     internal static FhirPackageManagerConfiguration Create(
         FhirPackageManagerOptions configuredOptions,
         PackageInstallLimits? resolvedInstallLimits = null)
     {
         ArgumentNullException.ThrowIfNull(configuredOptions);
+
+        return CreateResolved(
+            configuredOptions,
+            new FileSystemContext(configuredOptions.FileSystemRetry),
+            resolvedInstallLimits);
+    }
+
+    // Used by composition roots that have already resolved the invocation policy.
+    // In particular, never infer explicitness from the populated options snapshot.
+    internal static FhirPackageManagerConfiguration CreateResolved(
+        FhirPackageManagerOptions configuredOptions,
+        FileSystemContext context,
+        PackageInstallLimits? resolvedInstallLimits = null)
+    {
+        ArgumentNullException.ThrowIfNull(configuredOptions);
+        ArgumentNullException.ThrowIfNull(context);
 
         Validate(configuredOptions);
 
@@ -30,33 +54,102 @@ internal sealed record FhirPackageManagerConfiguration
         PackageFixupPolicy fixupPolicy =
             PackageFixupPolicy.Create(configuredOptions.VersionFixups);
 
-        FhirPackageManagerOptions snapshot = new()
-        {
-            InstallLimits = CopyLimits(limits),
-            CorruptCacheBehavior = configuredOptions.CorruptCacheBehavior,
-            Unmodified = configuredOptions.Unmodified,
-            CachePath = configuredOptions.CachePath,
-            Registries = configuredOptions.Registries.Select(CloneEndpoint).ToList(),
-            IncludeCiBuilds = configuredOptions.IncludeCiBuilds,
-            IncludeHl7WebsiteFallback = configuredOptions.IncludeHl7WebsiteFallback,
-            HttpTimeout = configuredOptions.HttpTimeout,
-            MaxRedirects = configuredOptions.MaxRedirects,
-            VerifyChecksums = configuredOptions.VerifyChecksums,
-            MaxParallelRegistryQueries = configuredOptions.MaxParallelRegistryQueries,
-            ResourceCacheSize = configuredOptions.ResourceCacheSize,
-            ResourceCacheSafeMode = configuredOptions.ResourceCacheSafeMode,
-            VersionFixups = new Dictionary<string, string>(
-                configuredOptions.VersionFixups,
-                StringComparer.OrdinalIgnoreCase),
-        };
-
         return new FhirPackageManagerConfiguration
         {
-            Options = snapshot,
+            Options = CopyOptions(configuredOptions, limits, context),
             InstallLimits = limits,
             FixupPolicy = fixupPolicy,
+            FileSystemContext = context,
+            HasExplicitFileSystemRetry = context.HasExplicitValues,
         };
     }
+
+    internal FhirPackageManagerOptions CreateOptionsSnapshot() =>
+        CopyOptions(Options, InstallLimits, FileSystemContext);
+
+    internal void ValidateFileSystemCollaborators(
+        IEnumerable<object> collaborators,
+        ISet<object> visited)
+    {
+        if (!HasExplicitFileSystemRetry)
+            return;
+
+        foreach (object collaborator in collaborators)
+        {
+            ValidateFileSystemCollaborator(collaborator, visited);
+        }
+    }
+
+    private void ValidateFileSystemCollaborator(
+        object collaborator,
+        ISet<object> visited)
+    {
+        if (!visited.Add(collaborator))
+            return;
+
+        // Only known built-in ownership is traversable. External implementations,
+        // including clients derived from RegistryClientBase, remain opaque.
+        switch (collaborator)
+        {
+            case DiskPackageCache cache when cache.GetType() == typeof(DiskPackageCache):
+                ValidateContext(cache.FileSystemContext, nameof(DiskPackageCache));
+                break;
+            case PackageIndexer indexer when indexer.GetType() == typeof(PackageIndexer):
+                ValidateContext(indexer.FileSystemContext, nameof(PackageIndexer));
+                break;
+            case RedundantRegistryClient composite:
+                ValidateContext(composite.FileSystemContext, nameof(RedundantRegistryClient));
+                foreach (RegistryClientBase client in composite.BuiltInClients)
+                {
+                    ValidateFileSystemCollaborator(client, visited);
+                }
+                break;
+            case FhirNpmRegistryClient or NpmRegistryClient or FhirCiBuildClient or Hl7WebsiteClient:
+                RegistryClientBase registry = (RegistryClientBase)collaborator;
+                ValidateContext(registry.FileSystemContext, registry.GetType().Name);
+                break;
+            case DependencyResolver resolver when resolver.GetType() == typeof(DependencyResolver):
+                ValidateFileSystemCollaborators(resolver.BuiltInCollaborators, visited);
+                break;
+            case VersionResolver resolver when resolver.GetType() == typeof(VersionResolver):
+                ValidateFileSystemCollaborator(resolver.RegistryClient, visited);
+                break;
+        }
+    }
+
+    private void ValidateContext(FileSystemContext context, string component)
+    {
+        if (context.Policy != FileSystemContext.Policy)
+        {
+            throw InvalidPolicy(
+                $"The injected built-in {component} has filesystem retry settings that do not match the explicitly configured manager.");
+        }
+    }
+
+    private static FhirPackageManagerOptions CopyOptions(
+        FhirPackageManagerOptions source,
+        PackageInstallLimits limits,
+        FileSystemContext context) =>
+        new()
+        {
+            FileSystemRetry = context.ToOptionsSnapshot(),
+            InstallLimits = CopyLimits(limits),
+            CorruptCacheBehavior = source.CorruptCacheBehavior,
+            Unmodified = source.Unmodified,
+            CachePath = source.CachePath,
+            Registries = source.Registries.Select(CloneEndpoint).ToList(),
+            IncludeCiBuilds = source.IncludeCiBuilds,
+            IncludeHl7WebsiteFallback = source.IncludeHl7WebsiteFallback,
+            HttpTimeout = source.HttpTimeout,
+            MaxRedirects = source.MaxRedirects,
+            VerifyChecksums = source.VerifyChecksums,
+            MaxParallelRegistryQueries = source.MaxParallelRegistryQueries,
+            ResourceCacheSize = source.ResourceCacheSize,
+            ResourceCacheSafeMode = source.ResourceCacheSafeMode,
+            VersionFixups = new Dictionary<string, string>(
+                source.VersionFixups,
+                StringComparer.OrdinalIgnoreCase),
+        };
 
     private static void Validate(FhirPackageManagerOptions options)
     {
@@ -95,6 +188,11 @@ internal sealed record FhirPackageManagerConfiguration
         if (options.InstallLimits is null)
         {
             throw InvalidPolicy("InstallLimits must not be null.");
+        }
+
+        if (options.FileSystemRetry is null)
+        {
+            throw InvalidPolicy("FileSystemRetry must not be null.");
         }
 
         if (options.Registries is null)

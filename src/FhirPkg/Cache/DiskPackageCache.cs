@@ -735,7 +735,7 @@ public class DiskPackageCache :
                     reference,
                     committedInspection,
                     entry,
-                    ct)
+                    CancellationToken.None)
                 .ConfigureAwait(false);
             options.InstallOutcome = new PackageCacheInstallOutcome(
                 committedEffect,
@@ -990,7 +990,7 @@ public class DiskPackageCache :
                     cacheKey.DisplayReference,
                     committedInspection,
                     entry,
-                    cancellationToken)
+                    CancellationToken.None)
                 .ConfigureAwait(false);
         }
         finally
@@ -1991,8 +1991,16 @@ public class DiskPackageCache :
             IndexFileName);
         try
         {
-            await using Stream stream =
-                _fileOperations.OpenRead(indexPath);
+            // An absent optional index is not a filesystem fault.
+            FileSystemProbeResult probe = await _context.FileSystem
+                .ProbeAsync(indexPath, cancellationToken)
+                .ConfigureAwait(false);
+            if (probe.Kind == FileSystemEntryKind.Missing)
+                return null;
+
+            await using Stream stream = await _fileOperations
+                .OpenReadAsync(indexPath, cancellationToken)
+                .ConfigureAwait(false);
             if (stream.Length > _installLimits.MaxEntryBytes)
             {
                 _logger.LogDebug(

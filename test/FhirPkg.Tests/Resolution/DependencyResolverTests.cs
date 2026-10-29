@@ -3,9 +3,11 @@
 using System.Text.Json;
 
 using FhirPkg.Cache;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
+using FhirPkg.Tests.Support;
 using FhirPkg.Utilities;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -16,6 +18,118 @@ namespace FhirPkg.Tests.Resolution;
 
 public class DependencyResolverTests
 {
+    [Theory]
+    [InlineData("version", false)]
+    [InlineData("version", true)]
+    [InlineData("metadata", false)]
+    [InlineData("metadata", true)]
+    [InlineData("alias", false)]
+    [InlineData("alias", true)]
+    public async Task Resolve_TerminalLocalFailureDoesNotEnterRegistryFallback(
+        string boundary, bool registryOperation)
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, $"resolver-local-{Guid.NewGuid():N}.json");
+        Exception terminal = registryOperation
+            ? new RegistryOperationException(
+                "read", "cached.package",
+                [new RegistryAttemptFailure("https://registry.example/", RegistryFailureCategory.Unexpected)])
+            : new HttpRequestException("HTTP wrapped a local read.", new IOException("local read"));
+        ScriptedFileSystemPrimitives files = new();
+        files.Set("Probe", ScriptedFileSystemPrimitives.Fail<FileSystemProbeResult>(
+            terminal, "local manifest read", path, nativeError: 1117));
+        FileSystemContext context = files.CreateContext(retries: 1);
+        Should.Throw<Exception>(() => context.FileSystem.Probe(path)).ShouldBeSameAs(terminal);
+        string version = boundary == "alias" ? "current" : "1.0.0";
+        Mock<IVersionResolver> versions = CreateExactVersionResolver();
+        Mock<IRegistryClient> registry = CreateRegistry(new Dictionary<string, PackageListing>());
+        Mock<IPackageCache> cache = CreateCache(_ =>
+            CreateManifest("cached.package", "1.0.0", Dependencies()));
+        if (boundary == "version")
+        {
+            versions.Setup(value => value.ResolveVersionAsync(
+                    "cached.package", version, It.IsAny<VersionResolveOptions?>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(terminal);
+        }
+        else if (boundary == "metadata")
+        {
+            registry.Setup(value => value.GetPackageListingAsync(
+                    "cached.package", It.IsAny<CancellationToken>()))
+                .ThrowsAsync(terminal);
+        }
+        else
+        {
+            registry.Setup(value => value.ResolveAsync(
+                    It.IsAny<PackageDirective>(), It.IsAny<VersionResolveOptions?>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(terminal);
+        }
+        DependencyResolver resolver = CreateResolver(versions, registry, cache);
+
+        Exception actual = await Should.ThrowAsync<Exception>(() => resolver.ResolveAsync(
+            CreateRoot(Dependencies(("cached.package", version))),
+            cancellationToken: TestContext.Current.CancellationToken));
+
+        actual.ShouldBeSameAs(terminal);
+        FileSystemFailureContext.TryGetTerminal(actual, out FileSystemFailureContext? failure).ShouldBeTrue();
+        failure!.Path.ShouldBe(path);
+        failure.AttemptCount.ShouldBe(2);
+        files.Count("Probe").ShouldBe(2);
+        files.Waits.ShouldBe([10]);
+        cache.Verify(value => value.ReadManifestAsync(
+            It.IsAny<PackageReference>(), It.IsAny<CancellationToken>()), Times.Never);
+        registry.Verify(value => value.GetPackageListingAsync(
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Exactly(boundary == "metadata" ? 1 : 0));
+        registry.Verify(value => value.ResolveAsync(
+            It.IsAny<PackageDirective>(), It.IsAny<VersionResolveOptions?>(), It.IsAny<CancellationToken>()),
+            Times.Exactly(boundary == "alias" ? 1 : 0));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Resolve_UnmarkedRegistryFailureStillUsesCachedManifest(bool metadata)
+    {
+        HttpRequestException network = new("ordinary network failure");
+        Mock<IVersionResolver> versions = CreateExactVersionResolver();
+        Mock<IRegistryClient> registry = CreateRegistry(new Dictionary<string, PackageListing>());
+        Mock<IPackageCache> cache = CreateCache(_ =>
+            CreateManifest("cached.package", "1.0.0", Dependencies()));
+        if (metadata)
+        {
+            registry.Setup(value => value.GetPackageListingAsync(
+                    "cached.package", It.IsAny<CancellationToken>()))
+                .ThrowsAsync(network);
+        }
+        else
+        {
+            versions.Setup(value => value.ResolveVersionAsync(
+                    "cached.package", "1.0.0", It.IsAny<VersionResolveOptions?>(), It.IsAny<CancellationToken>()))
+                .ThrowsAsync(network);
+        }
+        DependencyResolver resolver = CreateResolver(versions, registry, cache);
+
+        PackageClosure closure = await resolver.ResolveAsync(
+            CreateRoot(Dependencies(("cached.package", "1.0.0"))),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        closure.Resolved["cached.package"].Version.ShouldBe("1.0.0");
+        if (metadata)
+        {
+            DependencyResolutionFailure failure = closure.Failures.ShouldHaveSingleItem();
+            failure.Code.ShouldBe(DependencyResolutionFailureCode.MetadataUnavailable);
+            RegistryAttemptFailure snapshot = failure.RegistryFailures.ShouldHaveSingleItem();
+            snapshot.Category.ShouldBe(RegistryFailureCategory.Network);
+            snapshot.Message.ShouldBe("The registry could not be reached.");
+            snapshot.Message.ShouldNotContain(network.Message);
+        }
+        else
+        {
+            closure.Failures.ShouldBeEmpty();
+        }
+        cache.Verify(value => value.ReadManifestAsync(
+            It.IsAny<PackageReference>(), It.IsAny<CancellationToken>()), Times.Once);
+        FileSystemFailureContext.TryGetTerminal(network, out _).ShouldBeFalse();
+    }
+
     [Fact]
     public async Task ResolveAsync_EqualExactAndCiRequirements_PreservesCiAlias()
     {

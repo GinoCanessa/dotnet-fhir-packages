@@ -57,12 +57,16 @@ public static class RegistryClientFactory
         RegistryHttpTransport transport,
         ILoggerFactory loggerFactory,
         TimeProvider? timeProvider = null)
-        => BuildRegistryClient(
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        return BuildRegistryClient(
             options,
             transport,
             loggerFactory,
             timeProvider,
-            FileSystemContext.CreateDefault());
+            new FileSystemContext(options.FileSystemRetry));
+    }
 
     internal static IRegistryClient BuildRegistryClient(
         FhirPackageManagerOptions options,

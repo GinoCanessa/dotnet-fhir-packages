@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Utilities;
@@ -43,6 +44,9 @@ public class DependencyResolver : IDependencyResolver
     private readonly ILogger _logger;
     private readonly TimeProvider _timeProvider;
     private readonly PackageFixupPolicy _fixupPolicy;
+
+    internal IEnumerable<object> BuiltInCollaborators =>
+        [_cache, _registryClient, _versionResolver];
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DependencyResolver"/> class.
@@ -188,15 +192,17 @@ public class DependencyResolver : IDependencyResolver
                 .ConfigureAwait(false);
         }
         catch (RegistryOperationException exception)
+            when (!FileSystemFailureContext.TryGetTerminal(exception, out _))
         {
             registryFailures = exception.Failures;
         }
         catch (Exception exception)
-            when (exception is HttpRequestException
+            when (!FileSystemFailureContext.TryGetTerminal(exception, out _)
+                && exception is (HttpRequestException
                 or TimeoutException
                 or JsonException
                 or InvalidDataException
-                or FormatException)
+                or FormatException))
         {
             registryFailures =
             [
@@ -1105,6 +1111,7 @@ public class DependencyResolver : IDependencyResolver
                             RequiresInstallation: true);
             }
             catch (RegistryOperationException exception)
+                when (!FileSystemFailureContext.TryGetTerminal(exception, out _))
             {
                 resolution =
                         (!allowCachedFallback
@@ -1122,11 +1129,12 @@ public class DependencyResolver : IDependencyResolver
                             RequiresInstallation: true);
             }
             catch (Exception exception)
-                when (exception is HttpRequestException
+                when (!FileSystemFailureContext.TryGetTerminal(exception, out _)
+                    && exception is (HttpRequestException
                     or TimeoutException
                     or JsonException
                     or InvalidDataException
-                    or FormatException)
+                    or FormatException))
             {
                 resolution =
                     (!allowCachedFallback
