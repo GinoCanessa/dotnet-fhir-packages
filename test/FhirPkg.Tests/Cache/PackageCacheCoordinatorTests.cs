@@ -7,6 +7,7 @@ using FhirPkg.Cache;
 using FhirPkg.Installation;
 using FhirPkg.IO;
 using FhirPkg.Models;
+using FhirPkg.Tests.Support;
 using FhirPkg.Utilities;
 using Shouldly;
 using Xunit;
@@ -693,6 +694,113 @@ public sealed class PackageCacheCoordinatorTests
             outcome.PrimitiveFailure.ReplaySafety.ShouldBe(FileSystemReplaySafety.Safe);
             FileSystemFailureContext.TryGetTerminal(outcome.PrimitiveFailure.Exception, out _).ShouldBeFalse();
         }
+    }
+
+    [Fact]
+    public async Task Coordination_MoreThanFiveBusyPollsDoesNotSpendFaultBudget()
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives primitives = new();
+        primitives.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        primitives.Set<FileStream>("OpenFile", _ => OpenScriptedLockFile(directory.Path));
+        for (int index = 0; index < 7; index++)
+            primitives.Enqueue("TryLock", FileSystemReplayOutcome<bool>.Complete(false));
+        primitives.Enqueue("TryLock", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set("Unlock", FileSystemReplayOutcome<bool>.Complete(true));
+        PackageCacheCoordinator coordinator = new(
+            directory.Path,
+            primitives.CreateContext(retries: 2),
+            NullPackageCacheContentionObserver.Instance);
+        PackageCacheKey cacheKey = PackageCacheKey.Create(
+            new PackageReference("busy.package", "1.0.0"));
+
+        await using (await coordinator.AcquireIdentityAsync(
+            cacheKey,
+            TestContext.Current.CancellationToken))
+        {
+        }
+
+        primitives.Count("TryLock").ShouldBe(8);
+        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Coordination_InterleavedFaultsDoNotResetBudget()
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives primitives = new();
+        primitives.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        primitives.Set<FileStream>("OpenFile", _ => OpenScriptedLockFile(directory.Path));
+        for (int index = 0; index < 3; index++)
+        {
+            primitives.Enqueue(
+                "TryLock",
+                ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "TryLock"));
+            primitives.Enqueue("TryLock", FileSystemReplayOutcome<bool>.Complete(false));
+        }
+
+        PackageCacheCoordinator coordinator = new(
+            directory.Path,
+            primitives.CreateContext(retries: 2),
+            NullPackageCacheContentionObserver.Instance);
+        PackageCacheKey cacheKey = PackageCacheKey.Create(
+            new PackageReference("faulty.package", "1.0.0"));
+
+        await Should.ThrowAsync<PackageInstallException>(
+            () => coordinator.AcquireIdentityAsync(
+                cacheKey,
+                TestContext.Current.CancellationToken));
+
+        // Three faults against two retries: the busy polls between them never refilled it.
+        primitives.Count("TryLock").ShouldBe(5);
+        primitives.AsyncWaits.Count.ShouldBe(2);
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Lease_UnlockExhaustionReleasesHandleAndSemaphoreOnce()
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives primitives = new();
+        primitives.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        primitives.Set<FileStream>("OpenFile", _ => OpenScriptedLockFile(directory.Path));
+        primitives.Set("TryLock", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set(
+            "Unlock",
+            _ => ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "Unlock"));
+        PackageCacheCoordinator coordinator = new(
+            directory.Path,
+            primitives.CreateContext(retries: 2),
+            NullPackageCacheContentionObserver.Instance);
+        PackageCacheKey cacheKey = PackageCacheKey.Create(
+            new PackageReference("unlock.package", "1.0.0"));
+        PackageCacheLease lease = await coordinator.AcquireIdentityAsync(
+            cacheKey,
+            TestContext.Current.CancellationToken);
+
+        await Should.ThrowAsync<IOException>(async () => await lease.DisposeAsync());
+        await lease.DisposeAsync();
+
+        primitives.Count("Unlock").ShouldBe(3);
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
+        await using (await new PackageCacheCoordinator(directory.Path)
+            .AcquireIdentityAsync(cacheKey, TestContext.Current.CancellationToken))
+        {
+        }
+    }
+
+    private static FileSystemReplayOutcome<FileStream> OpenScriptedLockFile(string root)
+    {
+        string path = Path.Combine(root, $"scripted-{Guid.NewGuid():N}.lock");
+        return FileSystemReplayOutcome<FileStream>.Complete(
+            new FileStream(
+                path,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.ReadWrite | FileShare.Delete,
+                1,
+                FileOptions.DeleteOnClose));
     }
 
     private sealed class TestDirectory : IDisposable

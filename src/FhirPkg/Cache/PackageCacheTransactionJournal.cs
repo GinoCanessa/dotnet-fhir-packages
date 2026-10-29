@@ -2,6 +2,7 @@
 
 using System.Text.Json;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Utilities;
 
@@ -103,9 +104,6 @@ internal sealed record PackageCacheTransactionJournal
 
 internal sealed class PackageCacheJournalStore
 {
-    private const int InitialReadRetryDelayMilliseconds = 10;
-    private const int MaximumReadRetryDelayMilliseconds = 250;
-    private const int MaximumReadRetryAttempts = 8;
     private static readonly JsonSerializerOptions s_jsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -115,6 +113,7 @@ internal sealed class PackageCacheJournalStore
 
     private readonly string _cacheRoot;
     private readonly string _transactionDirectory;
+    private readonly FileSystemContext _context;
     private readonly IPackageCacheFileOperations _fileOperations;
     private readonly IPackageCacheFaultObserver _faultObserver;
 
@@ -122,12 +121,28 @@ internal sealed class PackageCacheJournalStore
         string cacheRoot,
         IPackageCacheFileOperations fileOperations,
         IPackageCacheFaultObserver faultObserver)
+        : this(
+            cacheRoot,
+            (fileOperations as SystemPackageCacheFileOperations)?.Context
+                ?? FileSystemContext.CreateDefault(),
+            fileOperations,
+            faultObserver)
+    {
+    }
+
+    internal PackageCacheJournalStore(
+        string cacheRoot,
+        FileSystemContext context,
+        IPackageCacheFileOperations fileOperations,
+        IPackageCacheFaultObserver faultObserver)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
+        ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(fileOperations);
         ArgumentNullException.ThrowIfNull(faultObserver);
 
-        _cacheRoot = Path.GetFullPath(cacheRoot);
+        _context = context;
+        _cacheRoot = context.FileSystem.GetFullPath(cacheRoot);
         _transactionDirectory = Path.Combine(
             _cacheRoot,
             ".fhirpkg",
@@ -168,16 +183,19 @@ internal sealed class PackageCacheJournalStore
     internal async Task<IReadOnlyList<PackageCacheTransactionJournal>>
         ReadAllAsync(CancellationToken cancellationToken)
     {
-        if (!Directory.Exists(_transactionDirectory))
+        if (!await DirectoryExistsAsync(_transactionDirectory, cancellationToken)
+                .ConfigureAwait(false))
             return [];
 
         string[] paths;
         try
         {
-            paths = Directory.GetFiles(
-                _transactionDirectory,
-                "*.json",
-                SearchOption.TopDirectoryOnly);
+            paths = (await _context.FileSystem.SnapshotDirectoryAsync(
+                        _transactionDirectory,
+                        cancellationToken)
+                    .ConfigureAwait(false))
+                .Where(path => path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
         }
         catch (DirectoryNotFoundException)
         {
@@ -214,7 +232,8 @@ internal sealed class PackageCacheJournalStore
     {
         ArgumentNullException.ThrowIfNull(cacheKey);
         string path = GetJournalPath(cacheKey);
-        if (!File.Exists(path))
+        if ((await _context.FileSystem.ProbeAsync(path, cancellationToken)
+                .ConfigureAwait(false)).Kind == FileSystemEntryKind.Missing)
             return null;
 
         try
@@ -232,20 +251,37 @@ internal sealed class PackageCacheJournalStore
         }
     }
 
-    internal void Delete(PackageCacheTransactionJournal journal)
+    private async Task<bool> DirectoryExistsAsync(
+        string path,
+        CancellationToken cancellationToken) =>
+        (await _context.FileSystem.ProbeAsync(path, cancellationToken)
+            .ConfigureAwait(false)).Kind == FileSystemEntryKind.Directory;
+
+    internal async Task DeleteAsync(
+        PackageCacheTransactionJournal journal,
+        CancellationToken cancellationToken)
     {
         PackageCacheKey cacheKey = journal.GetCacheKey();
         string journalPath = GetJournalPath(cacheKey);
-        if (_fileOperations.FileExists(journalPath))
-            _fileOperations.DeleteFile(journalPath);
+        await _fileOperations.DeleteFileAsync(journalPath, cancellationToken)
+            .ConfigureAwait(false);
 
         try
         {
-            if (Directory.Exists(_transactionDirectory)
-                && !Directory.EnumerateFileSystemEntries(
-                    _transactionDirectory).Any())
+            if (await DirectoryExistsAsync(_transactionDirectory, cancellationToken)
+                    .ConfigureAwait(false)
+                && (await _context.FileSystem.SnapshotDirectoryAsync(
+                        _transactionDirectory,
+                        cancellationToken)
+                    .ConfigureAwait(false)).Length == 0)
             {
-                Directory.Delete(_transactionDirectory);
+                await _context.FileSystem.DeleteAsync(
+                        _transactionDirectory,
+                        FileSystemEntryKind.Directory,
+                        recursive: false,
+                        missingAllowed: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
         catch (UnauthorizedAccessException)
@@ -427,82 +463,75 @@ internal sealed class PackageCacheJournalStore
         CancellationToken cancellationToken)
     {
         PackageCacheTransactionJournal journal;
-        int retryDelay = InitialReadRetryDelayMilliseconds;
-        int retryAttempt = 0;
-        while (true)
+        try
         {
-            try
+            // The common retry budget governs the open and each read; JSON is parsed once.
+            if ((await _context.FileSystem.ProbeAsync(path, cancellationToken)
+                    .ConfigureAwait(false)).Kind == FileSystemEntryKind.Missing)
             {
-                await using FileStream stream = new FileStream(
-                    path,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete,
-                    16_384,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                journal =
-                    await JsonSerializer
-                        .DeserializeAsync<PackageCacheTransactionJournal>(
-                            stream,
-                            s_jsonOptions,
-                            cancellationToken)
-                        .ConfigureAwait(false)
-                    ?? throw PackageCacheTransactionJournal.InvalidJournal(
-                        "A cache transaction journal was empty.");
-                break;
+                throw new FileNotFoundException(
+                    "The cache transaction journal does not exist.",
+                    path);
             }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (FileNotFoundException)
-            {
-                throw;
-            }
-            catch (DirectoryNotFoundException)
-            {
-                throw;
-            }
-            catch (PackageInstallException)
-            {
-                throw;
-            }
-            catch (JsonException exception)
-            {
-                throw PackageCacheTransactionJournal.InvalidJournal(
-                    "A cache transaction journal contains invalid JSON.",
-                    exception);
-            }
-            catch (NotSupportedException exception)
-            {
-                throw PackageCacheTransactionJournal.InvalidJournal(
-                    "A cache transaction journal has an unsupported shape.",
-                    exception);
-            }
-            catch (UnauthorizedAccessException exception)
-            {
-                throw PackageCacheTransactionJournal.InvalidJournal(
-                    "A cache transaction journal could not be read.",
-                    exception);
-            }
-            catch (IOException exception)
-                when (OperatingSystem.IsWindows()
-                    && IsWindowsReadContention(exception)
-                    && retryAttempt < MaximumReadRetryAttempts)
-            {
-                retryAttempt = checked(retryAttempt + 1);
-                await Task.Delay(retryDelay, cancellationToken)
+
+            await using PositionedFileStream stream =
+                await _context.FileSystem.OpenPositionedFileAsync(
+                        path,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete,
+                        FileOptions.Asynchronous | FileOptions.SequentialScan,
+                        cancellationToken)
                     .ConfigureAwait(false);
-                retryDelay = Math.Min(
-                    retryDelay * 2,
-                    MaximumReadRetryDelayMilliseconds);
-            }
-            catch (IOException exception)
-            {
-                throw PackageCacheTransactionJournal.InvalidJournal(
-                    "A cache transaction journal could not be read.",
-                    exception);
-            }
+            journal =
+                await JsonSerializer
+                    .DeserializeAsync<PackageCacheTransactionJournal>(
+                        stream,
+                        s_jsonOptions,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                ?? throw PackageCacheTransactionJournal.InvalidJournal(
+                    "A cache transaction journal was empty.");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (FileNotFoundException)
+        {
+            throw;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            throw;
+        }
+        catch (PackageInstallException)
+        {
+            throw;
+        }
+        catch (JsonException exception)
+        {
+            throw PackageCacheTransactionJournal.InvalidJournal(
+                "A cache transaction journal contains invalid JSON.",
+                exception);
+        }
+        catch (NotSupportedException exception)
+        {
+            throw PackageCacheTransactionJournal.InvalidJournal(
+                "A cache transaction journal has an unsupported shape.",
+                exception);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            throw PackageCacheTransactionJournal.InvalidJournal(
+                "A cache transaction journal could not be read.",
+                exception);
+        }
+        catch (IOException exception)
+        {
+            throw PackageCacheTransactionJournal.InvalidJournal(
+                "A cache transaction journal could not be read.",
+                exception);
         }
 
         ValidateJournal(journal);
@@ -517,13 +546,5 @@ internal sealed class PackageCacheJournalStore
         }
 
         return journal;
-    }
-
-    internal static bool IsWindowsReadContention(
-        IOException exception)
-    {
-        ArgumentNullException.ThrowIfNull(exception);
-        int nativeError = exception.HResult & 0xFFFF;
-        return nativeError is 32 or 33;
     }
 }

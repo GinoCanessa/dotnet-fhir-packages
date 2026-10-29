@@ -44,6 +44,29 @@ public class DiskPackageCacheTests : IDisposable
     }
 
     [Fact]
+    public void Constructor_NullRetryOptions_ThrowsBeforeAnyIo()
+    {
+        Should.Throw<PackageInstallException>(
+            () => new DiskPackageCache(_tempDir, null, null, (FileSystemRetryOptions)null!))
+            .ErrorCode.ShouldBe(PackageInstallErrorCode.InvalidPolicy);
+
+        Directory.Exists(_tempDir).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Constructor_RetryOptions_AreTheEffectiveRuntimePolicy()
+    {
+        using DiskPackageCache cache = new DiskPackageCache(
+            _tempDir,
+            null,
+            null,
+            new FileSystemRetryOptions { RetryCount = 3, MinimumDelayMilliseconds = 7 });
+
+        cache.FileSystemContext.Policy.RetryCount.ShouldBe(3);
+        cache.FileSystemContext.Policy.MinimumDelayMilliseconds.ShouldBe(7);
+    }
+
+    [Fact]
     public void Constructor_EnvVarSet_UsesEnvVar()
     {
         string envDir = Path.Combine(_tempDir, "from-env");

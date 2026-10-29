@@ -2,6 +2,7 @@
 
 using System.Globalization;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Utilities;
 
 namespace FhirPkg.Cache;
@@ -34,6 +35,7 @@ internal sealed class PackageCacheMetadataStore
     ];
 
     private readonly string _metadataPath;
+    private readonly FileSystemContext _context;
     private readonly IPackageCacheFileOperations _fileOperations;
     private readonly IPackageCacheFaultObserver _faultObserver;
 
@@ -41,21 +43,47 @@ internal sealed class PackageCacheMetadataStore
         string cacheRoot,
         IPackageCacheFileOperations fileOperations,
         IPackageCacheFaultObserver faultObserver)
+        : this(
+            cacheRoot,
+            (fileOperations as SystemPackageCacheFileOperations)?.Context
+                ?? FileSystemContext.CreateDefault(),
+            fileOperations,
+            faultObserver)
+    {
+    }
+
+    internal PackageCacheMetadataStore(
+        string cacheRoot,
+        FileSystemContext context,
+        IPackageCacheFileOperations fileOperations,
+        IPackageCacheFaultObserver faultObserver)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
+        ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(fileOperations);
         ArgumentNullException.ThrowIfNull(faultObserver);
 
         _metadataPath = Path.Combine(cacheRoot, MetadataFileName);
+        _context = context;
         _fileOperations = fileOperations;
         _faultObserver = faultObserver;
     }
+
+    // Absence is an explicit probe outcome and never spends retry budget.
+    private async Task<bool> MetadataExistsAsync(CancellationToken cancellationToken) =>
+        (await _context.FileSystem.ProbeAsync(_metadataPath, cancellationToken)
+            .ConfigureAwait(false)).Kind
+            is FileSystemEntryKind.File or FileSystemEntryKind.SymbolicLink;
+
+    private Task<IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>>
+        ParseAsync(CancellationToken cancellationToken) =>
+        IniParser.ParseFileAsync(_metadataPath, _context, cancellationToken);
 
     internal async Task<CacheMetadata> ReadAsync(
         CancellationToken cancellationToken)
     {
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini =
-            await IniParser.ParseFileAsync(_metadataPath, cancellationToken)
+            await ParseAsync(cancellationToken)
                 .ConfigureAwait(false);
         return ParseMetadata(ini);
     }
@@ -77,9 +105,7 @@ internal sealed class PackageCacheMetadataStore
         CancellationToken cancellationToken)
     {
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini =
-            await IniParser.ParseFileAsync(
-                    _metadataPath,
-                    cancellationToken)
+            await ParseAsync(cancellationToken)
                 .ConfigureAwait(false);
         HashSet<string> keys = new(StringComparer.Ordinal);
         foreach (string sectionName in s_managedSections)
@@ -102,13 +128,12 @@ internal sealed class PackageCacheMetadataStore
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(keys);
-        if (keys.Count == 0 || !File.Exists(_metadataPath))
+        if (keys.Count == 0
+            || !await MetadataExistsAsync(cancellationToken).ConfigureAwait(false))
             return;
 
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini =
-            await IniParser.ParseFileAsync(
-                    _metadataPath,
-                    cancellationToken)
+            await ParseAsync(cancellationToken)
                 .ConfigureAwait(false);
         Dictionary<string, Dictionary<string, string>> sections =
             CreateMutableSections(ini);
@@ -168,11 +193,12 @@ internal sealed class PackageCacheMetadataStore
         PackageCacheMetadataMutation? mutation,
         CancellationToken cancellationToken)
     {
-        if (entry is null && !File.Exists(_metadataPath))
+        if (entry is null
+            && !await MetadataExistsAsync(cancellationToken).ConfigureAwait(false))
             return;
 
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini =
-            await IniParser.ParseFileAsync(_metadataPath, cancellationToken)
+            await ParseAsync(cancellationToken)
                 .ConfigureAwait(false);
         Dictionary<string, Dictionary<string, string>> sections =
             CreateMutableSections(ini);
@@ -222,11 +248,11 @@ internal sealed class PackageCacheMetadataStore
     internal async Task ClearManagedEntriesAsync(
         CancellationToken cancellationToken)
     {
-        if (!File.Exists(_metadataPath))
+        if (!await MetadataExistsAsync(cancellationToken).ConfigureAwait(false))
             return;
 
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ini =
-            await IniParser.ParseFileAsync(_metadataPath, cancellationToken)
+            await ParseAsync(cancellationToken)
                 .ConfigureAwait(false);
         Dictionary<string, Dictionary<string, string>> sections =
             CreateMutableSections(ini);

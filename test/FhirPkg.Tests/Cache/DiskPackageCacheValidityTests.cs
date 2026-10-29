@@ -3,6 +3,8 @@
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
+using Microsoft.Win32.SafeHandles;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
@@ -789,6 +791,133 @@ public sealed class DiskPackageCacheValidityTests : IDisposable
 
         await AssertRejectedByEveryReadSurfaceAsync(cache, reference);
         File.Exists(linkTarget).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Inspect_ExhaustedManifestIoRemainsCorruptWithFinalContext()
+    {
+        PackageReference reference = new("example.package", "1.0.0");
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot);
+        string manifestPath = Path.Combine(targetPath, "package", "package.json");
+        await WriteValidContentAsync(Path.Combine(targetPath, "package"));
+
+        ScriptedFileSystemPrimitives asyncPrimitives = CreateManifestFaultPrimitives();
+        PackageCacheInspection asyncInspection = await new PackageCacheValidator(
+                _cacheRoot, asyncPrimitives.CreateContext(retries: 5))
+            .InspectAsync(cacheKey, TestContext.Current.CancellationToken);
+        ScriptedFileSystemPrimitives syncPrimitives = CreateManifestFaultPrimitives();
+        PackageCacheInspection syncInspection = new PackageCacheValidator(
+                _cacheRoot, syncPrimitives.CreateContext(retries: 5))
+            .Inspect(cacheKey);
+
+        // One initial attempt plus five retries, against a file that is genuinely present.
+        CountManifestOpens(asyncPrimitives, manifestPath).ShouldBe(6);
+        CountManifestOpens(syncPrimitives, manifestPath).ShouldBe(6);
+        asyncPrimitives.AsyncWaits.Count.ShouldBe(5);
+        syncPrimitives.Waits.Count.ShouldBe(5);
+        foreach (PackageCacheInspection inspection in new[] { asyncInspection, syncInspection })
+        {
+            inspection.State.ShouldBe(PackageCacheInspectionState.Corrupt);
+            inspection.IsRepairable.ShouldBeTrue();
+            inspection.ManifestPath.ShouldBe(manifestPath);
+            inspection.Manifest.ShouldBeNull();
+            FileSystemFailureContext failure = inspection.FailureContext.ShouldNotBeNull();
+            failure.IsTerminal.ShouldBeTrue();
+            failure.Termination.ShouldBe(FileSystemFailureTermination.Exhausted);
+            failure.RetriesUsed.ShouldBe(5);
+            failure.AttemptCount.ShouldBeGreaterThanOrEqualTo(6);
+            failure.NativeErrorCode.ShouldBe(32);
+            failure.Path.ShouldNotBeNull().ShouldEndWith("package.json");
+            inspection.CorruptionReason.ShouldNotBeNull().ShouldContain("retries 5");
+            inspection.CorruptionReason.ShouldContain("Exhausted");
+        }
+    }
+
+    [Fact]
+    public async Task Strict_ExhaustedManifestIoDoesNotReadReplacementSource()
+    {
+        PackageReference reference = new("example.package", "1.0.0");
+        string targetPath = PackageCacheKey.Create(reference).GetPackageDirectoryPath(_cacheRoot);
+        string manifestPath = Path.Combine(targetPath, "package", "package.json");
+        await WriteValidContentAsync(Path.Combine(targetPath, "package"));
+        ScriptedFileSystemPrimitives primitives = CreateManifestFaultPrimitives();
+        primitives.Set<FileStream>("OpenFile", _ => OpenScriptedLockFile(_cacheRoot));
+        primitives.Set("TryLock", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set("Unlock", FileSystemReplayOutcome<bool>.Complete(true));
+        using FailOnReadStream source = new();
+        using DiskPackageCache cache = new(
+            _cacheRoot,
+            logger: null,
+            timeProvider: null,
+            new PackageInstallLimits(),
+            primitives.CreateContext(retries: 5));
+
+        PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(
+            () => cache.InstallAsync(
+                reference,
+                source,
+                new InstallCacheOptions
+                {
+                    VerifyChecksum = false,
+                    CorruptCacheBehavior = CorruptCacheBehavior.Strict
+                },
+                TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(PackageInstallErrorCode.CorruptCache);
+        exception.Stage.ShouldBe(PackageInstallStage.CacheInspection);
+        exception.Message.ShouldContain("retries 5");
+        exception.Message.ShouldContain("Exhausted");
+        source.ReadAttempts.ShouldBe(0);
+        // No replacement was staged and the unreadable target was neither moved nor removed.
+        CountManifestOpens(primitives, manifestPath).ShouldBe(6);
+        primitives.Calls.Count(call => call.Operation == "MovePath").ShouldBe(0);
+        primitives.Calls.Count(call => call.Operation == "DeleteEntry"
+            && call.Path!.StartsWith(targetPath, StringComparison.Ordinal)).ShouldBe(0);
+        File.Exists(manifestPath).ShouldBeTrue();
+    }
+
+    private static ScriptedFileSystemPrimitives CreateManifestFaultPrimitives()
+    {
+        ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<IEnumerator<string>>(
+            "CreateDirectoryEnumerator",
+            call => SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        primitives.Set<SafeFileHandle>(
+            "OpenFileHandle",
+            call => IsManifest(call.Path)
+                ? ScriptedFileSystemPrimitives.NativeFailure<SafeFileHandle>(32, "OpenFileHandle", call.Path)
+                : SystemFileSystemPrimitives.Instance.OpenFileHandle(
+                    call.Path!, call.Mode!.Value, call.Access!.Value, call.Share!.Value, call.Options!.Value));
+        primitives.Set<int>(
+            "OpenDescriptor",
+            call => IsManifest(call.Path)
+                ? ScriptedFileSystemPrimitives.NativeFailure<int>(32, "OpenDescriptor", call.Path)
+                : SystemFileSystemPrimitives.Instance.OpenDescriptor(call.Path!, (int)call.Flags!.Value, 0));
+        return primitives;
+    }
+
+    private static bool IsManifest(string? path) =>
+        string.Equals(Path.GetFileName(path), "package.json", StringComparison.Ordinal);
+
+    private static int CountManifestOpens(ScriptedFileSystemPrimitives primitives, string manifestPath) =>
+        primitives.Calls.Count(call =>
+            call.Operation is "OpenFileHandle" or "OpenDescriptor"
+            && string.Equals(call.Path, manifestPath, StringComparison.OrdinalIgnoreCase));
+
+    private static FileSystemReplayOutcome<FileStream> OpenScriptedLockFile(string root)
+    {
+        Directory.CreateDirectory(root);
+        string path = Path.Combine(root, $"scripted-{Guid.NewGuid():N}.lock");
+        return FileSystemReplayOutcome<FileStream>.Complete(
+            new FileStream(
+                path,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.ReadWrite | FileShare.Delete,
+                1,
+                FileOptions.DeleteOnClose));
     }
 
     public void Dispose()

@@ -1,7 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Collections.Concurrent;
-using System.Diagnostics.CodeAnalysis;
 using FhirPkg.Installation;
 using FhirPkg.IO;
 
@@ -18,6 +17,7 @@ internal sealed class PackageCacheCoordinator
 
     private readonly string _cacheRoot;
     private readonly string _lockRoot;
+    private readonly FileSystemContext _context;
     private readonly IPackageCacheContentionObserver
         _contentionObserver;
 
@@ -31,10 +31,23 @@ internal sealed class PackageCacheCoordinator
     internal PackageCacheCoordinator(
         string cacheRoot,
         IPackageCacheContentionObserver contentionObserver)
+        : this(
+            cacheRoot,
+            FileSystemContext.CreateDefault(),
+            contentionObserver)
+    {
+    }
+
+    internal PackageCacheCoordinator(
+        string cacheRoot,
+        FileSystemContext context,
+        IPackageCacheContentionObserver contentionObserver)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
+        ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(contentionObserver);
-        _cacheRoot = Path.GetFullPath(cacheRoot);
+        _context = context;
+        _cacheRoot = context.FileSystem.GetFullPath(cacheRoot);
         _lockRoot = Path.Combine(_cacheRoot, ".fhirpkg", "locks");
         _contentionObserver = contentionObserver;
     }
@@ -97,33 +110,42 @@ internal sealed class PackageCacheCoordinator
 
         processLock.MarkSemaphoreHeld();
 
-        FileStream? stream = null;
+        LockAcquisitionOperation operation = new(
+            _context,
+            GetOperationLockPath(operationId));
         try
         {
-            if (!TryOpenAndLock(
-                    GetOperationLockPath(operationId),
-                    out stream))
+            EnsureLockDirectory(GetOperationLockPath(operationId));
+            // A single poll: contention means another owner, never a fault.
+            FileSystemReplayOutcome<FileStream?> outcome =
+                _context.Executor.Execute(operation);
+            if (outcome.Kind != FileSystemReplayOutcomeKind.Completed)
             {
-                ReleaseFailedAcquisition(stream, processLock);
+                ReleaseFailedAcquisition(operation, processLock);
                 return null;
             }
 
-            return new PackageCacheLease(processLock, stream);
+            return new PackageCacheLease(processLock, _context, outcome.Value!);
         }
         catch (UnauthorizedAccessException exception)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw CoordinationFailure(exception);
         }
         catch (IOException exception)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw CoordinationFailure(exception);
         }
         catch (NotSupportedException exception)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw CoordinationFailure(exception);
+        }
+        catch
+        {
+            ReleaseFailedAcquisition(operation, processLock);
+            throw;
         }
     }
 
@@ -136,19 +158,26 @@ internal sealed class PackageCacheCoordinator
         PackageCacheProcessLockReference processLock =
             RentProcessLock(processKey);
 
-        FileStream? stream = null;
+        // One operation per acquisition episode: faults spend its budget, while
+        // contention suspends it without replenishing or consuming that budget.
+        LockAcquisitionOperation operation = new(_context, lockPath);
         try
         {
             await processLock.Semaphore.WaitAsync(cancellationToken)
                 .ConfigureAwait(false);
             processLock.MarkSemaphoreHeld();
+            await EnsureLockDirectoryAsync(lockPath, cancellationToken)
+                .ConfigureAwait(false);
             int retryDelay = InitialRetryDelayMilliseconds;
             int retryAttempt = 0;
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (TryOpenAndLock(lockPath, out stream))
-                    return new PackageCacheLease(processLock, stream);
+                FileSystemReplayOutcome<FileStream?> outcome =
+                    await _context.Executor.ExecuteAsync(operation, cancellationToken)
+                        .ConfigureAwait(false);
+                if (outcome.Kind == FileSystemReplayOutcomeKind.Completed)
+                    return new PackageCacheLease(processLock, _context, outcome.Value!);
 
                 retryAttempt = checked(retryAttempt + 1);
                 _contentionObserver.OnRetry(
@@ -164,22 +193,22 @@ internal sealed class PackageCacheCoordinator
         }
         catch (OperationCanceledException)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw;
         }
         catch (UnauthorizedAccessException exception)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw CoordinationFailure(exception);
         }
         catch (IOException exception)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw CoordinationFailure(exception);
         }
         catch (NotSupportedException exception)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw CoordinationFailure(exception);
         }
     }
@@ -192,17 +221,20 @@ internal sealed class PackageCacheCoordinator
         PackageCacheProcessLockReference processLock =
             RentProcessLock(processKey);
 
-        FileStream? stream = null;
+        LockAcquisitionOperation operation = new(_context, lockPath);
         try
         {
             processLock.Semaphore.Wait();
             processLock.MarkSemaphoreHeld();
+            EnsureLockDirectory(lockPath);
             int retryDelay = InitialRetryDelayMilliseconds;
             int retryAttempt = 0;
             while (true)
             {
-                if (TryOpenAndLock(lockPath, out stream))
-                    return new PackageCacheLease(processLock, stream);
+                FileSystemReplayOutcome<FileStream?> outcome =
+                    _context.Executor.Execute(operation);
+                if (outcome.Kind == FileSystemReplayOutcomeKind.Completed)
+                    return new PackageCacheLease(processLock, _context, outcome.Value!);
 
                 retryAttempt = checked(retryAttempt + 1);
                 _contentionObserver.OnRetry(
@@ -217,28 +249,48 @@ internal sealed class PackageCacheCoordinator
         }
         catch (UnauthorizedAccessException exception)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw CoordinationFailure(exception);
         }
         catch (IOException exception)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw CoordinationFailure(exception);
         }
         catch (NotSupportedException exception)
         {
-            ReleaseFailedAcquisition(stream, processLock);
+            ReleaseFailedAcquisition(operation, processLock);
             throw CoordinationFailure(exception);
         }
     }
 
+    private void EnsureLockDirectory(string lockPath)
+    {
+        string directory = Path.GetDirectoryName(lockPath)!;
+        if (_context.FileSystem.Probe(directory).Kind != FileSystemEntryKind.Directory)
+            _context.FileSystem.CreateDirectory(directory);
+    }
+
+    private async ValueTask EnsureLockDirectoryAsync(
+        string lockPath,
+        CancellationToken cancellationToken)
+    {
+        string directory = Path.GetDirectoryName(lockPath)!;
+        if ((await _context.FileSystem.ProbeAsync(directory, cancellationToken)
+                .ConfigureAwait(false)).Kind != FileSystemEntryKind.Directory)
+        {
+            await _context.FileSystem.CreateDirectoryAsync(directory, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
     private static void ReleaseFailedAcquisition(
-        FileStream? stream,
+        LockAcquisitionOperation operation,
         PackageCacheProcessLockReference processLock)
     {
         try
         {
-            stream?.Dispose();
+            operation.ReleaseAfterFailure();
         }
         finally
         {
@@ -269,50 +321,90 @@ internal sealed class PackageCacheCoordinator
             : 0;
     }
 
-    private bool TryOpenAndLock(
-        string lockPath,
-        [NotNullWhen(true)] out FileStream? stream)
+    private sealed class LockAcquisitionOperation :
+        FileSystemReplayOperation<FileStream?>
     {
-        stream = null;
-        try
-        {
-            FileStream candidate = OpenLockFile(lockPath);
-            try
-            {
-                if (!PackageCacheFileLock.TryLock(candidate))
-                    return false;
+        private readonly IFileSystemPrimitives _primitives;
+        private readonly string _lockPath;
+        private FileStream? _stream;
 
-                stream = candidate;
-                return true;
-            }
-            finally
-            {
-                if (stream is null)
-                    candidate.Dispose();
-            }
-        }
-        catch (IOException exception)
-            when (OperatingSystem.IsMacOS()
-                && PackageCacheFileLock.IsMacOpenContention(
-                    exception))
+        internal LockAcquisitionOperation(FileSystemContext context, string lockPath)
+            : base(context.Policy, "OpenLockFile")
         {
-            return false;
+            _primitives = context.Primitives;
+            _lockPath = lockPath;
         }
-    }
 
-    private FileStream OpenLockFile(string lockPath)
-    {
-        SystemPackageCacheFileOperations.Instance.CreateDirectory(
-            Path.GetDirectoryName(lockPath)!);
-        return new FileStream(
-            lockPath,
-            FileMode.OpenOrCreate,
-            FileAccess.ReadWrite,
-            OperatingSystem.IsMacOS()
-                ? FileShare.None
-                : FileShare.ReadWrite,
-            bufferSize: 1,
-            FileOptions.None);
+        internal override FileSystemReplayOutcome<FileStream?> ExecuteStep(
+            CancellationToken cancellationToken)
+        {
+            if (_stream is null)
+            {
+                SetPhase("OpenLockFile");
+                FileSystemReplayOutcome<FileStream> opened = _primitives.OpenFile(
+                    _lockPath,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    OperatingSystem.IsMacOS()
+                        ? FileShare.None
+                        : FileShare.ReadWrite,
+                    bufferSize: 1,
+                    FileOptions.None);
+                if (opened.Kind == FileSystemReplayOutcomeKind.PrimitiveFailure)
+                {
+                    Exception exception = opened.PrimitiveFailure!.Exception;
+                    if (OperatingSystem.IsMacOS()
+                        && exception is IOException ioException
+                        && PackageCacheFileLock.IsMacOpenContention(ioException))
+                    {
+                        // Open contention is coordination, not a filesystem fault.
+                        return FileSystemReplayOutcome<FileStream?>.Contended(null);
+                    }
+
+                    // OpenOrCreate of the lock file is idempotent: replaying it adopts
+                    // or recreates the same empty file, so a physical failure may retry.
+                    return FileSystemReplayOutcome<FileStream?>.Failed(
+                        FileSystemFailureContext.CapturePrimitiveFailure(
+                            exception,
+                            FileSystemReplaySafety.Safe,
+                            "OpenLockFile",
+                            _lockPath));
+                }
+
+                if (opened.Kind != FileSystemReplayOutcomeKind.Completed)
+                    return ResilientFileSystem.Failure<FileStream, FileStream?>(opened);
+
+                _stream = opened.Value;
+            }
+
+            SetPhase("LockFile");
+            FileSystemReplayOutcome<bool> locked = _primitives.TryLock(_stream);
+            if (locked.Kind == FileSystemReplayOutcomeKind.Completed && locked.Value)
+            {
+                FileStream acquired = _stream;
+                _stream = null;
+                return FileSystemReplayOutcome<FileStream?>.Complete(acquired);
+            }
+
+            if (locked.Kind is FileSystemReplayOutcomeKind.Contended
+                or FileSystemReplayOutcomeKind.Completed)
+            {
+                // Never hold the handle across the coordination wait.
+                _stream.Dispose();
+                _stream = null;
+                return FileSystemReplayOutcome<FileStream?>.Contended(null);
+            }
+
+            // A lock fault keeps the opened handle so only the lock step is replayed.
+            return ResilientFileSystem.Failure<bool, FileStream?>(locked);
+        }
+
+        internal void ReleaseAfterFailure()
+        {
+            FileStream? stream = _stream;
+            _stream = null;
+            stream?.Dispose();
+        }
     }
 
     private string GetProcessKey(string logicalKey) =>
@@ -516,15 +608,19 @@ internal sealed class PackageCacheLease :
     IAsyncDisposable
 {
     private readonly PackageCacheProcessLockReference _processLock;
+    private readonly FileSystemContext _context;
     private FileStream? _stream;
 
     internal PackageCacheLease(
         PackageCacheProcessLockReference processLock,
+        FileSystemContext context,
         FileStream stream)
     {
         ArgumentNullException.ThrowIfNull(processLock);
+        ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(stream);
         _processLock = processLock;
+        _context = context;
         _stream = stream;
     }
 
@@ -536,7 +632,10 @@ internal sealed class PackageCacheLease :
 
         try
         {
-            PackageCacheFileLock.Unlock(stream);
+            // Unlock is replayed against the same handle; release below happens once.
+            _ = _context.FileSystem.Execute(
+                "UnlockLockFile",
+                () => _context.Primitives.Unlock(stream));
         }
         finally
         {
@@ -551,10 +650,30 @@ internal sealed class PackageCacheLease :
         }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        Dispose();
-        return ValueTask.CompletedTask;
+        FileStream? stream = Interlocked.Exchange(ref _stream, null);
+        if (stream is null)
+            return;
+
+        try
+        {
+            _ = await _context.FileSystem.ExecuteAsync(
+                    "UnlockLockFile",
+                    () => _context.Primitives.Unlock(stream))
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            try
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _processLock.Dispose();
+            }
+        }
     }
 }
 

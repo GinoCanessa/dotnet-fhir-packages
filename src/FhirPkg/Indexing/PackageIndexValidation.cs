@@ -2,6 +2,7 @@
 
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 
 namespace FhirPkg.Indexing;
 
@@ -78,9 +79,21 @@ internal static class PackageIndexValidation
     internal static bool TryValidateReferencedFiles(
         PackageIndex? index,
         string packageContentPath,
+        out string? failureReason) =>
+        TryValidateReferencedFiles(
+            index,
+            packageContentPath,
+            FileSystemContext.CreateDefault(),
+            out failureReason);
+
+    internal static bool TryValidateReferencedFiles(
+        PackageIndex? index,
+        string packageContentPath,
+        FileSystemContext context,
         out string? failureReason)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(packageContentPath);
+        ArgumentNullException.ThrowIfNull(context);
 
         if (!TryValidateStructure(index, out failureReason))
             return false;
@@ -141,8 +154,16 @@ internal static class PackageIndexValidation
 
             try
             {
+                // A genuinely missing file is explicit and must not consume retry budget.
+                if (context.FileSystem.Probe(filePath).Kind == FileSystemEntryKind.Missing)
+                {
+                    failureReason =
+                        $"Package index filename '{entry.Filename}' does not exist.";
+                    return false;
+                }
+
                 using FileStream stream =
-                    PackageCacheRegularFile.OpenRead(filePath);
+                    context.FileSystem.OpenRegularRead(filePath);
             }
             catch (FileNotFoundException)
             {

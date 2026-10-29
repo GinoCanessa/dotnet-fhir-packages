@@ -33,6 +33,56 @@ internal interface IPackageCacheFileOperations :
     void DeleteArtifact(
         string path,
         PackageCacheArtifactKind artifactKind);
+
+    // Async companions default to the synchronous members so existing fault-injecting
+    // adapters keep observing the same calls; the system adapter overrides them.
+    ValueTask<bool> DirectoryExistsAsync(string path, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(DirectoryExists(path));
+
+    ValueTask MoveDirectoryAsync(
+        string sourcePath,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        MoveDirectory(sourcePath, destinationPath);
+        return ValueTask.CompletedTask;
+    }
+
+    ValueTask DeleteDirectoryAsync(string path, bool recursive, CancellationToken cancellationToken)
+    {
+        DeleteDirectory(path, recursive);
+        return ValueTask.CompletedTask;
+    }
+
+    ValueTask<PackageCacheArtifactKind> GetArtifactKindAsync(
+        string path,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(GetArtifactKind(path));
+
+    ValueTask<bool> ArtifactExistsAsync(
+        string path,
+        PackageCacheArtifactKind artifactKind,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(ArtifactExists(path, artifactKind));
+
+    ValueTask MoveArtifactAsync(
+        string sourcePath,
+        string destinationPath,
+        PackageCacheArtifactKind artifactKind,
+        CancellationToken cancellationToken)
+    {
+        MoveArtifact(sourcePath, destinationPath, artifactKind);
+        return ValueTask.CompletedTask;
+    }
+
+    ValueTask DeleteArtifactAsync(
+        string path,
+        PackageCacheArtifactKind artifactKind,
+        CancellationToken cancellationToken)
+    {
+        DeleteArtifact(path, artifactKind);
+        return ValueTask.CompletedTask;
+    }
 }
 
 internal sealed class SystemPackageCacheFileOperations :
@@ -136,17 +186,78 @@ internal sealed class SystemPackageCacheFileOperations :
         if (artifactKind == PackageCacheArtifactKind.Missing)
             return;
 
-        FileSystemEntryKind kind = artifactKind switch
+        Context.FileSystem.Delete(
+            path, ToEntryKind(artifactKind),
+            recursive: artifactKind == PackageCacheArtifactKind.Directory,
+            missingAllowed: true);
+    }
+
+    private static FileSystemEntryKind ToEntryKind(PackageCacheArtifactKind artifactKind) =>
+        artifactKind switch
         {
             PackageCacheArtifactKind.Directory => FileSystemEntryKind.Directory,
             PackageCacheArtifactKind.SymbolicLink => FileSystemEntryKind.SymbolicLink,
             PackageCacheArtifactKind.DirectorySymbolicLink => FileSystemEntryKind.DirectorySymbolicLink,
             _ => FileSystemEntryKind.File,
         };
-        Context.FileSystem.Delete(
-            path, kind,
-            recursive: kind == FileSystemEntryKind.Directory,
-            missingAllowed: true);
+
+    public ValueTask<bool> DirectoryExistsAsync(string path, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(
+            Context.FileSystem.ProbeFollowing(path, cancellationToken).Kind is FileSystemEntryKind.Directory
+                or FileSystemEntryKind.DirectorySymbolicLink);
+
+    public ValueTask MoveDirectoryAsync(
+        string sourcePath,
+        string destinationPath,
+        CancellationToken cancellationToken) =>
+        Context.FileSystem.MovePathAsync(sourcePath, destinationPath, cancellationToken);
+
+    public ValueTask DeleteDirectoryAsync(string path, bool recursive, CancellationToken cancellationToken) =>
+        Context.FileSystem.DeleteAsync(
+            path, FileSystemEntryKind.Directory, recursive, missingAllowed: false, cancellationToken);
+
+    public async ValueTask<PackageCacheArtifactKind> GetArtifactKindAsync(
+        string path,
+        CancellationToken cancellationToken) =>
+        (await Context.FileSystem.ProbeAsync(path, cancellationToken).ConfigureAwait(false)).Kind switch
+        {
+            FileSystemEntryKind.Missing => PackageCacheArtifactKind.Missing,
+            FileSystemEntryKind.Directory => PackageCacheArtifactKind.Directory,
+            FileSystemEntryKind.SymbolicLink => PackageCacheArtifactKind.SymbolicLink,
+            FileSystemEntryKind.DirectorySymbolicLink => PackageCacheArtifactKind.DirectorySymbolicLink,
+            _ => PackageCacheArtifactKind.File,
+        };
+
+    public async ValueTask<bool> ArtifactExistsAsync(
+        string path,
+        PackageCacheArtifactKind artifactKind,
+        CancellationToken cancellationToken) =>
+        artifactKind != PackageCacheArtifactKind.Missing
+        && (await Context.FileSystem.ProbeAsync(path, cancellationToken).ConfigureAwait(false)).Exists;
+
+    public async ValueTask MoveArtifactAsync(
+        string sourcePath,
+        string destinationPath,
+        PackageCacheArtifactKind artifactKind,
+        CancellationToken cancellationToken)
+    {
+        if (artifactKind != PackageCacheArtifactKind.Missing)
+            await Context.FileSystem.MovePathAsync(sourcePath, destinationPath, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask DeleteArtifactAsync(
+        string path,
+        PackageCacheArtifactKind artifactKind,
+        CancellationToken cancellationToken)
+    {
+        if (artifactKind == PackageCacheArtifactKind.Missing)
+            return;
+
+        await Context.FileSystem.DeleteAsync(
+            path, ToEntryKind(artifactKind),
+            recursive: artifactKind == PackageCacheArtifactKind.Directory,
+            missingAllowed: true,
+            cancellationToken).ConfigureAwait(false);
     }
 }
 

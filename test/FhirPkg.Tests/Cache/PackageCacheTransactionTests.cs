@@ -1103,16 +1103,20 @@ public sealed class PackageCacheTransactionTests : IDisposable
     }
 
     [Fact]
-    public async Task JournalRead_WindowsSharingViolationIsRetried()
+    public async Task JournalRead_UsesOnlyCommonBudget()
     {
         if (!OperatingSystem.IsWindows())
             return;
 
         PackageCacheKey cacheKey = PackageCacheKey.Create(s_reference);
         string operationId = Guid.NewGuid().ToString("N");
+        ScriptedFileSystemPrimitives scripted = new(FileSystemPlatform.Windows);
+        scripted.UseSystemFiles();
+        FileSystemContext context = scripted.CreateContext(retries: 5);
         PackageCacheJournalStore store = new(
             _cacheRoot,
-            SystemPackageCacheFileOperations.Instance,
+            context,
+            new SystemPackageCacheFileOperations(context),
             NullPackageCacheFaultObserver.Instance);
         PackageCacheTransactionJournal journal = new()
         {
@@ -1141,28 +1145,115 @@ public sealed class PackageCacheTransactionTests : IDisposable
             journal,
             TestContext.Current.CancellationToken);
         string journalPath = store.GetJournalPath(cacheKey);
-        Task<PackageCacheTransactionJournal?> readTask;
-        using (FileStream blocker = new(
+        FileStream? blocker = new(
             journalPath,
             FileMode.Open,
             FileAccess.ReadWrite,
-            FileShare.None))
+            FileShare.None);
+        scripted.OnWait = () =>
         {
-            readTask = store.ReadAsync(
+            blocker?.Dispose();
+            blocker = null;
+        };
+        PackageCacheTransactionJournal? result;
+        try
+        {
+            result = await store.ReadAsync(
                 cacheKey,
                 TestContext.Current.CancellationToken);
-            await Task.Delay(
-                TimeSpan.FromMilliseconds(75),
-                TestContext.Current.CancellationToken);
-            readTask.IsCompleted.ShouldBeFalse();
+        }
+        finally
+        {
+            blocker?.Dispose();
         }
 
-        PackageCacheTransactionJournal? result =
-            await readTask.WaitAsync(
-                TimeSpan.FromSeconds(5),
-                TestContext.Current.CancellationToken);
+        // The sharing violation is retried only from the common filesystem budget.
+        scripted.AsyncWaits.Count.ShouldBe(1);
         result.ShouldNotBeNull();
         result!.OperationId.ShouldBe(operationId);
+    }
+
+    [Fact]
+    public async Task Commit_PostRenameSyncFailureDoesNotRepeatPromotion()
+    {
+        ScriptedFileSystemPrimitives scripted = CreatePromotionPrimitives();
+        string targetPath = PackageCacheKey.Create(s_reference).GetPackageDirectoryPath(_cacheRoot);
+        // The rename has already happened when the first parent barrier fails.
+        scripted.Enqueue(
+            "SynchronizeDescriptor",
+            ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(5, "fsync"));
+        using DiskPackageCache cache = CreateCache(
+            fileOperations: new ScriptedPromotionFileOperations(scripted));
+        using MemoryStream archive = CreateArchive("new");
+
+        PackageRecord record = await cache.InstallAsync(
+            s_reference,
+            archive,
+            new InstallCacheOptions { VerifyChecksum = false, ArchiveSha256 = "new-hash" },
+            TestContext.Current.CancellationToken);
+
+        record.Manifest.Version.ShouldBe("1.0.0");
+        FileSystemPrimitiveCall[] promotions = scripted.Calls
+            .Where(call => call.Operation == "MovePath")
+            .ToArray();
+        promotions.Length.ShouldBe(1);
+        promotions[0].DestinationPath.ShouldBe(targetPath);
+        // Retry visited only the unfinished barrier: failed sync, repeated sync, destination barrier.
+        scripted.Count("SynchronizeDescriptor").ShouldBe(3);
+        scripted.AsyncWaits.Count.ShouldBe(1);
+        (await cache.GetFileContentAsync(
+            s_reference, "value.txt", TestContext.Current.CancellationToken)).ShouldBe("new");
+        AssertNoOperationArtifacts();
+    }
+
+    [Fact]
+    public async Task Commit_AfterBoundaryRetriesIgnoreCallerCancellation()
+    {
+        await InstallInitialAsync();
+        ScriptedFileSystemPrimitives scripted = CreatePromotionPrimitives();
+        string targetPath = PackageCacheKey.Create(s_reference).GetPackageDirectoryPath(_cacheRoot);
+        using CancellationTokenSource source = new();
+        // The scripted wait throws for a cancelled token, so a promotion retry that
+        // honored the caller token would abandon the commit after the original moved.
+        scripted.Enqueue(
+            "SynchronizeDescriptor",
+            ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(5, "fsync"));
+        scripted.Enqueue(
+            "SynchronizeDescriptor",
+            ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(5, "fsync"));
+        using DiskPackageCache cache = CreateCache(
+            new CancelAtPointObserver(source, PackageCacheFaultPoint.OriginalRenamed),
+            new ScriptedPromotionFileOperations(scripted));
+        using MemoryStream replacement = CreateArchive("new");
+
+        PackageRecord record = await cache.InstallAsync(
+            s_reference,
+            replacement,
+            new InstallCacheOptions
+            {
+                VerifyChecksum = false,
+                OverwriteExisting = true,
+                ArchiveSha256 = "new-hash"
+            },
+            source.Token);
+
+        source.IsCancellationRequested.ShouldBeTrue();
+        record.Manifest.Version.ShouldBe("1.0.0");
+        scripted.Calls.Count(call => call.Operation == "MovePath").ShouldBe(1);
+        scripted.Calls.Single(call => call.Operation == "MovePath").DestinationPath.ShouldBe(targetPath);
+        scripted.AsyncWaits.Count.ShouldBe(2);
+        (await cache.GetFileContentAsync(
+            s_reference, "value.txt", CancellationToken.None)).ShouldBe("new");
+        AssertNoOperationArtifacts();
+    }
+
+    private static ScriptedFileSystemPrimitives CreatePromotionPrimitives()
+    {
+        // Linux semantics (explicit directory barriers) over real rename/probe work.
+        ScriptedFileSystemPrimitives scripted = new(FileSystemPlatform.Linux);
+        scripted.UseSystemFiles();
+        scripted.EnableDirectorySynchronization();
+        return scripted;
     }
 
     [Fact]
@@ -2120,6 +2211,130 @@ public sealed class PackageCacheTransactionTests : IDisposable
 
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class CancelAtPointObserver : IPackageCacheFaultObserver
+    {
+        private readonly CancellationTokenSource _source;
+        private readonly PackageCacheFaultPoint _point;
+
+        internal CancelAtPointObserver(
+            CancellationTokenSource source,
+            PackageCacheFaultPoint point)
+        {
+            _source = source;
+            _point = point;
+        }
+
+        public ValueTask OnEventAsync(
+            PackageCacheFaultEvent faultEvent,
+            CancellationToken cancellationToken)
+        {
+            if (faultEvent.Point == _point)
+                _source.Cancel();
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    // Delegates everything to the system adapter except replacement promotion,
+    // which runs through scripted primitives so its barriers can be faulted.
+    private sealed class ScriptedPromotionFileOperations : IPackageCacheFileOperations
+    {
+        private readonly SystemPackageCacheFileOperations _inner = new(FileSystemContext.CreateDefault());
+        private readonly ResilientFileSystem _promotion;
+
+        internal ScriptedPromotionFileOperations(ScriptedFileSystemPrimitives scripted) =>
+            _promotion = scripted.CreateContext().FileSystem;
+
+        public bool FileExists(string path) => _inner.FileExists(path);
+
+        public ValueTask<string> GetFullPathAsync(string path, CancellationToken cancellationToken) =>
+            _inner.GetFullPathAsync(path, cancellationToken);
+
+        public void CreateDirectory(string path) => _inner.CreateDirectory(path);
+
+        public ValueTask CreateDirectoryAsync(string path, CancellationToken cancellationToken) =>
+            _inner.CreateDirectoryAsync(path, cancellationToken);
+
+        public void DeleteFile(string path) => _inner.DeleteFile(path);
+
+        public ValueTask DeleteFileAsync(string path, CancellationToken cancellationToken) =>
+            _inner.DeleteFileAsync(path, cancellationToken);
+
+        public ValueTask WriteFileAndFlushAsync(
+            string path, ReadOnlyMemory<byte> content, CancellationToken cancellationToken) =>
+            _inner.WriteFileAndFlushAsync(path, content, cancellationToken);
+
+        public ValueTask AtomicReplaceFileAsync(
+            string sourcePath, string destinationPath, CancellationToken cancellationToken) =>
+            _inner.AtomicReplaceFileAsync(sourcePath, destinationPath, cancellationToken);
+
+        public ValueTask AtomicReplaceFileAsync(
+            DurableFileReplacement replacement, CancellationToken cancellationToken) =>
+            _inner.AtomicReplaceFileAsync(replacement, cancellationToken);
+
+        public void SynchronizeDirectory(string directoryPath) => _inner.SynchronizeDirectory(directoryPath);
+
+        public ValueTask SynchronizeDirectoryAsync(string directoryPath, CancellationToken cancellationToken) =>
+            _inner.SynchronizeDirectoryAsync(directoryPath, cancellationToken);
+
+        public bool DirectoryExists(string path) => _inner.DirectoryExists(path);
+
+        public Stream OpenRead(string path) => _inner.OpenRead(path);
+
+        public ValueTask<Stream> OpenReadAsync(string path, CancellationToken cancellationToken) =>
+            _inner.OpenReadAsync(path, cancellationToken);
+
+        public void MoveDirectory(string sourcePath, string destinationPath) =>
+            _inner.MoveDirectory(sourcePath, destinationPath);
+
+        public void MoveFile(string sourcePath, string destinationPath) =>
+            _inner.MoveFile(sourcePath, destinationPath);
+
+        public void DeleteDirectory(string path, bool recursive) => _inner.DeleteDirectory(path, recursive);
+
+        public PackageCacheArtifactKind GetArtifactKind(string path) => _inner.GetArtifactKind(path);
+
+        public bool ArtifactExists(string path, PackageCacheArtifactKind artifactKind) =>
+            _inner.ArtifactExists(path, artifactKind);
+
+        public void MoveArtifact(
+            string sourcePath, string destinationPath, PackageCacheArtifactKind artifactKind) =>
+            _inner.MoveArtifact(sourcePath, destinationPath, artifactKind);
+
+        public void DeleteArtifact(string path, PackageCacheArtifactKind artifactKind) =>
+            _inner.DeleteArtifact(path, artifactKind);
+
+        public ValueTask<bool> DirectoryExistsAsync(string path, CancellationToken cancellationToken) =>
+            _inner.DirectoryExistsAsync(path, cancellationToken);
+
+        public ValueTask MoveDirectoryAsync(
+            string sourcePath, string destinationPath, CancellationToken cancellationToken) =>
+            _promotion.MovePathAsync(sourcePath, destinationPath, cancellationToken);
+
+        public ValueTask DeleteDirectoryAsync(
+            string path, bool recursive, CancellationToken cancellationToken) =>
+            _inner.DeleteDirectoryAsync(path, recursive, cancellationToken);
+
+        public ValueTask<PackageCacheArtifactKind> GetArtifactKindAsync(
+            string path, CancellationToken cancellationToken) =>
+            _inner.GetArtifactKindAsync(path, cancellationToken);
+
+        public ValueTask<bool> ArtifactExistsAsync(
+            string path, PackageCacheArtifactKind artifactKind, CancellationToken cancellationToken) =>
+            _inner.ArtifactExistsAsync(path, artifactKind, cancellationToken);
+
+        public ValueTask MoveArtifactAsync(
+            string sourcePath,
+            string destinationPath,
+            PackageCacheArtifactKind artifactKind,
+            CancellationToken cancellationToken) =>
+            _inner.MoveArtifactAsync(sourcePath, destinationPath, artifactKind, cancellationToken);
+
+        public ValueTask DeleteArtifactAsync(
+            string path, PackageCacheArtifactKind artifactKind, CancellationToken cancellationToken) =>
+            _inner.DeleteArtifactAsync(path, artifactKind, cancellationToken);
     }
 
     private sealed class RenameBarrierObserver :

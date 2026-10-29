@@ -3,6 +3,7 @@
 using System.Text.Json;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Utilities;
 using Microsoft.Extensions.Logging;
@@ -43,6 +44,7 @@ public class DiskPackageCache :
     private readonly ILogger _logger;
     private readonly TimeProvider _timeProvider;
     private readonly PackageInstallLimits _installLimits;
+    private readonly FileSystemContext _context;
     private readonly PackageCacheValidator _validator;
     private readonly PackageCacheMetadataStore _metadataStore;
     private readonly PackageCacheCommitter _committer;
@@ -55,6 +57,9 @@ public class DiskPackageCache :
 
     /// <inheritdoc />
     public string CacheDirectory { get; }
+
+    // Effective filesystem policy view for later cross-component checks.
+    internal FileSystemContext FileSystemContext => _context;
 
     /// <summary>
     /// Creates a disk package cache using the supplied or default cache root.
@@ -71,6 +76,28 @@ public class DiskPackageCache :
     {
     }
 
+    /// <summary>
+    /// Creates a disk package cache whose filesystem work uses the supplied retry policy.
+    /// </summary>
+    /// <param name="cacheDirectory">The cache root, or null for the default root.</param>
+    /// <param name="logger">An optional logger.</param>
+    /// <param name="timeProvider">An optional time provider.</param>
+    /// <param name="fileSystemRetry">The required bounded filesystem retry options.</param>
+    public DiskPackageCache(
+        string? cacheDirectory,
+        ILogger<DiskPackageCache>? logger,
+        TimeProvider? timeProvider,
+        FileSystemRetryOptions fileSystemRetry)
+        : this(
+            cacheDirectory,
+            logger,
+            timeProvider,
+            PackageInstallLimits.ResolveManager(new PackageInstallLimits()),
+            // Resolve and validate before any root discovery or creation.
+            new FileSystemContext(fileSystemRetry))
+    {
+    }
+
     internal DiskPackageCache(
         string? cacheDirectory,
         ILogger<DiskPackageCache>? logger,
@@ -83,6 +110,24 @@ public class DiskPackageCache :
             installLimits,
             SystemPackageCacheFileOperations.Instance,
             NullPackageCacheFaultObserver.Instance)
+    {
+    }
+
+    internal DiskPackageCache(
+        string? cacheDirectory,
+        ILogger<DiskPackageCache>? logger,
+        TimeProvider? timeProvider,
+        PackageInstallLimits installLimits,
+        FileSystemContext context)
+        : this(
+            cacheDirectory,
+            logger,
+            timeProvider,
+            installLimits,
+            context,
+            new SystemPackageCacheFileOperations(context),
+            NullPackageCacheFaultObserver.Instance,
+            NullPackageCacheContentionObserver.Instance)
     {
     }
 
@@ -129,40 +174,65 @@ public class DiskPackageCache :
         IPackageCacheFileOperations fileOperations,
         IPackageCacheFaultObserver faultObserver,
         IPackageCacheContentionObserver contentionObserver)
+        : this(
+            cacheDirectory,
+            logger,
+            timeProvider,
+            installLimits,
+            DeriveContext(fileOperations),
+            fileOperations,
+            faultObserver,
+            contentionObserver)
+    {
+    }
+
+    internal DiskPackageCache(
+        string? cacheDirectory,
+        ILogger<DiskPackageCache>? logger,
+        TimeProvider? timeProvider,
+        PackageInstallLimits installLimits,
+        FileSystemContext context,
+        IPackageCacheFileOperations fileOperations,
+        IPackageCacheFaultObserver faultObserver,
+        IPackageCacheContentionObserver contentionObserver)
     {
         ArgumentNullException.ThrowIfNull(installLimits);
+        ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(fileOperations);
         ArgumentNullException.ThrowIfNull(faultObserver);
         ArgumentNullException.ThrowIfNull(contentionObserver);
         installLimits.Validate();
 
+        _context = context;
         _logger = logger ?? NullLogger<DiskPackageCache>.Instance;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _installLimits = PackageInstallLimits.ResolvePerCall(
             installLimits,
             requestedLimits: null);
         _fileOperations = fileOperations;
-        CacheDirectory = Path.GetFullPath(
+        CacheDirectory = context.FileSystem.GetFullPath(
             cacheDirectory
             ?? Environment.GetEnvironmentVariable("PACKAGE_CACHE_FOLDER")
             ?? Path.Combine(
-                Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile),
+                context.FileSystem.GetHomeDirectory(),
                 ".fhir",
                 "packages"));
 
-        Directory.CreateDirectory(CacheDirectory);
-        _validator = new PackageCacheValidator(CacheDirectory);
+        context.FileSystem.CreateDirectory(CacheDirectory);
+        _validator = new PackageCacheValidator(CacheDirectory, context);
         _metadataStore = new PackageCacheMetadataStore(
             CacheDirectory,
+            context,
             fileOperations,
             faultObserver);
         PackageCacheJournalStore journalStore = new(
             CacheDirectory,
+            context,
             fileOperations,
             faultObserver);
         _committer = new PackageCacheCommitter(
             CacheDirectory,
+            context,
             _validator,
             _metadataStore,
             journalStore,
@@ -170,7 +240,16 @@ public class DiskPackageCache :
             faultObserver);
         _coordinator = new PackageCacheCoordinator(
             CacheDirectory,
+            context,
             contentionObserver);
+    }
+
+    private static FileSystemContext DeriveContext(
+        IPackageCacheFileOperations fileOperations)
+    {
+        ArgumentNullException.ThrowIfNull(fileOperations);
+        return (fileOperations as SystemPackageCacheFileOperations)?.Context
+            ?? FileSystemContext.CreateDefault();
     }
 
     /// <inheritdoc />
@@ -455,6 +534,7 @@ public class DiskPackageCache :
                         options.VerifyChecksum,
                         reference.FhirDirective,
                         _coordinator,
+                        _context,
                         ct)
                     .ConfigureAwait(false);
                 ownsAcquiredContent = true;
@@ -527,6 +607,7 @@ public class DiskPackageCache :
                             stagingDirectory,
                             effectiveLimits,
                             reference.FhirDirective,
+                            _context,
                             ct)
                         .ConfigureAwait(false);
                 sizeBytes = metrics.ExpandedBytes;
@@ -554,6 +635,7 @@ public class DiskPackageCache :
                             layout.ManifestPath,
                             identityExpectation,
                             reference.FhirDirective,
+                            _context,
                             ct)
                         .ConfigureAwait(false);
                 if (!identity.CacheKey.Equals(cacheKey))
@@ -708,6 +790,7 @@ public class DiskPackageCache :
                         options.VerifyChecksum,
                         "package import",
                         _coordinator,
+                        _context,
                         cancellationToken)
                     .ConfigureAwait(false);
                 ownsAcquiredContent = true;
@@ -732,6 +815,7 @@ public class DiskPackageCache :
                             stagingDirectory,
                             effectiveLimits,
                             "package import",
+                            _context,
                             cancellationToken)
                         .ConfigureAwait(false);
                 sizeBytes = metrics.ExpandedBytes;
@@ -752,6 +836,7 @@ public class DiskPackageCache :
                 identity = await PackageIdentityValidator.DiscoverAsync(
                         layout.ManifestPath,
                         "package import",
+                        _context,
                         cancellationToken)
                     .ConfigureAwait(false);
                 if (layout.Layout == PackageArchiveLayout.Legacy
@@ -1340,14 +1425,36 @@ public class DiskPackageCache :
                 nameof(relativePath));
         }
 
-        if (!File.Exists(filePath))
+        // Absence is an explicit probe outcome; a real fault is never absence.
+        FileSystemProbeResult fileProbe = await _context.FileSystem.ExecuteAsync(
+                "ProbeFollowing",
+                () => _context.Primitives.Probe(filePath, followLinks: true),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (fileProbe.Kind != FileSystemEntryKind.File)
             return null;
 
-        string content =
-            await File.ReadAllTextAsync(
+        string content;
+        await using (PositionedFileStream fileStream =
+            await _context.FileSystem.OpenPositionedFileAsync(
                     filePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan,
                     cancellationToken)
+                .ConfigureAwait(false))
+        {
+            using StreamReader reader = new(
+                fileStream,
+                System.Text.Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: true,
+                bufferSize: 4096,
+                leaveOpen: true);
+            content = await reader.ReadToEndAsync(cancellationToken)
                 .ConfigureAwait(false);
+        }
+
         return materialize(
             contentGeneration,
             content);
@@ -1422,6 +1529,7 @@ public class DiskPackageCache :
         await PackageIdentityValidator.DiscoverAsync(
                 manifestPath,
                 directive,
+                _context,
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -1644,7 +1752,8 @@ public class DiskPackageCache :
             CacheDirectory,
             ".fhirpkg",
             "staging");
-        if (!Directory.Exists(stagingRoot))
+        if ((await _context.FileSystem.ProbeAsync(stagingRoot, cancellationToken)
+                .ConfigureAwait(false)).Kind != FileSystemEntryKind.Directory)
             return;
 
         IReadOnlyList<PackageCacheTransactionJournal> journals =
@@ -1653,10 +1762,11 @@ public class DiskPackageCache :
         HashSet<string> journalOperationIds = journals
             .Select(journal => journal.OperationId)
             .ToHashSet(StringComparer.Ordinal);
-        string[] operationDirectories = Directory.GetDirectories(
-            stagingRoot,
-            "*",
-            SearchOption.TopDirectoryOnly);
+        string[] operationDirectories =
+            await _context.FileSystem.SnapshotDirectoryAsync(
+                    stagingRoot,
+                    cancellationToken)
+                .ConfigureAwait(false);
         Array.Sort(operationDirectories, StringComparer.Ordinal);
         foreach (string operationDirectory in operationDirectories)
         {
@@ -1667,7 +1777,11 @@ public class DiskPackageCache :
                     operationId,
                     protectedOperationId,
                     StringComparison.Ordinal)
-                || !Guid.TryParseExact(operationId, "N", out Guid _))
+                || !Guid.TryParseExact(operationId, "N", out Guid _)
+                || (await _context.FileSystem.ProbeAsync(
+                        operationDirectory,
+                        cancellationToken)
+                    .ConfigureAwait(false)).Kind != FileSystemEntryKind.Directory)
             {
                 continue;
             }
@@ -1677,10 +1791,12 @@ public class DiskPackageCache :
             if (ownerLease is null)
                 continue;
 
-            using (ownerLease)
+            await using (ownerLease.ConfigureAwait(false))
             {
-                PackageContentAcquisition.TryDeleteOperationDirectory(
-                    operationDirectory);
+                await PackageContentAcquisition.TryDeleteOperationDirectoryAsync(
+                        operationDirectory,
+                        _context)
+                    .ConfigureAwait(false);
             }
         }
     }
@@ -1688,10 +1804,13 @@ public class DiskPackageCache :
     private IEnumerable<(PackageCacheKey Key, string Path)>
         EnumeratePackageTargets()
     {
-        if (!Directory.Exists(CacheDirectory))
+        if (_context.FileSystem.Probe(CacheDirectory).Kind
+            != FileSystemEntryKind.Directory)
+        {
             yield break;
+        }
 
-        foreach (string path in Directory.EnumerateFileSystemEntries(
+        foreach (string path in _context.FileSystem.SnapshotDirectory(
             CacheDirectory))
         {
             string name = Path.GetFileName(path);
@@ -1710,13 +1829,15 @@ public class DiskPackageCache :
             }
 
             if (!name.StartsWith('@')
-                || !Directory.Exists(path))
+                || _context.FileSystem.ProbeFollowing(path).Kind
+                    is not (FileSystemEntryKind.Directory
+                        or FileSystemEntryKind.DirectorySymbolicLink))
             {
                 continue;
             }
 
             foreach (string scopedPath in
-                Directory.EnumerateFileSystemEntries(path))
+                _context.FileSystem.SnapshotDirectory(path))
             {
                 string relativePath = Path.GetRelativePath(
                     CacheDirectory,
@@ -1789,13 +1910,24 @@ public class DiskPackageCache :
 
     private void RemoveEmptyScopeDirectories()
     {
-        foreach (string scopePath in Directory.GetDirectories(
-            CacheDirectory,
-            "@*",
-            SearchOption.TopDirectoryOnly))
+        foreach (string scopePath in _context.FileSystem.SnapshotDirectory(
+            CacheDirectory))
         {
-            if (!Directory.EnumerateFileSystemEntries(scopePath).Any())
-                Directory.Delete(scopePath);
+            if (!Path.GetFileName(scopePath).StartsWith('@')
+                || _context.FileSystem.Probe(scopePath).Kind
+                    != FileSystemEntryKind.Directory)
+            {
+                continue;
+            }
+
+            if (_context.FileSystem.SnapshotDirectory(scopePath).Length == 0)
+            {
+                _context.FileSystem.Delete(
+                    scopePath,
+                    FileSystemEntryKind.Directory,
+                    recursive: false,
+                    missingAllowed: true);
+            }
         }
     }
 
@@ -1878,6 +2010,7 @@ public class DiskPackageCache :
             if (!PackageIndexValidation.TryValidateReferencedFiles(
                     index,
                     packageContentPath,
+                    _context,
                     out string? failureReason))
             {
                 _logger.LogDebug(
@@ -1935,13 +2068,14 @@ public class DiskPackageCache :
         }
     }
 
-    private static void EnsureGeneratedIndexIsValid(
+    private void EnsureGeneratedIndexIsValid(
         PackageIndex index,
         string packageContentPath)
     {
         if (!PackageIndexValidation.TryValidateReferencedFiles(
                 index,
                 packageContentPath,
+                _context,
                 out string? failureReason))
         {
             throw new InvalidDataException(
