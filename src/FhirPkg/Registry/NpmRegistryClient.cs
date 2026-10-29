@@ -490,11 +490,13 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
                     reference,
                     "Package archive inventory was not produced.");
             PackageArchiveLayoutResult layout =
-                TarballExtractor.ValidateAndNormalizePackageStructure(
-                    extractionPath,
-                    inventory,
-                    reference.FhirDirective,
-                    FileSystemContext);
+                await TarballExtractor.ValidateAndNormalizePackageStructureAsync(
+                        extractionPath,
+                        inventory,
+                        reference.FhirDirective,
+                        FileSystemContext,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             if (layout.Layout != PackageArchiveLayout.Standard)
             {
                 throw InvalidArchive(

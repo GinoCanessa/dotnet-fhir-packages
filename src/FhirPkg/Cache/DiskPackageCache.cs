@@ -516,6 +516,7 @@ public class DiskPackageCache :
                 options.Limits);
         PackageContentAcquisition? acquiredContent = options.AcquiredContent;
         bool ownsAcquiredContent = false;
+        bool hadFailure = false;
         try
         {
             if (acquiredContent is null)
@@ -600,7 +601,8 @@ public class DiskPackageCache :
             try
             {
                 await using Stream archiveStream =
-                    acquiredContent.OpenArchiveRead();
+                    await acquiredContent.OpenArchiveReadAsync(ct)
+                        .ConfigureAwait(false);
                 ArchiveExtractionMetrics metrics =
                     await TarballExtractor.ExtractAsync(
                             archiveStream,
@@ -650,10 +652,11 @@ public class DiskPackageCache :
                 if (layout.Layout == PackageArchiveLayout.Legacy
                     && !options.Unmodified)
                 {
-                    PackageStructureNormalizer.WrapLegacyRoot(
-                        stagingDirectory,
-                        _fileOperations,
-                        ct);
+                    await PackageStructureNormalizer.WrapLegacyRootAsync(
+                            stagingDirectory,
+                            _fileOperations,
+                            ct)
+                        .ConfigureAwait(false);
                 }
             }
             catch (PackageInstallException)
@@ -742,10 +745,24 @@ public class DiskPackageCache :
                 previousManifestDate);
             return committedRecord;
         }
+        catch
+        {
+            hadFailure = true;
+            throw;
+        }
         finally
         {
             if (ownsAcquiredContent && acquiredContent is not null)
-                await acquiredContent.DisposeAsync().ConfigureAwait(false);
+            {
+                try
+                {
+                    await acquiredContent.DisposeAsync().ConfigureAwait(false);
+                }
+                catch when (hadFailure)
+                {
+                    // Releasing staging ownership must not replace the install failure.
+                }
+            }
         }
     }
 
@@ -772,6 +789,7 @@ public class DiskPackageCache :
         PackageContentAcquisition? acquiredContent =
             options.AcquiredContent;
         bool ownsAcquiredContent = false;
+        bool hadFailure = false;
         try
         {
             if (acquiredContent is null)
@@ -808,7 +826,8 @@ public class DiskPackageCache :
             try
             {
                 await using Stream archiveStream =
-                    acquiredContent.OpenArchiveRead();
+                    await acquiredContent.OpenArchiveReadAsync(cancellationToken)
+                        .ConfigureAwait(false);
                 ArchiveExtractionMetrics metrics =
                     await TarballExtractor.ExtractAsync(
                             archiveStream,
@@ -842,10 +861,11 @@ public class DiskPackageCache :
                 if (layout.Layout == PackageArchiveLayout.Legacy
                     && !options.Unmodified)
                 {
-                    PackageStructureNormalizer.WrapLegacyRoot(
-                        stagingDirectory,
-                        _fileOperations,
-                        cancellationToken);
+                    await PackageStructureNormalizer.WrapLegacyRootAsync(
+                            stagingDirectory,
+                            _fileOperations,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                 }
             }
             catch (PackageInstallException)
@@ -993,12 +1013,23 @@ public class DiskPackageCache :
                     CancellationToken.None)
                 .ConfigureAwait(false);
         }
+        catch
+        {
+            hadFailure = true;
+            throw;
+        }
         finally
         {
             if (ownsAcquiredContent && acquiredContent is not null)
             {
-                await acquiredContent.DisposeAsync()
-                    .ConfigureAwait(false);
+                try
+                {
+                    await acquiredContent.DisposeAsync().ConfigureAwait(false);
+                }
+                catch when (hadFailure)
+                {
+                    // Releasing staging ownership must not replace the import failure.
+                }
             }
         }
     }
@@ -1155,7 +1186,7 @@ public class DiskPackageCache :
                 .ConfigureAwait(false);
             if (removed)
                 count++;
-            RemoveEmptyScopeDirectories();
+            await RemoveEmptyScopeDirectoriesAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
         PublishCacheCleared();
@@ -1248,9 +1279,11 @@ public class DiskPackageCache :
             ?? throw new InvalidDataException(
                 "The package index generator returned null.");
 
-        EnsureGeneratedIndexIsValid(
-            generatedIndex,
-            inspection.ContentPath!);
+        await EnsureGeneratedIndexIsValidAsync(
+                generatedIndex,
+                inspection.ContentPath!,
+                cancellationToken)
+            .ConfigureAwait(false);
         byte[] serializedIndex = JsonSerializer.SerializeToUtf8Bytes(
             generatedIndex,
             s_jsonOptions);
@@ -1275,9 +1308,11 @@ public class DiskPackageCache :
                 currentInspection,
                 expectedTargetPath,
                 expectedContentPath);
-            EnsureGeneratedIndexIsValid(
-                generatedIndex,
-                currentInspection.ContentPath!);
+            await EnsureGeneratedIndexIsValidAsync(
+                    generatedIndex,
+                    currentInspection.ContentPath!,
+                    cancellationToken)
+                .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
 
             indexReady?.Invoke(
@@ -1309,9 +1344,11 @@ public class DiskPackageCache :
                         currentInspection,
                         expectedTargetPath,
                         expectedContentPath);
-                    EnsureGeneratedIndexIsValid(
-                        generatedIndex,
-                        currentInspection.ContentPath!);
+                    await EnsureGeneratedIndexIsValidAsync(
+                            generatedIndex,
+                            currentInspection.ContentPath!,
+                            beforeCommitToken)
+                        .ConfigureAwait(false);
                 })
             .ConfigureAwait(false);
 
@@ -1787,7 +1824,8 @@ public class DiskPackageCache :
             }
 
             PackageCacheLease? ownerLease =
-                _coordinator.TryAcquireOperationOwner(operationId);
+                await _coordinator.TryAcquireOperationOwnerAsync(operationId, cancellationToken)
+                    .ConfigureAwait(false);
             if (ownerLease is null)
                 continue;
 
@@ -1801,17 +1839,19 @@ public class DiskPackageCache :
         }
     }
 
-    private IEnumerable<(PackageCacheKey Key, string Path)>
-        EnumeratePackageTargets()
+    private async Task<IReadOnlyList<(PackageCacheKey Key, string Path)>>
+        EnumeratePackageTargetsAsync(CancellationToken cancellationToken)
     {
-        if (_context.FileSystem.Probe(CacheDirectory).Kind
+        List<(PackageCacheKey Key, string Path)> targets = [];
+        if ((await _context.FileSystem.ProbeAsync(CacheDirectory, cancellationToken).ConfigureAwait(false)).Kind
             != FileSystemEntryKind.Directory)
         {
-            yield break;
+            return targets;
         }
 
-        foreach (string path in _context.FileSystem.SnapshotDirectory(
-            CacheDirectory))
+        string[] paths = await _context.FileSystem.SnapshotDirectoryAsync(CacheDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (string path in paths)
         {
             string name = Path.GetFileName(path);
             if (string.Equals(
@@ -1824,20 +1864,21 @@ public class DiskPackageCache :
                 name,
                 out PackageCacheKey? unscopedKey))
             {
-                yield return (unscopedKey!, path);
+                targets.Add((unscopedKey!, path));
                 continue;
             }
 
             if (!name.StartsWith('@')
-                || _context.FileSystem.ProbeFollowing(path).Kind
+                || (await _context.FileSystem.ProbeFollowingAsync(path, cancellationToken).ConfigureAwait(false)).Kind
                     is not (FileSystemEntryKind.Directory
                         or FileSystemEntryKind.DirectorySymbolicLink))
             {
                 continue;
             }
 
-            foreach (string scopedPath in
-                _context.FileSystem.SnapshotDirectory(path))
+            string[] scopedPaths = await _context.FileSystem.SnapshotDirectoryAsync(path, cancellationToken)
+                .ConfigureAwait(false);
+            foreach (string scopedPath in scopedPaths)
             {
                 string relativePath = Path.GetRelativePath(
                     CacheDirectory,
@@ -1846,10 +1887,12 @@ public class DiskPackageCache :
                     relativePath,
                     out PackageCacheKey? scopedKey))
                 {
-                    yield return (scopedKey!, scopedPath);
+                    targets.Add((scopedKey!, scopedPath));
                 }
             }
         }
+
+        return targets;
     }
 
     private async Task<PackageCacheKeySnapshot>
@@ -1860,7 +1903,7 @@ public class DiskPackageCache :
         HashSet<string> nonCanonicalManagedKeys =
             new(StringComparer.Ordinal);
         foreach ((PackageCacheKey cacheKey, string _) in
-            EnumeratePackageTargets())
+            await EnumeratePackageTargetsAsync(cancellationToken).ConfigureAwait(false))
         {
             canonicalKeys.Add(cacheKey);
         }
@@ -1908,25 +1951,29 @@ public class DiskPackageCache :
         HashSet<PackageCacheKey> CanonicalKeys,
         IReadOnlySet<string> NonCanonicalManagedKeys);
 
-    private void RemoveEmptyScopeDirectories()
+    private async ValueTask RemoveEmptyScopeDirectoriesAsync(CancellationToken cancellationToken)
     {
-        foreach (string scopePath in _context.FileSystem.SnapshotDirectory(
-            CacheDirectory))
+        string[] paths = await _context.FileSystem.SnapshotDirectoryAsync(CacheDirectory, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (string scopePath in paths)
         {
             if (!Path.GetFileName(scopePath).StartsWith('@')
-                || _context.FileSystem.Probe(scopePath).Kind
+                || (await _context.FileSystem.ProbeAsync(scopePath, cancellationToken).ConfigureAwait(false)).Kind
                     != FileSystemEntryKind.Directory)
             {
                 continue;
             }
 
-            if (_context.FileSystem.SnapshotDirectory(scopePath).Length == 0)
+            if ((await _context.FileSystem.SnapshotDirectoryAsync(scopePath, cancellationToken)
+                    .ConfigureAwait(false)).Length == 0)
             {
-                _context.FileSystem.Delete(
-                    scopePath,
-                    FileSystemEntryKind.Directory,
-                    recursive: false,
-                    missingAllowed: true);
+                await _context.FileSystem.DeleteAsync(
+                        scopePath,
+                        FileSystemEntryKind.Directory,
+                        recursive: false,
+                        missingAllowed: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
     }
@@ -2001,7 +2048,8 @@ public class DiskPackageCache :
             await using Stream stream = await _fileOperations
                 .OpenReadAsync(indexPath, cancellationToken)
                 .ConfigureAwait(false);
-            if (stream.Length > _installLimits.MaxEntryBytes)
+            if (await FileSystemContext.GetLengthAsync(stream, cancellationToken).ConfigureAwait(false)
+                > _installLimits.MaxEntryBytes)
             {
                 _logger.LogDebug(
                     "Ignoring package index at '{Path}' because it exceeds the configured entry limit.",
@@ -2015,11 +2063,14 @@ public class DiskPackageCache :
                         s_jsonOptions,
                         cancellationToken)
                     .ConfigureAwait(false);
-            if (!PackageIndexValidation.TryValidateReferencedFiles(
-                    index,
-                    packageContentPath,
-                    _context,
-                    out string? failureReason))
+            (bool isValid, string? failureReason) =
+                await PackageIndexValidation.TryValidateReferencedFilesAsync(
+                        index,
+                        packageContentPath,
+                        _context,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (!isValid)
             {
                 _logger.LogDebug(
                     "Ignoring invalid package index at '{Path}': {Reason}",
@@ -2076,15 +2127,19 @@ public class DiskPackageCache :
         }
     }
 
-    private void EnsureGeneratedIndexIsValid(
+    private async ValueTask EnsureGeneratedIndexIsValidAsync(
         PackageIndex index,
-        string packageContentPath)
+        string packageContentPath,
+        CancellationToken cancellationToken)
     {
-        if (!PackageIndexValidation.TryValidateReferencedFiles(
-                index,
-                packageContentPath,
-                _context,
-                out string? failureReason))
+        (bool isValid, string? failureReason) =
+            await PackageIndexValidation.TryValidateReferencedFilesAsync(
+                    index,
+                    packageContentPath,
+                    _context,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        if (!isValid)
         {
             throw new InvalidDataException(
                 $"The generated package index is invalid: {failureReason}");

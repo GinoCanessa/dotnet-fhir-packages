@@ -84,16 +84,14 @@ internal sealed class PackageCacheValidator
         cancellationToken.ThrowIfCancellationRequested();
         string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot, _context);
         PackageCacheInspection? ancestorFailure =
-            InspectTargetAncestors(cacheKey, targetPath, cancellationToken);
+            await InspectTargetAncestorsAsync(cacheKey, targetPath, cancellationToken)
+                .ConfigureAwait(false);
         if (ancestorFailure is not null)
             return ancestorFailure;
 
-        PackageCacheInspection? shapeFailure = InspectShape(
-            cacheKey,
-            targetPath,
-            out string contentPath,
-            out string manifestPath,
-            cancellationToken);
+        (PackageCacheInspection? shapeFailure, string contentPath, string manifestPath) =
+            await InspectShapeAsync(cacheKey, targetPath, cancellationToken)
+                .ConfigureAwait(false);
         if (shapeFailure is not null)
             return shapeFailure;
 
@@ -239,6 +237,91 @@ internal sealed class PackageCacheValidator
         && kind == FileSystemEntryKind.Directory
         && HasExactManifestCandidate(Path.Combine(targetPath, "package"), cancellationToken);
 
+    private async ValueTask<(PackageCacheInspection? Failure, string ContentPath, string ManifestPath)>
+        InspectShapeAsync(
+            PackageCacheKey cacheKey,
+            string targetPath,
+            CancellationToken cancellationToken)
+    {
+        string contentPath = Path.Combine(targetPath, "package");
+        string manifestPath = Path.Combine(contentPath, "package.json");
+        FileSystemProbeResult target;
+        try
+        {
+            target = await _context.FileSystem.ProbeAsync(targetPath, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            return (CorruptFrom(exception, cacheKey, targetPath, null, null), contentPath, manifestPath);
+        }
+
+        if (target.Kind == FileSystemEntryKind.Missing)
+            return (Missing(cacheKey, targetPath), contentPath, manifestPath);
+
+        if (target.Kind != FileSystemEntryKind.Directory)
+        {
+            return (Corrupt(
+                cacheKey, targetPath, null, null,
+                "The cache target is not a regular directory."), contentPath, manifestPath);
+        }
+
+        try
+        {
+            if (await HasExactManifestCandidateAsync(targetPath, cancellationToken).ConfigureAwait(false)
+                && !await HasExactStandardManifestCandidateAsync(targetPath, cancellationToken).ConfigureAwait(false))
+            {
+                contentPath = targetPath;
+                manifestPath = Path.Combine(targetPath, "package.json");
+            }
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            return (CorruptFrom(exception, cacheKey, targetPath, contentPath, manifestPath), contentPath, manifestPath);
+        }
+
+        PackageCacheInspection? failure = await InspectRequiredPathAsync(
+                cacheKey, targetPath, contentPath, expectDirectory: true, cancellationToken)
+            .ConfigureAwait(false)
+            ?? await InspectRequiredPathAsync(
+                    cacheKey, targetPath, manifestPath, expectDirectory: false, cancellationToken)
+                .ConfigureAwait(false);
+        return (failure, contentPath, manifestPath);
+    }
+
+    private async ValueTask<bool> HasExactStandardManifestCandidateAsync(
+        string targetPath,
+        CancellationToken cancellationToken) =>
+        await GetExactChildKindAsync(targetPath, "package", cancellationToken).ConfigureAwait(false)
+            == FileSystemEntryKind.Directory
+        && await HasExactManifestCandidateAsync(Path.Combine(targetPath, "package"), cancellationToken)
+            .ConfigureAwait(false);
+
+    private async ValueTask<bool> HasExactManifestCandidateAsync(
+        string contentPath,
+        CancellationToken cancellationToken) =>
+        await GetExactChildKindAsync(contentPath, "package.json", cancellationToken).ConfigureAwait(false)
+            == FileSystemEntryKind.File;
+
+    private async ValueTask<FileSystemEntryKind> GetExactChildKindAsync(
+        string parentPath,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        string[] paths = await _context.FileSystem.SnapshotDirectoryAsync(parentPath, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (string path in paths)
+        {
+            if (string.Equals(Path.GetFileName(path), name, StringComparison.Ordinal))
+            {
+                return (await _context.FileSystem.ProbeAsync(path, cancellationToken)
+                    .ConfigureAwait(false)).Kind;
+            }
+        }
+
+        return FileSystemEntryKind.Missing;
+    }
+
     private bool HasExactManifestCandidate(
         string contentPath,
         CancellationToken cancellationToken) =>
@@ -345,6 +428,87 @@ internal sealed class PackageCacheValidator
                     targetPath,
                     contentPath,
                     manifestPath,
+                    expectDirectory
+                        ? "The package content path is not a regular directory."
+                        : "The package manifest is not a regular file.");
+            }
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            return CorruptFrom(exception, cacheKey, targetPath, contentPath, manifestPath);
+        }
+
+        return null;
+    }
+
+    private async ValueTask<PackageCacheInspection?> InspectTargetAncestorsAsync(
+        PackageCacheKey cacheKey,
+        string targetPath,
+        CancellationToken cancellationToken)
+    {
+        string relativePath = Path.GetRelativePath(_cacheRoot, targetPath);
+        string? relativeParent = Path.GetDirectoryName(relativePath);
+        if (string.IsNullOrEmpty(relativeParent))
+            return null;
+
+        string currentPath = _cacheRoot;
+        foreach (string segment in relativeParent.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries))
+        {
+            currentPath = Path.Combine(currentPath, segment);
+            try
+            {
+                FileSystemProbeResult probe = await _context.FileSystem.ProbeAsync(currentPath, cancellationToken)
+                    .ConfigureAwait(false);
+                if (probe.Kind == FileSystemEntryKind.Missing)
+                    return null;
+
+                if (probe.Kind != FileSystemEntryKind.Directory)
+                {
+                    return Corrupt(
+                        cacheKey, targetPath, null, null,
+                        "A cache target ancestor is not a regular directory.",
+                        isRepairable: false);
+                }
+            }
+            catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+            {
+                return CorruptFrom(
+                    exception, cacheKey, targetPath, null, null, isRepairable: false);
+            }
+        }
+
+        return null;
+    }
+
+    private async ValueTask<PackageCacheInspection?> InspectRequiredPathAsync(
+        PackageCacheKey cacheKey,
+        string targetPath,
+        string path,
+        bool expectDirectory,
+        CancellationToken cancellationToken)
+    {
+        string? contentPath = expectDirectory ? path : Path.GetDirectoryName(path);
+        string? manifestPath = expectDirectory ? null : path;
+        try
+        {
+            FileSystemProbeResult probe = await _context.FileSystem.ProbeAsync(path, cancellationToken)
+                .ConfigureAwait(false);
+            if (probe.Kind == FileSystemEntryKind.Missing)
+            {
+                return Corrupt(
+                    cacheKey, targetPath, contentPath, manifestPath,
+                    "A required cache path is missing.");
+            }
+
+            FileSystemEntryKind expected = expectDirectory
+                ? FileSystemEntryKind.Directory
+                : FileSystemEntryKind.File;
+            if (probe.Kind != expected)
+            {
+                return Corrupt(
+                    cacheKey, targetPath, contentPath, manifestPath,
                     expectDirectory
                         ? "The package content path is not a regular directory."
                         : "The package manifest is not a regular file.");

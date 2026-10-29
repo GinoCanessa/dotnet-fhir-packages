@@ -79,6 +79,28 @@ internal sealed class PositionedFileStream : Stream
         }
     }
 
+    internal async ValueTask<long> GetLengthAsync(CancellationToken cancellationToken)
+    {
+        BeginOperation();
+        try
+        {
+            long length = await _context.FileSystem.ExecuteAsync(
+                    "GetFileLength", () => _context.Primitives.GetLength(_handle!, _path), cancellationToken)
+                .ConfigureAwait(false);
+            _length = length;
+            return length;
+        }
+        catch
+        {
+            _hadFailure = true;
+            throw;
+        }
+        finally
+        {
+            EndOperation();
+        }
+    }
+
     public override long Seek(long offset, SeekOrigin origin)
     {
         BeginOperation();

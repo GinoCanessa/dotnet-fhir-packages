@@ -299,6 +299,84 @@ public sealed class FhirPackageManagerPublishTests : IDisposable
             It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Theory]
+    [InlineData(RegistryType.FhirNpm)]
+    [InlineData(RegistryType.Npm)]
+    public async Task Publish_ManagerAndNpmNormalizationUseAsyncPerChildWaits(RegistryType type)
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package/package.json", """{"name":"example.package","version":"1.0.0"}"""),
+            ArbitraryTarBuilder.File("openapi/schema.json", "{}"),
+            ArbitraryTarBuilder.File("other/data.txt", "payload"));
+        string path = Path.Combine(_tempRoot, "ancillary.tgz");
+        byte[] bytes = archive.ToArray();
+        File.WriteAllBytes(path, bytes);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_tempRoot);
+        HashSet<string> failedDestinations = [];
+        files.Set<bool>("MovePath", call =>
+            Path.GetFileName(call.DestinationPath) == "openapi" && failedDestinations.Add(call.DestinationPath!)
+                ? ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "publish normalization", call.Path)
+                : SystemFileSystemPrimitives.Instance.MovePath(call.Path!, call.DestinationPath!, call.Flags == 1));
+        CaptureHandler handler = new();
+        using HttpClient http = new(handler);
+        using FhirPackageManager manager = CreateResolvedManager(files.CreateContext(retries: 1), http);
+
+        PublishResult result = await manager.PublishAsync(
+            path, CreateTargetEndpoint() with { Type = type }, TestContext.Current.CancellationToken);
+
+        result.Success.ShouldBeTrue();
+        handler.RequestCount.ShouldBe(1);
+        int normalizations = type == RegistryType.Npm ? 2 : 1;
+        failedDestinations.Count.ShouldBe(normalizations);
+        files.Count("MovePath").ShouldBe(3 * normalizations);
+        files.Calls.Where(call => call.Operation == "MovePath" && Path.GetFileName(call.DestinationPath) == "other")
+            .Select(call => call.Path).Distinct().Count().ShouldBe(normalizations);
+        files.AsyncWaits.ShouldBe(type == RegistryType.Npm ? [10, 10] : [10]);
+        files.Waits.ShouldBeEmpty();
+        if (type == RegistryType.FhirNpm)
+        {
+            handler.Body.ShouldBe(bytes);
+        }
+        else
+        {
+            using JsonDocument document = JsonDocument.Parse(handler.Body);
+            JsonElement attachment = document.RootElement.GetProperty("_attachments")
+                .GetProperty("example.package-1.0.0.tgz");
+            Convert.FromBase64String(attachment.GetProperty("data").GetString()!).ShouldBe(bytes);
+            attachment.GetProperty("length").GetInt64().ShouldBe(bytes.Length);
+        }
+        Directory.GetDirectories(_tempRoot).ShouldBeEmpty();
+        File.ReadAllBytes(path).ShouldBe(bytes);
+    }
+
+    [Fact]
+    public async Task Publish_NormalizationExhaustionStopsBeforeAnyRegistryRequest()
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package/package.json", """{"name":"example.package","version":"1.0.0"}"""),
+            ArbitraryTarBuilder.File("openapi/schema.json", "{}"));
+        string path = Path.Combine(_tempRoot, "normalization-failure.tgz");
+        File.WriteAllBytes(path, archive.ToArray());
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_tempRoot);
+        files.Set<bool>("MovePath", call =>
+            ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "publish normalization", call.Path));
+        CaptureHandler handler = new();
+        using HttpClient http = new(handler);
+        using FhirPackageManager manager = CreateResolvedManager(files.CreateContext(retries: 2), http);
+
+        IOException exception = await Should.ThrowAsync<IOException>(() => manager.PublishAsync(
+            path, CreateTargetEndpoint(), TestContext.Current.CancellationToken));
+
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? context).ShouldBeTrue();
+        context!.RetriesUsed.ShouldBe(2);
+        handler.RequestCount.ShouldBe(0);
+        files.Count("MovePath").ShouldBe(3);
+        files.Count("GetTempPath").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        Directory.GetDirectories(_tempRoot).ShouldBeEmpty();
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_tempRoot))

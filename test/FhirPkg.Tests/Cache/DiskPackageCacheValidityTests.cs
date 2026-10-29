@@ -877,6 +877,95 @@ public sealed class DiskPackageCacheValidityTests : IDisposable
         File.Exists(manifestPath).ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData("ancestor", 2)]
+    [InlineData("target", 2)]
+    [InlineData("exact-root-manifest", 2)]
+    [InlineData("required-content", 3)]
+    [InlineData("required-manifest", 3)]
+    [InlineData("root-snapshot", 3)]
+    [InlineData("content-snapshot", 2)]
+    public async Task InspectAsync_ShapeAndExactNameFaultsWaitAsynchronously(string step, int expectedCalls)
+    {
+        PackageReference reference = new("@example/package", "1.0.0");
+        PackageCacheKey key = PackageCacheKey.Create(reference);
+        string targetPath = key.GetPackageDirectoryPath(_cacheRoot);
+        string contentPath = Path.Combine(targetPath, "package");
+        Directory.CreateDirectory(contentPath);
+        string manifest = """{"name":"@example/package","version":"1.0.0"}""";
+        File.WriteAllText(Path.Combine(targetPath, "package.json"), manifest);
+        File.WriteAllText(Path.Combine(contentPath, "package.json"), manifest);
+        string faultPath = step switch
+        {
+            "ancestor" => Path.Combine(_cacheRoot, "@example"),
+            "required-content" or "content-snapshot" => contentPath,
+            "required-manifest" => Path.Combine(contentPath, "package.json"),
+            "exact-root-manifest" => Path.Combine(targetPath, "package.json"),
+            _ => targetPath,
+        };
+        int faultAttempt = step is "required-content" or "required-manifest" ? 2 : 1;
+        int calls = 0;
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        if (step.EndsWith("snapshot", StringComparison.Ordinal))
+        {
+            files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+                call.Path == faultPath && ++calls == faultAttempt
+                    ? ScriptedFileSystemPrimitives.NativeFailure<IEnumerator<string>>(5, "snapshot", call.Path)
+                    : SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        }
+        else
+        {
+            files.Set<FileSystemProbeResult>("Probe", call =>
+                call.Path == faultPath && ++calls == faultAttempt
+                    ? ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "shape", call.Path)
+                    : SystemFileSystemPrimitives.Instance.Probe(call.Path!, call.Flags == 1));
+        }
+
+        PackageCacheInspection inspection = await new PackageCacheValidator(_cacheRoot, files.CreateContext(retries: 1))
+            .InspectAsync(key, TestContext.Current.CancellationToken);
+
+        inspection.State.ShouldBe(PackageCacheInspectionState.Valid);
+        inspection.ContentPath.ShouldBe(contentPath);
+        inspection.Manifest!.Name.ShouldBe(reference.Name);
+        calls.ShouldBe(expectedCalls);
+        files.AsyncWaits.ShouldBe([10]);
+        files.Waits.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InspectAsync_ExhaustedShapeFaultRetainsCorruptOutcomeAndAsyncEvidence(bool enumeration)
+    {
+        PackageCacheKey key = PackageCacheKey.Create(new PackageReference("example.package", "1.0.0"));
+        string targetPath = key.GetPackageDirectoryPath(_cacheRoot);
+        await WriteValidContentAsync(Path.Combine(targetPath, "package"));
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        IOException failure = new("shape unavailable");
+        if (enumeration)
+        {
+            files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+                ScriptedFileSystemPrimitives.Fail<IEnumerator<string>>(failure, "snapshot", call.Path));
+        }
+        else
+        {
+            files.Set<FileSystemProbeResult>("Probe", call =>
+                ScriptedFileSystemPrimitives.Fail<FileSystemProbeResult>(failure, "shape", call.Path));
+        }
+
+        PackageCacheInspection inspection = await new PackageCacheValidator(_cacheRoot, files.CreateContext(retries: 2))
+            .InspectAsync(key, TestContext.Current.CancellationToken);
+
+        inspection.State.ShouldBe(PackageCacheInspectionState.Corrupt);
+        inspection.IsRepairable.ShouldBeTrue();
+        inspection.FailureContext.ShouldNotBeNull().RetriesUsed.ShouldBe(2);
+        inspection.CorruptionReason.ShouldNotBeNull().ShouldContain("attempts 3, retries 2");
+        files.Count(enumeration ? "CreateDirectoryEnumerator" : "Probe").ShouldBe(3);
+        files.Count("OpenFileHandle").ShouldBe(0);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+    }
+
     private static ScriptedFileSystemPrimitives CreateManifestFaultPrimitives()
     {
         ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);

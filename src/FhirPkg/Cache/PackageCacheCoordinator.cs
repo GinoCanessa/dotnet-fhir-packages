@@ -149,6 +149,57 @@ internal sealed class PackageCacheCoordinator
         }
     }
 
+    internal async ValueTask<PackageCacheLease?> TryAcquireOperationOwnerAsync(
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        ValidateOperationId(operationId);
+        string processKey = GetProcessKey($"operation:{operationId}");
+        PackageCacheProcessLockReference processLock = RentProcessLock(processKey);
+        LockAcquisitionOperation operation = new(_context, GetOperationLockPath(operationId));
+        try
+        {
+            if (!await processLock.Semaphore.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+            {
+                processLock.Dispose();
+                return null;
+            }
+
+            processLock.MarkSemaphoreHeld();
+            await EnsureLockDirectoryAsync(GetOperationLockPath(operationId), cancellationToken)
+                .ConfigureAwait(false);
+            FileSystemReplayOutcome<FileStream?> outcome =
+                await _context.Executor.ExecuteAsync(operation, cancellationToken).ConfigureAwait(false);
+            if (outcome.Kind != FileSystemReplayOutcomeKind.Completed)
+            {
+                ReleaseFailedAcquisition(operation, processLock);
+                return null;
+            }
+
+            return new PackageCacheLease(processLock, _context, outcome.Value!);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            ReleaseFailedAcquisition(operation, processLock);
+            throw CoordinationFailure(exception);
+        }
+        catch (IOException exception)
+        {
+            ReleaseFailedAcquisition(operation, processLock);
+            throw CoordinationFailure(exception);
+        }
+        catch (NotSupportedException exception)
+        {
+            ReleaseFailedAcquisition(operation, processLock);
+            throw CoordinationFailure(exception);
+        }
+        catch
+        {
+            ReleaseFailedAcquisition(operation, processLock);
+            throw;
+        }
+    }
+
     private async Task<PackageCacheLease> AcquireAsync(
         string logicalKey,
         string lockPath,
@@ -630,18 +681,24 @@ internal sealed class PackageCacheLease :
         if (stream is null)
             return;
 
+        bool unlocked = false;
         try
         {
             // Unlock is replayed against the same handle; release below happens once.
             _ = _context.FileSystem.Execute(
                 "UnlockLockFile",
                 () => _context.Primitives.Unlock(stream));
+            unlocked = true;
         }
         finally
         {
             try
             {
                 stream.Dispose();
+            }
+            catch when (!unlocked)
+            {
+                // Release once without replacing the unlock failure.
             }
             finally
             {
@@ -656,18 +713,25 @@ internal sealed class PackageCacheLease :
         if (stream is null)
             return;
 
+        bool unlocked = false;
         try
         {
             _ = await _context.FileSystem.ExecuteAsync(
                     "UnlockLockFile",
-                    () => _context.Primitives.Unlock(stream))
+                    () => _context.Primitives.Unlock(stream),
+                    CancellationToken.None)
                 .ConfigureAwait(false);
+            unlocked = true;
         }
         finally
         {
             try
             {
                 await stream.DisposeAsync().ConfigureAwait(false);
+            }
+            catch when (!unlocked)
+            {
+                // Release once without replacing the unlock failure.
             }
             finally
             {

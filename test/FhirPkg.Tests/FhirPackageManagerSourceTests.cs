@@ -112,6 +112,7 @@ public sealed class FhirPackageManagerSourceTests
         using FileStream caller = new(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
         caller.Position = 3;
         ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(directory.Path);
+        files.Enqueue("GetPosition", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "caller checkpoint", path));
         files.Enqueue<int>("ReadBorrowedAsync", call =>
         {
             call.Stream!.ReadByte().ShouldBeGreaterThanOrEqualTo(0);
@@ -124,7 +125,7 @@ public sealed class FhirPackageManagerSourceTests
                 IncludeCiBuilds = false,
                 IncludeHl7WebsiteFallback = false,
             },
-            files.CreateContext(retries: 1));
+            files.CreateContext(retries: 2));
         using FhirPackageManager manager = FhirPackageManager.CreateResolved(configuration);
 
         PackageRecord record = await manager.ImportAsync(
@@ -136,7 +137,11 @@ public sealed class FhirPackageManagerSourceTests
         caller.Position.ShouldBe(caller.Length);
         files.Count("PrepareBorrowedRead").ShouldBe(1);
         files.Calls.ShouldContain(call => call.Operation == "SetPosition" && call.Offset == 3);
-        files.AsyncWaits.ShouldBe([10]);
+        files.Calls.ShouldNotContain(call => call.Operation == "OpenFileHandle" && call.Path == path);
+        files.Calls.Count(call => (call.Operation == "OpenDescriptor"
+                || (call.Operation == "OpenFileHandle" && call.Mode == FileMode.Open))
+            && Path.GetFileName(call.Path) == "archive.tgz").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
         files.Waits.ShouldBeEmpty();
     }
 

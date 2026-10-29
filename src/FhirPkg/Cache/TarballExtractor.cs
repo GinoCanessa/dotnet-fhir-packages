@@ -439,6 +439,19 @@ public static class TarballExtractor
             directive,
             context);
 
+    internal static ValueTask<PackageArchiveLayoutResult> ValidateAndNormalizePackageStructureAsync(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive,
+        FileSystemContext context,
+        CancellationToken cancellationToken) =>
+        PackageStructureNormalizer.ValidateAndNormalizeAsync(
+            extractedPath,
+            inventory,
+            directive,
+            context,
+            cancellationToken);
+
     private static bool IsRegularFile(TarEntryType entryType) =>
         entryType is TarEntryType.RegularFile
             or TarEntryType.V7RegularFile

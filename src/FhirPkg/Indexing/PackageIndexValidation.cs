@@ -102,55 +102,8 @@ internal static class PackageIndexValidation
         string fullContentPath = context.FileSystem.GetFullPath(packageContentPath);
         foreach (ResourceIndexEntry entry in validatedIndex.Files)
         {
-            PortableArchivePath portablePath;
-            try
-            {
-                portablePath = PortableArchivePath.Create(
-                    entry.Filename,
-                    isDirectory: false);
-            }
-            catch (PackageInstallException exception)
-            {
-                failureReason = exception.Message;
+            if (!TryGetReferencedPath(entry, fullContentPath, out string filePath, out failureReason))
                 return false;
-            }
-
-            string relativePath = portablePath.ExactSpelling.Replace(
-                '/',
-                Path.DirectorySeparatorChar);
-            string filePath;
-            try
-            {
-                filePath = Path.GetFullPath(
-                    Path.Combine(fullContentPath, relativePath));
-            }
-            catch (ArgumentException exception)
-            {
-                failureReason = exception.Message;
-                return false;
-            }
-            catch (NotSupportedException exception)
-            {
-                failureReason = exception.Message;
-                return false;
-            }
-
-            string containment = Path.GetRelativePath(
-                fullContentPath,
-                filePath);
-            if (Path.IsPathRooted(containment)
-                || string.Equals(containment, "..", StringComparison.Ordinal)
-                || containment.StartsWith(
-                    $"..{Path.DirectorySeparatorChar}",
-                    StringComparison.Ordinal)
-                || containment.StartsWith(
-                    $"..{Path.AltDirectorySeparatorChar}",
-                    StringComparison.Ordinal))
-            {
-                failureReason =
-                    $"Package index filename '{entry.Filename}' is not contained by the package directory.";
-                return false;
-            }
 
             try
             {
@@ -187,6 +140,106 @@ internal static class PackageIndexValidation
                 failureReason = FileSystemFailureContext.FormatMessage(exception);
                 return false;
             }
+        }
+
+        failureReason = null;
+        return true;
+    }
+
+    internal static async ValueTask<(bool IsValid, string? FailureReason)> TryValidateReferencedFilesAsync(
+        PackageIndex? index,
+        string packageContentPath,
+        FileSystemContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageContentPath);
+        ArgumentNullException.ThrowIfNull(context);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!TryValidateStructure(index, out string? failureReason))
+            return (false, failureReason);
+
+        string fullContentPath = await context.FileSystem.GetFullPathAsync(packageContentPath, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (ResourceIndexEntry entry in index!.Files)
+        {
+            if (!TryGetReferencedPath(entry, fullContentPath, out string filePath, out failureReason))
+                return (false, failureReason);
+
+            try
+            {
+                if ((await context.FileSystem.ProbeAsync(filePath, cancellationToken).ConfigureAwait(false)).Kind
+                    == FileSystemEntryKind.Missing)
+                {
+                    return (false, $"Package index filename '{entry.Filename}' does not exist.");
+                }
+
+                await using FileStream stream = await context.FileSystem.OpenRegularReadAsync(filePath, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (FileNotFoundException)
+            {
+                return (false, $"Package index filename '{entry.Filename}' does not exist.");
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return (false, $"Package index filename '{entry.Filename}' does not exist.");
+            }
+            catch (UnauthorizedAccessException exception)
+            {
+                return (false, FileSystemFailureContext.FormatMessage(exception));
+            }
+            catch (IOException exception)
+            {
+                return (false, FileSystemFailureContext.FormatMessage(exception));
+            }
+        }
+
+        return (true, null);
+    }
+
+    private static bool TryGetReferencedPath(
+        ResourceIndexEntry entry,
+        string fullContentPath,
+        out string filePath,
+        out string? failureReason)
+    {
+        filePath = string.Empty;
+        PortableArchivePath portablePath;
+        try
+        {
+            portablePath = PortableArchivePath.Create(entry.Filename, isDirectory: false);
+        }
+        catch (PackageInstallException exception)
+        {
+            failureReason = exception.Message;
+            return false;
+        }
+
+        string relativePath = portablePath.ExactSpelling.Replace('/', Path.DirectorySeparatorChar);
+        try
+        {
+            filePath = Path.GetFullPath(Path.Combine(fullContentPath, relativePath));
+        }
+        catch (ArgumentException exception)
+        {
+            failureReason = exception.Message;
+            return false;
+        }
+        catch (NotSupportedException exception)
+        {
+            failureReason = exception.Message;
+            return false;
+        }
+
+        string containment = Path.GetRelativePath(fullContentPath, filePath);
+        if (Path.IsPathRooted(containment)
+            || string.Equals(containment, "..", StringComparison.Ordinal)
+            || containment.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            || containment.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
+        {
+            failureReason =
+                $"Package index filename '{entry.Filename}' is not contained by the package directory.";
+            return false;
         }
 
         failureReason = null;

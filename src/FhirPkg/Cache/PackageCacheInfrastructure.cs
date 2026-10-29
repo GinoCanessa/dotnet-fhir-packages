@@ -201,10 +201,9 @@ internal sealed class SystemPackageCacheFileOperations :
             _ => FileSystemEntryKind.File,
         };
 
-    public ValueTask<bool> DirectoryExistsAsync(string path, CancellationToken cancellationToken) =>
-        ValueTask.FromResult(
-            Context.FileSystem.ProbeFollowing(path, cancellationToken).Kind is FileSystemEntryKind.Directory
-                or FileSystemEntryKind.DirectorySymbolicLink);
+    public async ValueTask<bool> DirectoryExistsAsync(string path, CancellationToken cancellationToken) =>
+        (await Context.FileSystem.ProbeFollowingAsync(path, cancellationToken).ConfigureAwait(false)).Kind
+            is FileSystemEntryKind.Directory or FileSystemEntryKind.DirectorySymbolicLink;
 
     public ValueTask MoveDirectoryAsync(
         string sourcePath,

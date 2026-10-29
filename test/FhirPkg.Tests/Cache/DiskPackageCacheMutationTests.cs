@@ -337,6 +337,121 @@ public sealed class DiskPackageCacheMutationTests : IDisposable
         primitives.Waits.ShouldBeEmpty();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ScopedTraversalAndClear_UseOnlyAsyncFaultWaits(bool clear)
+    {
+        PackageReference reference = new("@example/package", "1.0.0");
+        CreateCachedContent(reference);
+        string scopePath = Path.Combine(_cacheRoot, "@example");
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), files.CreateContext(retries: 1));
+        HashSet<string> failedSnapshots = [];
+        files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+            (call.Path == _cacheRoot || call.Path == scopePath) && failedSnapshots.Add(call.Path)
+                ? ScriptedFileSystemPrimitives.NativeFailure<IEnumerator<string>>(5, "traversal", call.Path)
+                : SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        bool failedProbe = false;
+        files.Set<FileSystemProbeResult>("Probe", call =>
+        {
+            if (call.Path == scopePath && call.Flags == 1 && !failedProbe)
+            {
+                failedProbe = true;
+                return ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "scope", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.Probe(call.Path!, call.Flags == 1);
+        });
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        int scopeDeletes = 0;
+        files.Set<bool>("DeleteEntry", call =>
+        {
+            if (call.Path == scopePath && scopeDeletes++ == 0)
+            {
+                // This cleanup follows a completed removal and must ignore the caller's cancellation.
+                cancellation.Cancel();
+                return ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "scope removal", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.DeleteEntry(call.Path!, call.Kind!.Value);
+        });
+        int invalidations = 0;
+        int clears = 0;
+        using IDisposable subscription = ((IPackageCacheMutationPublisher)cache).Subscribe(
+            _ => invalidations++, () => clears++);
+
+        if (clear)
+        {
+            (await cache.ClearAsync(cancellation.Token)).ShouldBe(1);
+            Directory.Exists(scopePath).ShouldBeFalse();
+            cancellation.IsCancellationRequested.ShouldBeTrue();
+            scopeDeletes.ShouldBe(2);
+            invalidations.ShouldBe(1);
+            clears.ShouldBe(1);
+        }
+        else
+        {
+            IReadOnlyList<PackageRecord> records = await cache.ListPackagesAsync(ct: cancellation.Token);
+            records.ShouldHaveSingleItem().Reference.ShouldBe(PackageCacheKey.Create(reference).CanonicalReference);
+            scopeDeletes.ShouldBe(0);
+            invalidations.ShouldBe(0);
+            clears.ShouldBe(0);
+        }
+
+        failedSnapshots.Count.ShouldBe(2);
+        files.AsyncWaits.ShouldBe(clear ? [10, 10, 10, 10] : [10, 10, 10]);
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task StagingCleanup_ProbesOwnerWithoutBlockingAndReleasesAsynchronously()
+    {
+        CreateCachedContent(s_reference);
+        string abandonedId = Guid.NewGuid().ToString("N");
+        string activeId = Guid.NewGuid().ToString("N");
+        string stagingRoot = Path.Combine(_cacheRoot, ".fhirpkg", "staging");
+        string abandonedPath = Path.Combine(stagingRoot, abandonedId);
+        string activePath = Path.Combine(stagingRoot, activeId);
+        Directory.CreateDirectory(abandonedPath);
+        Directory.CreateDirectory(activePath);
+        File.WriteAllText(Path.Combine(abandonedPath, "partial.tgz"), "partial");
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 1);
+        using DiskPackageCache cache = new(_cacheRoot, null, null, new PackageInstallLimits(), context);
+        PackageCacheCoordinator coordinator = new(_cacheRoot, context, NullPackageCacheContentionObserver.Instance);
+        PackageCacheLease activeOwner = await coordinator.AcquireOperationOwnerAsync(
+            activeId, TestContext.Current.CancellationToken);
+        string abandonedLock = Path.Combine(_cacheRoot, ".fhirpkg", "locks", "operations", $"{abandonedId}.lock");
+        int ownerOpens = 0;
+        files.Set<FileStream>("OpenFile", call =>
+            call.Path == abandonedLock && ownerOpens++ == 0
+                ? ScriptedFileSystemPrimitives.NativeFailure<FileStream>(5, "staging owner", call.Path)
+                : SystemFileSystemPrimitives.Instance.OpenFile(
+                    call.Path!, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                    OperatingSystem.IsMacOS() ? FileShare.None : FileShare.ReadWrite, 1, FileOptions.None));
+        files.Enqueue("Unlock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "staging unlock"));
+        try
+        {
+            (await cache.IsInstalledAsync(s_reference, TestContext.Current.CancellationToken)).ShouldBeTrue();
+
+            Directory.Exists(abandonedPath).ShouldBeFalse();
+            Directory.Exists(activePath).ShouldBeTrue();
+            ownerOpens.ShouldBe(2);
+            files.Calls.Count(call => call.Operation == "OpenFile"
+                && call.Path!.EndsWith($"{activeId}.lock", StringComparison.Ordinal)).ShouldBe(1);
+            files.AsyncWaits.ShouldBe([10, 10]);
+            files.Waits.ShouldBeEmpty();
+            PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(1);
+        }
+        finally
+        {
+            await activeOwner.DisposeAsync();
+        }
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_cacheRoot))

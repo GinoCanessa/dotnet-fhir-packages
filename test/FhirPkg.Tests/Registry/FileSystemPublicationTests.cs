@@ -124,19 +124,10 @@ public sealed class FileSystemPublicationTests
         byte[] bytes = "deferred archive bytes"u8.ToArray();
         string path = workspace.CreateFile(bytes);
         ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
-        string openOperation;
-        if (OperatingSystem.IsWindows())
-        {
-            openOperation = "OpenFileHandle";
-            primitives.Enqueue(openOperation,
-                ScriptedFileSystemPrimitives.NativeFailure<SafeFileHandle>(1117, "attachment open", path));
-        }
-        else
-        {
-            openOperation = "OpenOwnedDescriptor";
-            primitives.Enqueue(openOperation,
-                ScriptedFileSystemPrimitives.NativeFailure<int>(5, "attachment open", path));
-        }
+        // Owned FileMode.Open uses the managed handle open on every host.
+        const string openOperation = "OpenFileHandle";
+        primitives.Enqueue(openOperation,
+            ScriptedFileSystemPrimitives.NativeFailure<SafeFileHandle>(1117, "attachment open", path));
         using NpmPackumentContent content = CreateContent(path, bytes.LongLength, primitives.CreateContext(retries: 1));
         using RecordingDestination destination = new();
 
@@ -276,6 +267,88 @@ public sealed class FileSystemPublicationTests
         caller.CanRead.ShouldBeTrue();
     }
 
+    [Fact]
+    public async Task RawGzip_TerminalPreparedLengthReturnsFailureWithoutRequestOrFallback()
+    {
+        using PublicationWorkspace workspace = new();
+        using FileStream caller = File.OpenRead(workspace.CreateFile("raw gzip"u8.ToArray()));
+        ScriptedFileSystemPrimitives files = PublicationTestSupport.SystemFiles();
+        files.Set<long>("GetHandleLength", call =>
+            ScriptedFileSystemPrimitives.NativeFailure<long>(5, "HTTP file length", call.Path));
+        FileSystemContext context = files.CreateContext(retries: 2);
+        BodySequenceHandler handler = new();
+        using HttpClient http = new(handler);
+        FhirNpmRegistryClient child = new(
+            PublicationTestSupport.Transport(http), PublicationTestSupport.Endpoint("first"),
+            NullLogger<FhirNpmRegistryClient>.Instance, context);
+        RedundantRegistryClient composite = new([child, child], 3, null, context);
+
+        PublishResult result = await composite.PublishAsync(
+            new PackageReference("example.package", "1.0.0"), caller, TestContext.Current.CancellationToken);
+
+        result.Success.ShouldBeFalse();
+        result.StatusCode.ShouldBe(HttpStatusCode.InternalServerError);
+        FileSystemFailureContext.TryGetResult(result, out FileSystemFailureContext? failure).ShouldBeTrue();
+        failure!.Operation.ShouldBe("HTTP file length");
+        failure.RetriesUsed.ShouldBe(2);
+        result.Message.ShouldNotBeNull().ShouldContain("attempts 3, retries 2");
+        handler.Requests.ShouldBe(0);
+        handler.Bodies.ShouldBeEmpty();
+        files.Count("GetHandleLength").ShouldBe(3);
+        files.Count("SetPosition").ShouldBe(1);
+        files.Count("ReadBorrowedAsync").ShouldBe(0);
+        files.Count("PrepareBorrowedRead").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        caller.CanRead.ShouldBeTrue();
+        caller.Position.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task RawGzip_HttpDestinationFailureDoesNotReplayFileReadsOrWrites()
+    {
+        using PublicationWorkspace workspace = new();
+        byte[] bytes = new byte[300_003];
+        new Random(31).NextBytes(bytes);
+        using FileStream caller = File.OpenRead(workspace.CreateFile(bytes));
+        ScriptedFileSystemPrimitives files = PublicationTestSupport.SystemFiles();
+        using RecordingDestination destination = new(failOnWrite: 2);
+        FailingDestinationHandler handler = new(destination);
+        using HttpClient http = new(handler);
+        FhirNpmRegistryClient client = new(
+            PublicationTestSupport.Transport(http), PublicationTestSupport.Endpoint("destination"),
+            NullLogger<FhirNpmRegistryClient>.Instance, files.CreateContext());
+
+        PublishResult result = await client.PublishAsync(
+            new PackageReference("example.package", "1.0.0"), caller, TestContext.Current.CancellationToken);
+
+        result.Success.ShouldBeFalse();
+        FileSystemFailureContext.TryGetResult(result, out _).ShouldBeFalse();
+        handler.Requests.ShouldBe(1);
+        destination.Writes.Count.ShouldBe(2);
+        destination.Length.ShouldBe(destination.Writes[0].Length + 3);
+        files.Count("ReadBorrowedAsync").ShouldBe(2);
+        files.Count("SetPosition").ShouldBe(0);
+        files.Count("CloseFile").ShouldBe(0);
+        files.AsyncWaits.ShouldBeEmpty();
+        files.Waits.ShouldBeEmpty();
+        caller.CanRead.ShouldBeTrue();
+        caller.Position.ShouldBe(destination.Writes.Sum(write => (long)write.Length));
+    }
+
+    private sealed class FailingDestinationHandler(Stream destination) : HttpMessageHandler
+    {
+        internal int Requests { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests++;
+            await request.Content!.CopyToAsync(destination, cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        }
+    }
+
     private static NpmPackumentContent CreateContent(
         string path,
         long length,
@@ -309,10 +382,13 @@ public sealed class FileSystemPublicationTests
     {
         internal List<byte[]> Bodies { get; } = [];
 
+        internal int Requests { get; private set; }
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
         {
+            Requests++;
             Bodies.Add(await request.Content!.ReadAsByteArrayAsync(cancellationToken));
             return new HttpResponseMessage(
                 Bodies.Count == 1 ? HttpStatusCode.InternalServerError : HttpStatusCode.OK);

@@ -43,6 +43,36 @@ internal static class PackageStructureNormalizer
         cancellationToken.ThrowIfCancellationRequested();
     }
 
+    internal static async ValueTask WrapLegacyRootAsync(
+        string extractedPath,
+        IPackageCacheFileOperations fileOperations,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(extractedPath);
+        ArgumentNullException.ThrowIfNull(fileOperations);
+        string stagingPath = !Path.IsPathFullyQualified(extractedPath)
+            && fileOperations is SystemPackageCacheFileOperations systemOperations
+                ? await systemOperations.Context.FileSystem.GetFullPathAsync(extractedPath, cancellationToken)
+                    .ConfigureAwait(false)
+                : Path.GetFullPath(extractedPath);
+        string siblingPath = Path.Combine(
+            Path.GetDirectoryName(stagingPath)!,
+            $"legacy-{Guid.NewGuid():N}");
+
+        // Match the synchronous boundary: finish each mutation's required
+        // barriers before observing cancellation between the three operations.
+        cancellationToken.ThrowIfCancellationRequested();
+        await fileOperations.MoveDirectoryAsync(stagingPath, siblingPath, CancellationToken.None)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        await fileOperations.CreateDirectoryAsync(stagingPath, CancellationToken.None).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        await fileOperations.MoveDirectoryAsync(
+                siblingPath, Path.Combine(stagingPath, PackageDirectoryName), CancellationToken.None)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
     internal static PackageArchiveLayoutResult ValidateAndNormalize(
         string extractedPath,
         PackageArchiveInventory inventory,
@@ -59,9 +89,37 @@ internal static class PackageStructureNormalizer
         string? directive,
         FileSystemContext context)
     {
+        ArgumentNullException.ThrowIfNull(context);
+        PackageArchiveLayoutResult layout = ValidateLayout(extractedPath, inventory, directive, out bool normalizeRoots);
+        if (normalizeRoots)
+            _ = NormalizeRootEntries(extractedPath, context);
+        return layout;
+    }
+
+    internal static async ValueTask<PackageArchiveLayoutResult> ValidateAndNormalizeAsync(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive,
+        FileSystemContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        cancellationToken.ThrowIfCancellationRequested();
+        PackageArchiveLayoutResult layout = ValidateLayout(extractedPath, inventory, directive, out bool normalizeRoots);
+        if (normalizeRoots)
+            await NormalizeRootEntriesAsync(extractedPath, context, cancellationToken).ConfigureAwait(false);
+        return layout;
+    }
+
+    private static PackageArchiveLayoutResult ValidateLayout(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive,
+        out bool normalizeRoots)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(extractedPath);
         ArgumentNullException.ThrowIfNull(inventory);
-        ArgumentNullException.ThrowIfNull(context);
+        normalizeRoots = false;
 
         List<PackageArchiveInventoryNode> manifestNodes = inventory.Nodes
             .Where(node =>
@@ -130,9 +188,8 @@ internal static class PackageStructureNormalizer
                 }
             }
 
-            string contentPath = ancillaryRoots.Count > 0
-                ? NormalizeRootEntries(extractedPath, context)
-                : Path.Combine(extractedPath, PackageDirectoryName);
+            normalizeRoots = ancillaryRoots.Count > 0;
+            string contentPath = Path.Combine(extractedPath, PackageDirectoryName);
             return new PackageArchiveLayoutResult(
                 PackageArchiveLayout.Standard,
                 contentPath,
@@ -149,7 +206,8 @@ internal static class PackageStructureNormalizer
                     "Legacy package archives must not contain a package/ subtree or second manifest.");
             }
 
-            string contentPath = NormalizeRootEntries(extractedPath, context);
+            normalizeRoots = true;
+            string contentPath = Path.Combine(extractedPath, PackageDirectoryName);
             return new PackageArchiveLayoutResult(
                 PackageArchiveLayout.Legacy,
                 contentPath,
@@ -205,6 +263,30 @@ internal static class PackageStructureNormalizer
         }
 
         return contentPath;
+    }
+
+    private static async ValueTask NormalizeRootEntriesAsync(
+        string extractedPath,
+        FileSystemContext context,
+        CancellationToken cancellationToken)
+    {
+        ResilientFileSystem fileSystem = context.FileSystem;
+        string contentPath = Path.Combine(extractedPath, PackageDirectoryName);
+        cancellationToken.ThrowIfCancellationRequested();
+        await fileSystem.CreateDirectoryAsync(contentPath, CancellationToken.None).ConfigureAwait(false);
+        string[] entryPaths = await fileSystem.SnapshotDirectoryAsync(extractedPath, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (string entryPath in entryPaths)
+        {
+            string entryName = Path.GetFileName(entryPath);
+            if (string.Equals(entryName, PackageDirectoryName, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            cancellationToken.ThrowIfCancellationRequested();
+            await fileSystem.MovePathAsync(
+                    entryPath, Path.Combine(contentPath, entryName), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
     }
 
     private static PackageInstallException InvalidLayout(

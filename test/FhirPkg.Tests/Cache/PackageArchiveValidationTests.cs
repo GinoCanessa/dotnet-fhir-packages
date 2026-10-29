@@ -8,6 +8,7 @@ using FhirPkg.Installation;
 using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Tests.Support;
+using Microsoft.Win32.SafeHandles;
 using Shouldly;
 using Xunit;
 
@@ -726,8 +727,10 @@ public class PackageArchiveValidationTests : IDisposable
         Directory.Exists(Path.Combine(extractedPath, "package", "package")).ShouldBeFalse();
     }
 
-    [Fact]
-    public async Task Normalize_FaultAfterMoveDoesNotMoveCompletedEntryAgain()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Normalize_FaultAfterMoveDoesNotMoveCompletedEntryAgain(bool asynchronous)
     {
         using MemoryStream archive = ArbitraryTarBuilder.Create(
             ArbitraryTarBuilder.File("package.json", Manifest),
@@ -746,24 +749,129 @@ public class PackageArchiveValidationTests : IDisposable
             call => SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
         // The rename commits, then the durability barrier fails once: replay must
         // finish the barrier without renaming the completed entry again.
-        primitives.Enqueue<FileSystemDirectorySyncOutcome>("SynchronizeDescriptor", call =>
-            ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(
-                5, "fsync", call.Path));
+        bool failedBarrier = false;
+        primitives.Set<FileSystemDirectorySyncOutcome>("SynchronizeDescriptor", call =>
+        {
+            if (primitives.Count("MovePath") == 1 && !failedBarrier)
+            {
+                failedBarrier = true;
+                return ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(
+                    5, "fsync", call.Path);
+            }
+            return FileSystemReplayOutcome<FileSystemDirectorySyncOutcome>.Complete(FileSystemDirectorySyncOutcome.Standard);
+        });
         FileSystemContext context = primitives.CreateContext();
 
         PackageArchiveInventory inventory = PackageArchiveInventory.FromFileSystem(
             extractedPath,
             "example.package#1.0.0",
             context);
-        TarballExtractor.ValidateAndNormalizePackageStructure(
-            extractedPath,
-            inventory,
-            "example.package#1.0.0",
-            context);
+        PackageArchiveLayoutResult layout = asynchronous
+            ? await TarballExtractor.ValidateAndNormalizePackageStructureAsync(
+                extractedPath, inventory, "example.package#1.0.0", context, TestContext.Current.CancellationToken)
+            : TarballExtractor.ValidateAndNormalizePackageStructure(
+                extractedPath, inventory, "example.package#1.0.0", context);
 
+        layout.Layout.ShouldBe(PackageArchiveLayout.Legacy);
+        failedBarrier.ShouldBeTrue();
         File.Exists(Path.Combine(extractedPath, "package", "package.json")).ShouldBeTrue();
         File.Exists(Path.Combine(extractedPath, "package", "README.md")).ShouldBeTrue();
         primitives.Count("MovePath").ShouldBe(2);
+        primitives.Calls.Where(call => call.Operation == "MovePath")
+            .Select(call => call.Path).Distinct().Count().ShouldBe(2);
+        (asynchronous ? primitives.AsyncWaits : primitives.Waits).ShouldBe([10]);
+        (asynchronous ? primitives.Waits : primitives.AsyncWaits).ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstallAndImport_ArchiveOpenAndLegacyNormalizationUseAsyncWaits(bool import)
+    {
+        string cacheRoot = Path.Combine(_testRoot, "async-legacy");
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(cacheRoot);
+        using DiskPackageCache cache = new(
+            cacheRoot, null, null, new PackageInstallLimits(), files.CreateContext(retries: 1));
+        bool failedArchiveOpen = false;
+        files.Set<SafeFileHandle>("OpenFileHandle", call =>
+        {
+            if (Path.GetFileName(call.Path) == "archive.tgz" && !failedArchiveOpen)
+            {
+                failedArchiveOpen = true;
+                return ScriptedFileSystemPrimitives.NativeFailure<SafeFileHandle>(
+                    5, "acquired archive", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.OpenFileHandle(
+                call.Path!, call.Mode!.Value, call.Access!.Value, call.Share!.Value, call.Options!.Value);
+        });
+        files.Set<int>("OpenDescriptor", call =>
+        {
+            if (Path.GetFileName(call.Path) == "archive.tgz" && !failedArchiveOpen)
+            {
+                failedArchiveOpen = true;
+                return ScriptedFileSystemPrimitives.NativeFailure<int>(5, "acquired archive", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.OpenDescriptor(call.Path!, (int)call.Flags!.Value, 0);
+        });
+        int wrapperMoves = 0;
+        files.Set<bool>("MovePath", call =>
+            Path.GetFileName(call.Path)!.StartsWith("legacy-", StringComparison.Ordinal) && wrapperMoves++ == 0
+                ? ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "legacy normalization", call.Path)
+                : SystemFileSystemPrimitives.Instance.MovePath(call.Path!, call.DestinationPath!, call.Flags == 1));
+        RecordingProgress progress = new();
+        InstallCacheOptions options = new() { VerifyChecksum = false, Progress = progress };
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package.json", Manifest),
+            ArbitraryTarBuilder.File(PatientFileName, PatientResource));
+
+        PackageRecord record = import
+            ? await cache.ImportAsync(archive, options, TestContext.Current.CancellationToken)
+            : await cache.InstallAsync(
+                new PackageReference("example.package", "1.0.0"), archive, options, TestContext.Current.CancellationToken);
+
+        record.Manifest.Name.ShouldBe("example.package");
+        File.ReadAllText(Path.Combine(record.ContentPath, PatientFileName)).ShouldBe(PatientResource);
+        archive.Position.ShouldBe(archive.Length);
+        archive.CanRead.ShouldBeTrue();
+        failedArchiveOpen.ShouldBeTrue();
+        wrapperMoves.ShouldBe(2);
+        files.Calls.Count(call => call.Operation == "MovePath" && call.Flags == 0).ShouldBe(4);
+        progress.Events.Count(value => value.Phase == PackageProgressPhase.Extracting).ShouldBe(1);
+        progress.Events.Count(value => value.Phase == PackageProgressPhase.Validating).ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(cacheRoot).ShouldBe(0);
+        AssertNoStagingOperations(cacheRoot);
+    }
+
+    [Fact]
+    public async Task LegacyWrapper_CancellationDuringBarrierFinishesMoveBeforeStopping()
+    {
+        string stagingPath = Path.Combine(_testRoot, "wrap-cancellation");
+        Directory.CreateDirectory(stagingPath);
+        File.WriteAllText(Path.Combine(stagingPath, "package.json"), Manifest);
+        ScriptedFileSystemPrimitives files = new(FileSystemPlatform.Linux);
+        files.UseSystemFiles();
+        files.EnableDirectorySynchronization();
+        files.Enqueue("SynchronizeDescriptor",
+            ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(5, "wrapper barrier"));
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        files.OnWait = cancellation.Cancel;
+        SystemPackageCacheFileOperations operations = new(files.CreateContext(retries: 1));
+
+        await Should.ThrowAsync<OperationCanceledException>(async () =>
+            await PackageStructureNormalizer.WrapLegacyRootAsync(stagingPath, operations, cancellation.Token));
+
+        FileSystemPrimitiveCall moved = files.Calls.Where(call => call.Operation == "MovePath").ShouldHaveSingleItem();
+        moved.Path.ShouldBe(stagingPath);
+        File.ReadAllText(Path.Combine(moved.DestinationPath!, "package.json")).ShouldBe(Manifest);
+        Directory.Exists(stagingPath).ShouldBeFalse();
+        files.Count("SynchronizeDescriptor").ShouldBe(2);
+        files.Count("CloseDescriptor").ShouldBe(1);
+        files.Count("CreateDirectory").ShouldBe(0);
+        files.AsyncWaits.ShouldBe([10]);
+        files.Waits.ShouldBeEmpty();
     }
 
     [Fact]
@@ -2071,6 +2179,13 @@ public class PackageArchiveValidationTests : IDisposable
         Duplicate,
         CaseCollision,
         UnicodeNormalizationCollision
+    }
+
+    private sealed class RecordingProgress : IProgress<PackageProgress>
+    {
+        internal List<PackageProgress> Events { get; } = [];
+
+        public void Report(PackageProgress value) => Events.Add(value);
     }
 
     private sealed class CancelOnValidationProgress(CancellationTokenSource source) :

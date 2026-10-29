@@ -451,6 +451,8 @@ public class RegistryClientBaseTests
             path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, 128, FileOptions.Asynchronous);
         caller.Position = 2;
         ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        primitives.Enqueue("GetPosition", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "HTTP file position", path));
+        primitives.Enqueue("GetHandleLength", ScriptedFileSystemPrimitives.NativeFailure<long>(1117, "HTTP file length", path));
         primitives.Enqueue<int>("ReadBorrowedAsync", call =>
         {
             call.Stream!.Read(call.Buffer.Span[..4]).ShouldBe(4);
@@ -476,8 +478,9 @@ public class RegistryClientBaseTests
         primitives.Count("ReadBorrowedAsync").ShouldBe(3);
         primitives.Calls.Where(call => call.Operation == "SetPosition")
             .Select(call => call.Offset).ShouldBe([2L]);
-        primitives.AsyncWaits.ShouldBe([10]);
+        primitives.AsyncWaits.ShouldBe([10, 10, 10]);
         primitives.Waits.ShouldBeEmpty();
+        primitives.Count("GetHandleLength").ShouldBe(2);
         primitives.Count("CloseFile").ShouldBe(0);
         caller.Position.ShouldBe(bytes.LongLength);
         caller.CanRead.ShouldBeTrue();
@@ -547,6 +550,182 @@ public class RegistryClientBaseTests
         primitives.Waits.ShouldBeEmpty();
         caller.CanRead.ShouldBeTrue();
         caller.Position.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task PutStream_HealthyReserializationUsesAsyncRewindAndCachedFileMetadata()
+    {
+        using PublicationWorkspace workspace = new();
+        byte[] bytes = [0x10, 0x20, .. "raw gzip payload"u8.ToArray()];
+        string path = workspace.CreateFile(bytes);
+        using FileStream caller = new(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        caller.Position = 2;
+        ScriptedFileSystemPrimitives files = PublicationTestSupport.SystemFiles();
+        files.Enqueue("GetPosition", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "HTTP position", path));
+        files.Enqueue("GetHandleLength", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "HTTP length", path));
+        List<byte[]> bodies = [];
+        ContentHandler handler = new(async (request, token) =>
+        {
+            HttpContent content = request.Content!;
+            content.Headers.ContentLength.ShouldBe(bytes.Length - 2);
+            using MemoryStream first = new();
+            await content.CopyToAsync(first, token);
+            bodies.Add(first.ToArray());
+            files.Enqueue("SetPosition", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "HTTP rewind", path));
+            using MemoryStream second = new();
+            await content.CopyToAsync(second, token);
+            bodies.Add(second.ToArray());
+            content.Headers.ContentLength.ShouldBe(bytes.Length - 2);
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        });
+        using HttpClient http = new(handler);
+        TestableRegistryClient client = new(
+            ControlledTransport(http), PublicationTestSupport.Endpoint("serialize"),
+            NullLogger.Instance, files.CreateContext(retries: 1));
+
+        using HttpResponseMessage response = await client.TestPutStreamAsync(
+            "https://serialize.example/package", caller, TestContext.Current.CancellationToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        handler.Requests.ShouldBe(1);
+        bodies.Count.ShouldBe(2);
+        byte[] expected = bytes[2..];
+        bodies.ShouldAllBe(body => body.SequenceEqual(expected));
+        files.Count("PrepareBorrowedRead").ShouldBe(1);
+        files.Count("GetHandleLength").ShouldBe(2);
+        files.Calls.Where(call => call.Operation == "SetPosition").Select(call => call.Offset).ShouldBe([2L, 2L]);
+        files.Count("ReadBorrowedAsync").ShouldBe(4);
+        files.AsyncWaits.ShouldBe([10, 10, 10]);
+        files.Waits.ShouldBeEmpty();
+        files.Count("CloseFile").ShouldBe(0);
+        caller.CanWrite.ShouldBeTrue();
+        caller.Position.ShouldBe(bytes.Length);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PutStream_ExhaustedFileMetadataStopsBeforeHttpSend(bool position)
+    {
+        using PublicationWorkspace workspace = new();
+        using FileStream caller = File.OpenRead(workspace.CreateFile("metadata"u8.ToArray()));
+        caller.Position = 2;
+        ScriptedFileSystemPrimitives files = PublicationTestSupport.SystemFiles();
+        IOException failure = new("terminal metadata failure");
+        string operation = position ? "GetPosition" : "GetHandleLength";
+        files.Set<long>(operation, call => ScriptedFileSystemPrimitives.Fail<long>(failure, operation, call.Path));
+        HeaderCapturingHandler handler = new();
+        using HttpClient http = new(handler);
+        TestableRegistryClient client = new(
+            ControlledTransport(http), PublicationTestSupport.Endpoint("metadata"),
+            NullLogger.Instance, files.CreateContext(retries: 2));
+
+        Exception exception = position
+            ? await Should.ThrowAsync<IOException>(() => client.TestPutStreamAsync(
+                "https://metadata.example/package", caller, TestContext.Current.CancellationToken))
+            : await Should.ThrowAsync<HttpRequestException>(() => client.TestPutStreamAsync(
+                "https://metadata.example/package", caller, TestContext.Current.CancellationToken));
+
+        if (position)
+            exception.ShouldBeSameAs(failure);
+        else
+            exception.InnerException.ShouldBeSameAs(failure);
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? context).ShouldBeTrue();
+        context!.RetriesUsed.ShouldBe(2);
+        files.Count(operation).ShouldBe(3);
+        files.Count("ReadBorrowedAsync").ShouldBe(0);
+        files.Count("PrepareBorrowedRead").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        handler.CapturedRequests.ShouldBeEmpty();
+        caller.CanRead.ShouldBeTrue();
+        caller.Position.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task PutStream_TerminalFileSerializationCannotStartAnotherLocalBudget()
+    {
+        using PublicationWorkspace workspace = new();
+        using FileStream caller = File.OpenRead(workspace.CreateFile("payload"u8.ToArray()));
+        ScriptedFileSystemPrimitives files = PublicationTestSupport.SystemFiles();
+        IOException failure = new("terminal file read");
+        files.Set<int>("ReadBorrowedAsync", call =>
+            ScriptedFileSystemPrimitives.Fail<int>(failure, "HTTP read", call.Path));
+        ContentHandler handler = new(async (request, token) =>
+        {
+            using MemoryStream destination = new();
+            HttpRequestException first = await Should.ThrowAsync<HttpRequestException>(() =>
+                request.Content!.CopyToAsync(destination, token));
+            HttpRequestException second = await Should.ThrowAsync<HttpRequestException>(() =>
+                request.Content!.CopyToAsync(destination, token));
+            first.InnerException.ShouldBeSameAs(failure);
+            second.InnerException.ShouldBeSameAs(failure);
+            throw second;
+        });
+        using HttpClient http = new(handler);
+        TestableRegistryClient client = new(
+            ControlledTransport(http), PublicationTestSupport.Endpoint("terminal"),
+            NullLogger.Instance, files.CreateContext(retries: 2));
+
+        await Should.ThrowAsync<HttpRequestException>(() => client.TestPutStreamAsync(
+            "https://terminal.example/package", caller, TestContext.Current.CancellationToken));
+
+        handler.Requests.ShouldBe(1);
+        files.Count("ReadBorrowedAsync").ShouldBe(3);
+        files.Count("SetPosition").ShouldBe(2);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        caller.CanRead.ShouldBeTrue();
+        caller.Position.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task PutStream_PendingCallerWritePreparationRemainsUnsafeOneShot()
+    {
+        using PublicationWorkspace workspace = new();
+        string path = workspace.CreateFile([]);
+        using FileStream caller = new(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, 4096);
+        caller.Write("pending"u8);
+        ScriptedFileSystemPrimitives files = PublicationTestSupport.SystemFiles();
+        IOException failure = new("preparation failed after flushing caller bytes");
+        files.Enqueue<BorrowedFileReadState>("PrepareBorrowedRead", call =>
+        {
+            call.Stream!.Flush();
+            return ScriptedFileSystemPrimitives.Fail<BorrowedFileReadState>(failure, "PrepareBorrowedRead", path);
+        });
+        HeaderCapturingHandler handler = new();
+        using HttpClient http = new(handler);
+        TestableRegistryClient client = new(
+            ControlledTransport(http), PublicationTestSupport.Endpoint("prepare"), NullLogger.Instance, files.CreateContext());
+
+        IOException exception = await Should.ThrowAsync<IOException>(() => client.TestPutStreamAsync(
+            "https://prepare.example/package", caller, TestContext.Current.CancellationToken));
+
+        exception.ShouldBeSameAs(failure);
+        files.Count("PrepareBorrowedRead").ShouldBe(1);
+        files.Count("GetHandleLength").ShouldBe(0);
+        files.Count("ReadBorrowedAsync").ShouldBe(0);
+        files.AsyncWaits.ShouldBeEmpty();
+        files.Waits.ShouldBeEmpty();
+        handler.CapturedRequests.ShouldBeEmpty();
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? context).ShouldBeTrue();
+        context!.Termination.ShouldBe(FileSystemFailureTermination.Unsafe);
+        caller.CanWrite.ShouldBeTrue();
+        caller.Position.ShouldBe(7);
+        caller.Dispose();
+        File.ReadAllText(path).ShouldBe("pending");
+    }
+
+    private sealed class ContentHandler(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
+    {
+        internal int Requests { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests++;
+            return send(request, cancellationToken);
+        }
     }
 
     private sealed class FailingOpaqueStream : Stream

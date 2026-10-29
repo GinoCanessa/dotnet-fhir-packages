@@ -121,7 +121,8 @@ public class PackageIndexer :
             if (existingIndex is not null)
             {
                 _logger.LogDebug("Using existing .index.json from '{Path}'.", packageContentPath);
-                RegisterLegacyIndex(packageContentPath, existingIndex);
+                await RegisterLegacyIndexAsync(packageContentPath, existingIndex, cancellationToken)
+                    .ConfigureAwait(false);
                 return existingIndex;
             }
         }
@@ -130,7 +131,7 @@ public class PackageIndexer :
         _logger.LogInformation("Generating index for package at '{Path}'.", packageContentPath);
         PackageIndex index = await BuildIndexAsync(packageContentPath, cancellationToken).ConfigureAwait(false);
 
-        RegisterLegacyIndex(packageContentPath, index);
+        await RegisterLegacyIndexAsync(packageContentPath, index, cancellationToken).ConfigureAwait(false);
 
         return index;
     }
@@ -345,13 +346,15 @@ public class PackageIndexer :
                 .ConfigureAwait(false);
             PackageIndex? index = await JsonSerializer.DeserializeAsync<PackageIndex>(stream, s_readOptions, cancellationToken)
                 .ConfigureAwait(false);
-            string? failureReason = null;
-            if (index is not null
-                && PackageIndexValidation.TryValidateReferencedFiles(
-                    index,
-                    packageContentPath,
-                    _context,
-                    out failureReason))
+            (bool isValid, string? failureReason) = index is null
+                ? (false, null)
+                : await PackageIndexValidation.TryValidateReferencedFilesAsync(
+                        index,
+                        packageContentPath,
+                        _context,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (isValid)
             {
                 return index;
             }
@@ -635,16 +638,17 @@ public class PackageIndexer :
     /// Registers an index's entries in the in-memory store, converting them to <see cref="ResourceInfo"/>
     /// enriched with package metadata extracted from the content path.
     /// </summary>
-    private void RegisterLegacyIndex(
+    private async ValueTask RegisterLegacyIndexAsync(
         string packageContentPath,
-        PackageIndex index)
+        PackageIndex index,
+        CancellationToken cancellationToken)
     {
         (string? packageName, string? packageVersion) = ExtractPackageIdentity(packageContentPath);
         PackageReference reference = new(
             packageName ?? string.Empty,
             packageVersion);
         string key = packageVersion is null
-            ? $"path:{_context.FileSystem.GetFullPath(packageContentPath)}"
+            ? $"path:{await _context.FileSystem.GetFullPathAsync(packageContentPath, cancellationToken).ConfigureAwait(false)}"
             : $"identity:{packageName}#{packageVersion}";
         RegisterIndex(
             _legacyIndexedPackages,

@@ -88,6 +88,36 @@ internal sealed class BorrowedFileReadStream : Stream
         }
     }
 
+    internal async ValueTask<long> GetLengthAsync(CancellationToken cancellationToken)
+    {
+        BeginOperation();
+        try
+        {
+            return await _context.FileSystem.ExecuteAsync(
+                    "BorrowedFileLength", () => _context.Primitives.GetLength(_handle, _stream.Name), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            EndOperation();
+        }
+    }
+
+    internal async ValueTask<long> GetPositionAsync(CancellationToken cancellationToken)
+    {
+        BeginOperation();
+        try
+        {
+            return await _context.FileSystem.ExecuteAsync(
+                    "BorrowedFilePosition", () => _context.Primitives.GetPosition(_stream), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            EndOperation();
+        }
+    }
+
     public override long Seek(long offset, SeekOrigin origin)
     {
         if (origin is not (SeekOrigin.Begin or SeekOrigin.Current or SeekOrigin.End))

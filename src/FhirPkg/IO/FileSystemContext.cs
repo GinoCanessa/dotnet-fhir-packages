@@ -59,6 +59,25 @@ internal sealed class FileSystemContext
 
     internal Stream ProtectRead(Stream stream) => ProtectRead(stream, this);
 
+    internal static ValueTask<long> GetLengthAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return stream switch
+        {
+            PositionedFileStream positioned => positioned.GetLengthAsync(cancellationToken),
+            BorrowedFileReadStream borrowed => borrowed.GetLengthAsync(cancellationToken),
+            _ => ValueTask.FromResult(stream.Length),
+        };
+    }
+
+    internal static ValueTask<long> GetPositionAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return stream is BorrowedFileReadStream borrowed
+            ? borrowed.GetPositionAsync(cancellationToken)
+            : ValueTask.FromResult(stream.Position);
+    }
+
     internal static Stream ProtectRead(Stream stream, FileSystemContext? context)
     {
         ArgumentNullException.ThrowIfNull(stream);

@@ -2,6 +2,7 @@
 
 using System.Net;
 using System.Net.Http.Headers;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FhirPkg.IO;
@@ -342,8 +343,9 @@ public abstract class RegistryClientBase : IRegistryClient
         Stream source = FileSystemContext.ProtectRead(stream);
         try
         {
-            using StreamContent httpContent = new StreamContent(
-                new NonDisposingStream(source));
+            using HttpContent httpContent = source is PositionedFileStream or BorrowedFileReadStream
+                ? await PrepareFileContentAsync(source, cancellationToken).ConfigureAwait(false)
+                : new StreamContent(new NonDisposingStream(source));
             httpContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
             return await PutContentAsync(
                     requestUri,
@@ -356,6 +358,26 @@ public abstract class RegistryClientBase : IRegistryClient
             if (!ReferenceEquals(source, stream))
                 await source.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    private static async ValueTask<HttpContent> PrepareFileContentAsync(
+        Stream source,
+        CancellationToken cancellationToken)
+    {
+        long start = await IO.FileSystemContext.GetPositionAsync(source, cancellationToken).ConfigureAwait(false);
+        long length;
+        try
+        {
+            length = await IO.FileSystemContext.GetLengthAsync(source, cancellationToken).ConfigureAwait(false);
+        }
+        catch (IOException exception)
+        {
+            // Length used to be requested by HTTP content copying. Preserve its
+            // transport-shaped failure, but fail before issuing a request.
+            throw new HttpRequestException("Error while copying content to a stream.", exception);
+        }
+
+        return new PreparedFileContent(source, start, length);
     }
 
     /// <summary>
@@ -1002,6 +1024,49 @@ public abstract class RegistryClientBase : IRegistryClient
         {
             GC.SuppressFinalize(this);
             return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class PreparedFileContent(Stream source, long start, long length) : HttpContent
+    {
+        private bool _consumed;
+        private ExceptionDispatchInfo? _terminalFailure;
+
+        protected override bool TryComputeLength(out long contentLength)
+        {
+            contentLength = length - start;
+            return true;
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            SerializeToStreamAsync(stream, context, CancellationToken.None);
+
+        protected override async Task SerializeToStreamAsync(
+            Stream stream,
+            TransportContext? context,
+            CancellationToken cancellationToken)
+        {
+            _terminalFailure?.Throw();
+            try
+            {
+                if (_consumed)
+                {
+                    if (source is BorrowedFileReadStream borrowed)
+                        await borrowed.SeekAsync(start, SeekOrigin.Begin, cancellationToken).ConfigureAwait(false);
+                    else
+                        source.Position = start;
+                }
+
+                _consumed = true;
+                // An explicit buffer size avoids Stream's synchronous metadata
+                // optimization. Only source reads replay; HTTP writes never do.
+                await source.CopyToAsync(stream, 81_920, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (FileSystemFailureContext.TryGetTerminal(exception, out _))
+            {
+                _terminalFailure = ExceptionDispatchInfo.Capture(exception);
+                throw;
+            }
         }
     }
 

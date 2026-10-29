@@ -3456,7 +3456,8 @@ public sealed class FhirPackageManager :
         Stream tarballStream,
         CancellationToken cancellationToken)
     {
-        long archiveLength = tarballStream.Length;
+        long archiveLength = await FileSystemContext.GetLengthAsync(tarballStream, cancellationToken)
+            .ConfigureAwait(false);
         if (archiveLength > _managerInstallLimits.MaxCompressedBytes)
         {
             throw new PackageInstallException(
@@ -3486,11 +3487,13 @@ public sealed class FhirPackageManager :
                     "Package archive inventory was not produced.",
                     "package publish");
             PackageArchiveLayoutResult layout =
-                TarballExtractor.ValidateAndNormalizePackageStructure(
-                    tempDir,
-                    inventory,
-                    "package publish",
-                    _context);
+                await TarballExtractor.ValidateAndNormalizePackageStructureAsync(
+                        tempDir,
+                        inventory,
+                        "package publish",
+                        _context,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             PackageIdentityValidationResult identity =
                 await PackageIdentityValidator.DiscoverAsync(
                         layout.ManifestPath,

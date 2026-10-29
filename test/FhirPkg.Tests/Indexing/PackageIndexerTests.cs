@@ -520,8 +520,90 @@ public sealed class PackageIndexerTests : IDisposable
         rootAttempts.ShouldBe(4);
         primitives.Count("GetFullPath").ShouldBe(5);
         primitives.Count("CreateDirectoryEnumerator").ShouldBe(0);
-        primitives.Waits.ShouldBe([10, 10]);
-        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+        primitives.AsyncWaits.ShouldBe([10, 10]);
+    }
+
+    [Fact]
+    public async Task ReadExistingIndex_ReferenceFaultsUseAsyncWaitsWithoutRebuilding()
+    {
+        string contentPath = CreatePackageContent(
+            "example.package", "1.0.0", ("patient.json", """{"resourceType":"Patient","id":"fresh"}"""));
+        File.WriteAllText(Path.Combine(contentPath, ".index.json"),
+            """{"index-version":2,"files":[{"filename":"patient.json","resourceType":"Patient","id":"stored"}]}""");
+        string patientPath = Path.Combine(contentPath, "patient.json");
+        ScriptedFileSystemPrimitives files = CreateFilePrimitives();
+        bool failedProbe = false;
+        files.Set<FileSystemProbeResult>("Probe", call =>
+        {
+            if (call.Path == patientPath && !failedProbe)
+            {
+                failedProbe = true;
+                return ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "reference probe", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.Probe(call.Path!, call.Flags == 1);
+        });
+        int opens = 0;
+        if (OperatingSystem.IsWindows())
+        {
+            files.Set<FileStream>("OpenFile", call =>
+                call.Path == patientPath && opens++ == 0
+                    ? ScriptedFileSystemPrimitives.NativeFailure<FileStream>(5, "reference open", call.Path)
+                    : SystemFileSystemPrimitives.Instance.OpenFile(
+                        call.Path!, FileMode.Open, FileAccess.Read, FileShare.Read, 16_384, FileOptions.SequentialScan));
+        }
+        else
+        {
+            files.Set<int>("OpenDescriptor", call =>
+                call.Path == patientPath && opens++ == 0
+                    ? ScriptedFileSystemPrimitives.NativeFailure<int>(5, "reference open", call.Path)
+                    : SystemFileSystemPrimitives.Instance.OpenDescriptor(call.Path!, (int)call.Flags!.Value, 0));
+        }
+        PackageIndexer indexer = new(NullLogger.Instance, files.CreateContext(retries: 1));
+
+        PackageIndex index = await indexer.IndexPackageAsync(
+            contentPath, cancellationToken: TestContext.Current.CancellationToken);
+
+        index.Files.ShouldHaveSingleItem().Id.ShouldBe("stored");
+        indexer.FindByResourceType("Patient").ShouldHaveSingleItem().Id.ShouldBe("stored");
+        opens.ShouldBe(2);
+        files.Count("CreateDirectoryEnumerator").ShouldBe(0);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task UnversionedRelativeRegistration_ResolvesAsynchronouslyWithoutChangingMetadata()
+    {
+        string contentPath = CreatePackageContent(
+            "physical.package", "1.0.0", ("patient.json", """{"resourceType":"Patient","id":"fresh"}"""));
+        File.WriteAllText(Path.Combine(contentPath, ".index.json"),
+            """{"index-version":2,"files":[{"filename":"patient.json","resourceType":"Patient","id":"stored"}]}""");
+        string relativeRoot = Path.Combine("Alias.Package", "package");
+        ScriptedFileSystemPrimitives files = CreateFilePrimitives();
+        int rootAttempts = 0;
+        files.Set<string>("GetFullPath", call =>
+        {
+            if (call.Path != relativeRoot)
+                return FileSystemReplayOutcome<string>.Complete(Path.Combine(contentPath, ".index.json"));
+            int attempt = rootAttempts++;
+            return attempt is 2 or 3
+                ? ScriptedFileSystemPrimitives.NativeFailure<string>(5, "registration path", call.Path)
+                : FileSystemReplayOutcome<string>.Complete(contentPath);
+        });
+        PackageIndexer indexer = new(NullLogger.Instance, files.CreateContext(retries: 2));
+
+        PackageIndex index = await indexer.IndexPackageAsync(
+            relativeRoot, cancellationToken: TestContext.Current.CancellationToken);
+
+        index.Files.ShouldHaveSingleItem().Id.ShouldBe("stored");
+        ResourceInfo resource = indexer.FindByResourceType("Patient").ShouldHaveSingleItem();
+        resource.PackageName.ShouldBe("Alias.Package");
+        resource.PackageVersion.ShouldBeNull();
+        rootAttempts.ShouldBe(5);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        files.Count("CreateDirectoryEnumerator").ShouldBe(0);
     }
 
     [Fact]

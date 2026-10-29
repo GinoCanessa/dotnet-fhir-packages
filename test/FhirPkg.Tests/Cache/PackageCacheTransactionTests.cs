@@ -1247,6 +1247,48 @@ public sealed class PackageCacheTransactionTests : IDisposable
         AssertNoOperationArtifacts();
     }
 
+    [Fact]
+    public async Task Commit_DirectoryExistenceAndPostCommitCleanupUseAsyncWaits()
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), files.CreateContext(retries: 1));
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        string stagingRoot = Path.Combine(_cacheRoot, ".fhirpkg", "staging");
+        string targetPath = PackageCacheKey.Create(s_reference).GetPackageDirectoryPath(_cacheRoot);
+        int stagingProbes = 0;
+        int cleanupProbes = 0;
+        files.Set<FileSystemProbeResult>("Probe", call =>
+        {
+            if (call.Flags == 1 && Path.GetFileName(call.Path) == "expanded"
+                && File.Exists(Path.Combine(call.Path!, "package", "package.json")) && stagingProbes++ == 0)
+                return ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "commit staging", call.Path);
+            if (call.Flags == 1 && Path.GetDirectoryName(call.Path) == stagingRoot
+                && files.Calls.Any(previous => previous.Operation == "MovePath" && previous.DestinationPath == targetPath)
+                && cleanupProbes++ == 0)
+            {
+                cancellation.Cancel();
+                return ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "committed cleanup", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.Probe(call.Path!, call.Flags == 1);
+        });
+        using MemoryStream archive = CreateArchive("new");
+
+        PackageRecord record = await cache.InstallAsync(
+            s_reference, archive, new InstallCacheOptions { VerifyChecksum = false }, cancellation.Token);
+
+        record.Manifest.Version.ShouldBe("1.0.0");
+        stagingProbes.ShouldBe(2);
+        cleanupProbes.ShouldBe(2);
+        cancellation.IsCancellationRequested.ShouldBeTrue();
+        files.Calls.Count(call => call.Operation == "MovePath" && call.Flags == 0).ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+        AssertNoOperationArtifacts();
+    }
+
     private static ScriptedFileSystemPrimitives CreatePromotionPrimitives()
     {
         // Linux semantics (explicit directory barriers) over real rename/probe work.

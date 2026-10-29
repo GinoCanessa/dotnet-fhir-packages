@@ -47,6 +47,10 @@ internal sealed class ResilientFileSystem
         ExecutePath("ProbeFollowing", path,
             fullPath => _context.Primitives.Probe(fullPath, followLinks: true), cancellationToken);
 
+    internal ValueTask<FileSystemProbeResult> ProbeFollowingAsync(string path, CancellationToken cancellationToken = default) =>
+        ExecutePathAsync("ProbeFollowing", path,
+            fullPath => _context.Primitives.Probe(fullPath, followLinks: true), cancellationToken);
+
     internal FileAttributes GetAttributes(string path, CancellationToken cancellationToken = default) =>
         ExecutePath("GetAttributes", path, _context.Primitives.GetAttributes, cancellationToken);
 

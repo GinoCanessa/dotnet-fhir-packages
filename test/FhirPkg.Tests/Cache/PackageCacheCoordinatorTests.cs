@@ -783,11 +783,139 @@ public sealed class PackageCacheCoordinatorTests
         await lease.DisposeAsync();
 
         primitives.Count("Unlock").ShouldBe(3);
+        primitives.AsyncWaits.ShouldBe([10, 10]);
+        primitives.Waits.ShouldBeEmpty();
         PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
         await using (await new PackageCacheCoordinator(directory.Path)
             .AcquireIdentityAsync(cacheKey, TestContext.Current.CancellationToken))
         {
         }
+    }
+
+    [Fact]
+    public async Task NonblockingOwner_FaultsAndUnlockUseAsyncWaitsOnOneHandle()
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives files = new();
+        files.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        FileStream? retained = null;
+        files.Set<FileStream>("OpenFile", _ =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = OpenScriptedLockFile(directory.Path);
+            retained = opened.Value;
+            return opened;
+        });
+        files.Enqueue("OpenFile", ScriptedFileSystemPrimitives.NativeFailure<FileStream>(5, "owner open"));
+        files.Enqueue("TryLock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "owner lock"));
+        files.Set("TryLock", FileSystemReplayOutcome<bool>.Complete(true));
+        files.Enqueue("Unlock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "owner unlock"));
+        files.Set("Unlock", FileSystemReplayOutcome<bool>.Complete(true));
+        PackageCacheCoordinator coordinator = new(
+            directory.Path, files.CreateContext(retries: 2), NullPackageCacheContentionObserver.Instance);
+
+        PackageCacheLease? lease = await coordinator.TryAcquireOperationOwnerAsync(
+            "owner", TestContext.Current.CancellationToken);
+
+        // Open and lock spend the same episode's two retries; unlock has its own budget.
+        lease.ShouldNotBeNull();
+        await lease.DisposeAsync();
+        await lease.DisposeAsync();
+        retained.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        files.Count("OpenFile").ShouldBe(2);
+        files.Count("TryLock").ShouldBe(2);
+        files.Count("Unlock").ShouldBe(2);
+        files.AsyncWaits.ShouldBe([10, 10, 10]);
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NonblockingOwner_ContentionReturnsImmediatelyWithoutFaultWaits(bool processContention)
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives files = new();
+        files.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        FileStream? retained = null;
+        files.Set<FileStream>("OpenFile", _ =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = OpenScriptedLockFile(directory.Path);
+            retained = opened.Value;
+            return opened;
+        });
+        files.Set("TryLock", FileSystemReplayOutcome<bool>.Complete(processContention));
+        files.Set("Unlock", FileSystemReplayOutcome<bool>.Complete(true));
+        PackageCacheCoordinator coordinator = new(
+            directory.Path, files.CreateContext(retries: 0), NullPackageCacheContentionObserver.Instance);
+        PackageCacheLease? first = processContention
+            ? await coordinator.TryAcquireOperationOwnerAsync("owner", TestContext.Current.CancellationToken)
+            : null;
+        try
+        {
+            PackageCacheLease? contended = await coordinator.TryAcquireOperationOwnerAsync(
+                "owner", TestContext.Current.CancellationToken);
+
+            contended.ShouldBeNull();
+            files.Count("OpenFile").ShouldBe(1);
+            files.Count("TryLock").ShouldBe(1);
+            files.AsyncWaits.ShouldBeEmpty();
+            files.Waits.ShouldBeEmpty();
+            if (!processContention)
+                retained.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        }
+        finally
+        {
+            if (first is not null)
+                await first.DisposeAsync();
+        }
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NonblockingOwner_FaultExhaustionOrCancellationReleasesRetainedHandle(bool cancel)
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives files = new();
+        files.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        FileStream? retained = null;
+        files.Set<FileStream>("OpenFile", _ =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = OpenScriptedLockFile(directory.Path);
+            retained = opened.Value;
+            return opened;
+        });
+        files.Set("TryLock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "owner lock"));
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        if (cancel)
+            files.OnWait = cancellation.Cancel;
+        PackageCacheCoordinator coordinator = new(
+            directory.Path, files.CreateContext(retries: 2), NullPackageCacheContentionObserver.Instance);
+
+        if (cancel)
+        {
+            await Should.ThrowAsync<OperationCanceledException>(async () =>
+                await coordinator.TryAcquireOperationOwnerAsync("owner", cancellation.Token));
+        }
+        else
+        {
+            PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(async () =>
+                await coordinator.TryAcquireOperationOwnerAsync("owner", cancellation.Token));
+            exception.ErrorCode.ShouldBe(PackageInstallErrorCode.CoordinationFailed);
+            FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? failure).ShouldBeTrue();
+            failure!.RetriesUsed.ShouldBe(2);
+        }
+
+        retained.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        files.Count("OpenFile").ShouldBe(1);
+        files.Count("TryLock").ShouldBe(cancel ? 1 : 3);
+        files.Count("Unlock").ShouldBe(0);
+        files.AsyncWaits.ShouldBe(cancel ? [10] : [10, 10]);
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
     }
 
     private static FileSystemReplayOutcome<FileStream> OpenScriptedLockFile(string root)

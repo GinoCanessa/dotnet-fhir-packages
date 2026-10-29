@@ -299,9 +299,23 @@ internal static class PackageContentAcquirer
                             context)
                         .ConfigureAwait(false);
                 }
+                catch
+                {
+                    // Cleanup cannot replace the failed acquisition, including cancellation.
+                }
                 finally
                 {
-                    operationOwner?.Dispose();
+                    if (operationOwner is not null)
+                    {
+                        try
+                        {
+                            await operationOwner.DisposeAsync().ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            // Releasing the owner must not replace the acquisition failure.
+                        }
+                    }
                 }
             }
         }
@@ -426,16 +440,31 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
     internal Stream OpenArchiveRead() =>
         _context.FileSystem.OpenProtectedRegularRead(ArchivePath);
 
+    internal ValueTask<Stream> OpenArchiveReadAsync(CancellationToken cancellationToken) =>
+        _context.FileSystem.OpenProtectedRegularReadAsync(ArchivePath, cancellationToken);
+
     public async ValueTask DisposeAsync()
     {
+        bool cleaned = false;
         try
         {
             await TryDeleteOperationDirectoryAsync(OperationDirectory, _context)
                 .ConfigureAwait(false);
+            cleaned = true;
         }
         finally
         {
-            _operationOwner?.Dispose();
+            if (_operationOwner is not null)
+            {
+                try
+                {
+                    await _operationOwner.DisposeAsync().ConfigureAwait(false);
+                }
+                catch when (!cleaned)
+                {
+                    // Preserve a primary cleanup failure after releasing the lease.
+                }
+            }
         }
     }
 

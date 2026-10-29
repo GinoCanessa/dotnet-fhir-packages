@@ -335,6 +335,43 @@ public sealed class BorrowedFileReadStreamTests : IDisposable
         return path;
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BorrowedMetadata_UsesRetainedHandleAndMatchingWaits(bool asynchronous)
+    {
+        string path = CreateFile("0123456789"u8.ToArray());
+        using FileStream caller = new(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        caller.Position = 3;
+        ScriptedFileSystemPrimitives files = SystemFiles();
+        using BorrowedFileReadStream borrowed = (BorrowedFileReadStream)files.CreateContext(retries: 1).ProtectRead(caller);
+        files.Enqueue("GetPosition", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "borrowed position", path));
+        files.Enqueue("GetHandleLength", ScriptedFileSystemPrimitives.NativeFailure<long>(1117, "borrowed length", path));
+
+        long position = asynchronous
+            ? await borrowed.GetPositionAsync(TestContext.Current.CancellationToken)
+            : borrowed.Position;
+        long length = asynchronous
+            ? await borrowed.GetLengthAsync(TestContext.Current.CancellationToken)
+            : borrowed.Length;
+        borrowed.Dispose();
+
+        position.ShouldBe(3);
+        length.ShouldBe(10);
+        caller.Position.ShouldBe(3);
+        caller.CanRead.ShouldBeTrue();
+        caller.CanWrite.ShouldBeTrue();
+        files.Count("PrepareBorrowedRead").ShouldBe(1);
+        files.Count("GetPosition").ShouldBe(2);
+        files.Count("GetHandleLength").ShouldBe(2);
+        files.Calls.Where(call => call.Operation == "GetHandleLength")
+            .Select(call => call.Handle).Distinct().Count().ShouldBe(1);
+        files.Count("SetPosition").ShouldBe(0);
+        files.Count("CloseFile").ShouldBe(0);
+        (asynchronous ? files.AsyncWaits : files.Waits).ShouldBe([10, 10]);
+        (asynchronous ? files.Waits : files.AsyncWaits).ShouldBeEmpty();
+    }
+
     private static ScriptedFileSystemPrimitives SystemFiles()
     {
         ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(SystemFileSystemPrimitives.Instance.Platform);
