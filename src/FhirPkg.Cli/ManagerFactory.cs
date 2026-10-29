@@ -10,7 +10,7 @@ namespace FhirPkg.Cli;
 internal static class ManagerFactory
 {
     /// <summary>
-    /// Optional override for the factory function. When set, <see cref="Create"/> delegates
+    /// Optional override for the factory function. When set, the factory delegates
     /// to this function instead of calling the <see cref="FhirPackageManager"/> constructor directly.
     /// Set to <c>null</c> to restore the default behaviour.
     /// </summary>
@@ -23,4 +23,12 @@ internal static class ManagerFactory
     /// <returns>A configured <see cref="FhirPackageManager"/> instance.</returns>
     public static FhirPackageManager Create(FhirPackageManagerOptions options) =>
         FactoryOverride?.Invoke(options) ?? new FhirPackageManager(options);
+
+    /// <summary>
+    /// Constructs the manager without resolving the invocation's policy again.
+    /// Test overrides receive a separate populated options snapshot.
+    /// </summary>
+    public static FhirPackageManager Create(CliInvocationContext invocation) =>
+        FactoryOverride?.Invoke(invocation.CreateManagerOptions())
+        ?? FhirPackageManager.CreateResolved(invocation.Configuration);
 }

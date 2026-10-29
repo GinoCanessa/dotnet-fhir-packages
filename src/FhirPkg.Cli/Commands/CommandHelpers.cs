@@ -1,6 +1,8 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using FhirPkg.Cli.Formatting;
+using FhirPkg.Installation;
+using FhirPkg.IO;
 
 namespace FhirPkg.Cli.Commands;
 
@@ -22,5 +24,14 @@ internal static class CommandHelpers
             JsonOutput.WriteError(message);
         else
             ConsoleOutput.WriteError(message);
+    }
+
+    /// <summary>Reports policy validation consistently across all command handlers.</summary>
+    public static int WriteException(GlobalOptions opts, Exception exception)
+    {
+        WriteErrorOutput(opts, FileSystemFailureContext.FormatMessage(exception));
+        return exception is PackageInstallException { ErrorCode: PackageInstallErrorCode.InvalidPolicy }
+            ? ExitCodes.InvalidArgs
+            : ExitCodes.GeneralError;
     }
 }

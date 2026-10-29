@@ -112,24 +112,26 @@ internal static class InstallCommand
 
             try
             {
-                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
-
-                if (registry is not null)
-                {
-                    mgrOptions.Registries.Insert(0, new RegistryEndpoint
+                CliInvocationContext invocation = await CliInvocationContext.CreateAsync(
+                    globalOpts, ct, mgrOptions =>
                     {
-                        Url = registry,
-                        Type = RegistryType.FhirNpm,
-                        AuthHeaderValue = auth
+                        if (registry is not null)
+                        {
+                            mgrOptions.Registries.Insert(0, new RegistryEndpoint
+                            {
+                                Url = registry,
+                                Type = RegistryType.FhirNpm,
+                                AuthHeaderValue = auth
+                            });
+                        }
+
+                        if (noCi)
+                        {
+                            mgrOptions.IncludeCiBuilds = false;
+                        }
                     });
-                }
 
-                if (noCi)
-                {
-                    mgrOptions.IncludeCiBuilds = false;
-                }
-
-                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManager manager = ManagerFactory.Create(invocation);
 
                 InstallOptions installOptions = new InstallOptions
                 {
@@ -197,8 +199,7 @@ internal static class InstallCommand
             }
             catch (Exception ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
-                return ExitCodes.GeneralError;
+                return CommandHelpers.WriteException(globalOpts, ex);
             }
         });
 
@@ -215,6 +216,12 @@ internal static class InstallCommand
             .ToArray();
         if (failures.Length == 0)
             return ExitCodes.Success;
+
+        if (failures.Any(result =>
+            result.ErrorCode == PackageInstallErrorCode.InvalidPolicy))
+        {
+            return ExitCodes.InvalidArgs;
+        }
 
         if (failures.Any(result =>
             result.ErrorCode == PackageInstallErrorCode.ChecksumMismatch))

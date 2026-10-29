@@ -85,8 +85,8 @@ internal static class RestoreCommand
                     preferredFhirRelease = release;
                 }
 
-                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
-                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
+                CliInvocationContext invocation = await CliInvocationContext.CreateAsync(globalOpts, ct);
+                FhirPackageManager manager = ManagerFactory.Create(invocation);
 
                 RestoreOptions restoreOptions = new RestoreOptions
                 {
@@ -98,7 +98,8 @@ internal static class RestoreCommand
 
                 if (globalOpts.Verbose)
                 {
-                    ConsoleOutput.WriteVerbose($"Restoring from: {Path.GetFullPath(projectPath)}");
+                    string fullProjectPath = await invocation.FileSystemContext.FileSystem.GetFullPathAsync(projectPath, ct);
+                    ConsoleOutput.WriteVerbose($"Restoring from: {fullProjectPath}");
                     ConsoleOutput.WriteVerbose($"Conflict strategy: {conflictStrategy}");
                 }
 
@@ -144,8 +145,7 @@ internal static class RestoreCommand
             }
             catch (Exception ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
-                return ExitCodes.GeneralError;
+                return CommandHelpers.WriteException(globalOpts, ex);
             }
         });
 

@@ -44,6 +44,8 @@ internal static class RemoveCommand
 
             try
             {
+                CliInvocationContext invocation = await CliInvocationContext.CreateAsync(globalOpts, ct);
+
                 if (!force && !globalOpts.Quiet && !globalOpts.Json)
                 {
                     string packageList = string.Join(", ", packages);
@@ -54,8 +56,7 @@ internal static class RemoveCommand
                     }
                 }
 
-                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
-                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManager manager = ManagerFactory.Create(invocation);
 
                 int removedCount = 0;
                 int failedCount = 0;
@@ -109,8 +110,7 @@ internal static class RemoveCommand
             }
             catch (Exception ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
-                return ExitCodes.GeneralError;
+                return CommandHelpers.WriteException(globalOpts, ex);
             }
         });
 

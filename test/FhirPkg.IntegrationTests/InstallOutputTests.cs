@@ -4,6 +4,7 @@ using System.Text.Json;
 using FhirPkg.Cli;
 using FhirPkg.Cli.Commands;
 using FhirPkg.Cli.Formatting;
+using FhirPkg.Installation;
 using FhirPkg.Models;
 using Shouldly;
 using Spectre.Console;
@@ -191,6 +192,20 @@ public sealed class InstallOutputTests
 
         InstallCommand.GetExitCode([result])
             .ShouldBe(ExitCodes.Success);
+    }
+
+    [Fact]
+    public void InstallCommand_InvalidPolicyResultMapsToInvalidArgs()
+    {
+        PackageInstallResult result = new()
+        {
+            Directive = "invalid.package#1.0.0",
+            Status = PackageInstallStatus.Failed,
+            ErrorCode = PackageInstallErrorCode.InvalidPolicy,
+            ErrorStage = PackageInstallStage.PolicyValidation,
+        };
+
+        InstallCommand.GetExitCode([result]).ShouldBe(ExitCodes.InvalidArgs);
     }
 
     private static PackageInstallResult CreateInstallResult(

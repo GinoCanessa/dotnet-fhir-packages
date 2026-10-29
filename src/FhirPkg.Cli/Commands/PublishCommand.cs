@@ -46,7 +46,7 @@ internal static class PublishCommand
 
         command.SetAction(async (parseResult, ct) =>
         {
-            string? tarball = parseResult.GetValue(tarballArg);
+            string tarball = parseResult.GetValue(tarballArg)!;
             string registry = parseResult.GetValue(registryOption)!;
             string auth = parseResult.GetValue(authOption)!;
 
@@ -54,14 +54,14 @@ internal static class PublishCommand
 
             try
             {
-                if (!File.Exists(tarball))
+                CliInvocationContext invocation = await CliInvocationContext.CreateAsync(globalOpts, ct);
+                if (!await invocation.FileExistsAsync(tarball, ct))
                 {
                     CommandHelpers.WriteErrorOutput(globalOpts, $"Tarball not found: {tarball}");
                     return ExitCodes.NotFound;
                 }
 
-                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
-                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManager manager = ManagerFactory.Create(invocation);
 
                 RegistryEndpoint endpoint = new RegistryEndpoint
                 {
@@ -117,8 +117,7 @@ internal static class PublishCommand
             }
             catch (Exception ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
-                return ExitCodes.GeneralError;
+                return CommandHelpers.WriteException(globalOpts, ex);
             }
         });
 

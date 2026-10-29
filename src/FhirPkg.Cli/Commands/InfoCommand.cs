@@ -51,8 +51,8 @@ internal static class InfoCommand
 
             try
             {
-                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
-                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
+                CliInvocationContext invocation = await CliInvocationContext.CreateAsync(globalOpts, ct);
+                FhirPackageManager manager = ManagerFactory.Create(invocation);
 
                 if (globalOpts.Verbose)
                 {
@@ -116,8 +116,7 @@ internal static class InfoCommand
             }
             catch (Exception ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
-                return ExitCodes.GeneralError;
+                return CommandHelpers.WriteException(globalOpts, ex);
             }
         });
 

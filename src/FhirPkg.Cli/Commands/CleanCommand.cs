@@ -64,9 +64,9 @@ internal static class CleanCommand
 
             try
             {
-                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
+                CliInvocationContext invocation = await CliInvocationContext.CreateAsync(globalOpts, ct);
                 using FhirPackageManager manager =
-                    ManagerFactory.Create(mgrOptions);
+                    ManagerFactory.Create(invocation);
 
                 // Build a description of what will be cleaned
                 string description = (ciOnly, olderThan) switch
@@ -144,8 +144,7 @@ internal static class CleanCommand
             }
             catch (Exception ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
-                return ExitCodes.GeneralError;
+                return CommandHelpers.WriteException(globalOpts, ex);
             }
         });
 
