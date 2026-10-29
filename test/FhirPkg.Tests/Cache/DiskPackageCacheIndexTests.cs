@@ -6,6 +6,7 @@ using System.Text.Json;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Tests.Support;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -55,6 +56,38 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
 
             return cases;
         }
+    }
+
+    [Fact]
+    public async Task InternalReadPort_ProtectsIndexLengthAndReadsWithItsContext()
+    {
+        Directory.CreateDirectory(_cacheRoot);
+        string path = Path.Combine(_cacheRoot, ".index.json");
+        byte[] content = """{"index-version":2,"files":[]}"""u8.ToArray();
+        File.WriteAllBytes(path, content);
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        FileSystemContext context = primitives.CreateContext();
+        SystemPackageCacheFileOperations operations = new SystemPackageCacheFileOperations(context);
+        await using Stream stream = await operations.OpenReadAsync(path, TestContext.Current.CancellationToken);
+        stream.ShouldBeOfType<PositionedFileStream>().Context.ShouldBeSameAs(context);
+        primitives.Enqueue("GetHandleLength", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "index length", path));
+        primitives.Enqueue<int>("ReadAtAsync", call =>
+        {
+            RandomAccess.Read(call.Handle!, call.Buffer.Span[..2], call.Offset!.Value).ShouldBe(2);
+            return ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "index read", path);
+        });
+
+        stream.Length.ShouldBe(content.Length);
+        byte[] result = new byte[content.Length];
+        (await stream.ReadAsync(result.AsMemory(), TestContext.Current.CancellationToken)).ShouldBe(content.Length);
+
+        result.ShouldBe(content);
+        primitives.Count("GetHandleLength").ShouldBe(2);
+        primitives.Count("ReadAtAsync").ShouldBe(2);
+        primitives.Count("PrepareBorrowedRead").ShouldBe(0);
+        primitives.Waits.ShouldBe([10]);
+        primitives.AsyncWaits.ShouldBe([10]);
     }
 
     [Theory]
@@ -985,14 +1018,26 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         public bool FileExists(string path) =>
             _inner.FileExists(path);
 
-        public FileStream OpenRead(string path)
+        public Stream OpenRead(string path)
         {
             ReadPaths.Enqueue(path);
             return _inner.OpenRead(path);
         }
 
+        public ValueTask<Stream> OpenReadAsync(string path, CancellationToken cancellationToken)
+        {
+            ReadPaths.Enqueue(path);
+            return _inner.OpenReadAsync(path, cancellationToken);
+        }
+
+        public ValueTask<string> GetFullPathAsync(string path, CancellationToken cancellationToken) =>
+            _inner.GetFullPathAsync(path, cancellationToken);
+
         public void CreateDirectory(string path) =>
             _inner.CreateDirectory(path);
+
+        public ValueTask CreateDirectoryAsync(string path, CancellationToken cancellationToken) =>
+            _inner.CreateDirectoryAsync(path, cancellationToken);
 
         public void MoveDirectory(
             string sourcePath,
@@ -1016,6 +1061,12 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             _inner.DeleteFile(path);
         }
 
+        public ValueTask DeleteFileAsync(string path, CancellationToken cancellationToken)
+        {
+            DeletedPaths.Enqueue(path);
+            return _inner.DeleteFileAsync(path, cancellationToken);
+        }
+
         public async ValueTask WriteFileAndFlushAsync(
             string path,
             ReadOnlyMemory<byte> content,
@@ -1029,21 +1080,28 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
                 .ConfigureAwait(false);
         }
 
-        public async ValueTask AtomicReplaceFileAsync(
+        public ValueTask AtomicReplaceFileAsync(
             string sourcePath,
             string destinationPath,
+            CancellationToken cancellationToken) =>
+            AtomicReplaceFileAsync(new DurableFileReplacement(sourcePath, destinationPath), cancellationToken);
+
+        public async ValueTask AtomicReplaceFileAsync(
+            DurableFileReplacement replacement,
             CancellationToken cancellationToken)
         {
-            AtomicDestinations.Enqueue(destinationPath);
+            AtomicDestinations.Enqueue(replacement.DestinationPath);
             await _inner.AtomicReplaceFileAsync(
-                    sourcePath,
-                    destinationPath,
+                    replacement,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
 
         public void SynchronizeDirectory(string directoryPath) =>
             _inner.SynchronizeDirectory(directoryPath);
+
+        public ValueTask SynchronizeDirectoryAsync(string directoryPath, CancellationToken cancellationToken) =>
+            _inner.SynchronizeDirectoryAsync(directoryPath, cancellationToken);
 
         public PackageCacheArtifactKind GetArtifactKind(string path) =>
             _inner.GetArtifactKind(path);

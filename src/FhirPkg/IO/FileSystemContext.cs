@@ -25,6 +25,7 @@ internal sealed class FileSystemContext
         Primitives = primitives;
         Executor = executor;
         FileSystem = new ResilientFileSystem(this);
+        DurableFiles = new SystemDurableFileOperations(this);
     }
 
     internal FileSystemContext(
@@ -41,6 +42,7 @@ internal sealed class FileSystemContext
         Primitives = primitives;
         Executor = executor;
         FileSystem = new ResilientFileSystem(this);
+        DurableFiles = new SystemDurableFileOperations(this);
     }
 
     internal FileSystemRetryPolicy Policy { get; }
@@ -52,6 +54,22 @@ internal sealed class FileSystemContext
     internal FileSystemRetryExecutor Executor { get; }
 
     internal ResilientFileSystem FileSystem { get; }
+
+    internal IDurableFileOperations DurableFiles { get; }
+
+    internal Stream ProtectRead(Stream stream) => ProtectRead(stream, this);
+
+    internal static Stream ProtectRead(Stream stream, FileSystemContext? context)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (stream is PositionedFileStream or BorrowedFileReadStream
+            || !BorrowedFileReadStream.CanBorrow(stream))
+        {
+            return stream;
+        }
+
+        return new BorrowedFileReadStream(context ?? CreateDefault(), (FileStream)stream);
+    }
 
     internal FileSystemRetryOptions ToOptionsSnapshot() => Policy.ToOptionsSnapshot();
 

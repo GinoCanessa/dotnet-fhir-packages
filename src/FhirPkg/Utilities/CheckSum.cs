@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Security.Cryptography;
+using FhirPkg.IO;
 
 namespace FhirPkg.Utilities;
 
@@ -32,7 +33,18 @@ public static class CheckSum
     public static string ComputeSha1(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
+        return ComputeSha1Core(FileSystemContext.ProtectRead(stream, context: null));
+    }
 
+    internal static string ComputeSha1(Stream stream, FileSystemContext context)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentNullException.ThrowIfNull(context);
+        return ComputeSha1Core(context.ProtectRead(stream));
+    }
+
+    private static string ComputeSha1Core(Stream stream)
+    {
         byte[] hash = SHA1.HashData(stream);
 #if NET9_0_OR_GREATER
         return Convert.ToHexStringLower(hash);
@@ -69,7 +81,18 @@ public static class CheckSum
     public static string ComputeSha256(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
+        return ComputeSha256Core(FileSystemContext.ProtectRead(stream, context: null));
+    }
 
+    internal static string ComputeSha256(Stream stream, FileSystemContext context)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentNullException.ThrowIfNull(context);
+        return ComputeSha256Core(context.ProtectRead(stream));
+    }
+
+    private static string ComputeSha256Core(Stream stream)
+    {
         byte[] hash = SHA256.HashData(stream);
 #if NET9_0_OR_GREATER
         return Convert.ToHexStringLower(hash);
@@ -109,20 +132,14 @@ public static class CheckSum
     /// </param>
     /// <returns><c>true</c> if the hash matches or verification was skipped; <c>false</c> otherwise.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="stream"/> is <c>null</c>.</exception>
-    public static bool Verify(Stream stream, string? expectedHash, bool resetPosition = true)
+    public static bool Verify(Stream stream, string? expectedHash, bool resetPosition = true) =>
+        VerifyCore(stream, expectedHash, resetPosition, sha256: false, context: null);
+
+    internal static bool Verify(
+        Stream stream, string? expectedHash, bool resetPosition, FileSystemContext context)
     {
-        ArgumentNullException.ThrowIfNull(stream);
-
-        if (string.IsNullOrWhiteSpace(expectedHash))
-            return true;
-
-        long originalPosition = stream.CanSeek ? stream.Position : -1;
-        string actualHash = ComputeSha1(stream);
-
-        if (resetPosition && stream.CanSeek)
-            stream.Position = originalPosition;
-
-        return string.Equals(actualHash, expectedHash.Trim(), StringComparison.OrdinalIgnoreCase);
+        ArgumentNullException.ThrowIfNull(context);
+        return VerifyCore(stream, expectedHash, resetPosition, sha256: false, context);
     }
 
     /// <summary>
@@ -138,15 +155,27 @@ public static class CheckSum
     /// </param>
     /// <returns><c>true</c> if the hash matches or verification was skipped; <c>false</c> otherwise.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="stream"/> is <c>null</c>.</exception>
-    public static bool VerifySha256(Stream stream, string? expectedHash, bool resetPosition = true)
+    public static bool VerifySha256(Stream stream, string? expectedHash, bool resetPosition = true) =>
+        VerifyCore(stream, expectedHash, resetPosition, sha256: true, context: null);
+
+    internal static bool VerifySha256(
+        Stream stream, string? expectedHash, bool resetPosition, FileSystemContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return VerifyCore(stream, expectedHash, resetPosition, sha256: true, context);
+    }
+
+    private static bool VerifyCore(
+        Stream stream, string? expectedHash, bool resetPosition, bool sha256, FileSystemContext? context)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
         if (string.IsNullOrWhiteSpace(expectedHash))
             return true;
 
+        stream = FileSystemContext.ProtectRead(stream, context);
         long originalPosition = stream.CanSeek ? stream.Position : -1;
-        string actualHash = ComputeSha256(stream);
+        string actualHash = sha256 ? ComputeSha256Core(stream) : ComputeSha1Core(stream);
 
         if (resetPosition && stream.CanSeek)
             stream.Position = originalPosition;

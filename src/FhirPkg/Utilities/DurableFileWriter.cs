@@ -1,27 +1,8 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using FhirPkg.IO;
+
 namespace FhirPkg.Utilities;
-
-internal interface IDurableFileOperations
-{
-    bool FileExists(string path);
-
-    void CreateDirectory(string path);
-
-    void DeleteFile(string path);
-
-    ValueTask WriteFileAndFlushAsync(
-        string path,
-        ReadOnlyMemory<byte> content,
-        CancellationToken cancellationToken);
-
-    ValueTask AtomicReplaceFileAsync(
-        string sourcePath,
-        string destinationPath,
-        CancellationToken cancellationToken);
-
-    void SynchronizeDirectory(string directoryPath);
-}
 
 internal static class DurableFileWriter
 {
@@ -35,16 +16,20 @@ internal static class DurableFileWriter
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         ArgumentNullException.ThrowIfNull(fileOperations);
 
-        string fullDestinationPath =
-            Path.GetFullPath(destinationPath);
+        string fullDestinationPath = await fileOperations.GetFullPathAsync(
+                destinationPath, cancellationToken)
+            .ConfigureAwait(false);
         string directoryPath =
             Path.GetDirectoryName(fullDestinationPath)
             ?? throw new IOException(
                 "The durable file destination has no parent directory.");
-        fileOperations.CreateDirectory(directoryPath);
+        await fileOperations.CreateDirectoryAsync(directoryPath, cancellationToken)
+            .ConfigureAwait(false);
         string tempPath = Path.Combine(
             directoryPath,
             $".{Path.GetFileName(fullDestinationPath)}.{Guid.NewGuid():N}.tmp");
+        DurableFileReplacement replacement = new DurableFileReplacement(tempPath, fullDestinationPath);
+        bool ownsTemp = false;
         try
         {
             await fileOperations.WriteFileAndFlushAsync(
@@ -52,6 +37,7 @@ internal static class DurableFileWriter
                     content,
                     cancellationToken)
                 .ConfigureAwait(false);
+            ownsTemp = true;
             cancellationToken.ThrowIfCancellationRequested();
             if (beforeCommit is not null)
             {
@@ -61,24 +47,24 @@ internal static class DurableFileWriter
             }
 
             await fileOperations.AtomicReplaceFileAsync(
-                    tempPath,
-                    fullDestinationPath,
+                    replacement,
                     cancellationToken)
                 .ConfigureAwait(false);
-            fileOperations.SynchronizeDirectory(directoryPath);
         }
         finally
         {
             try
             {
-                if (fileOperations.FileExists(tempPath))
-                    fileOperations.DeleteFile(tempPath);
+                // A failed create-new never transfers ownership to this writer.
+                // After promotion (or an ambiguous mutation), the old pathname
+                // is not evidence of ownership and must not be deleted.
+                if (ownsTemp && replacement.CanCleanSource)
+                {
+                    await fileOperations.DeleteFileAsync(tempPath, CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
             }
-            catch (UnauthorizedAccessException)
-            {
-                // Temporary cleanup must not replace the durable write outcome.
-            }
-            catch (IOException)
+            catch
             {
                 // Temporary cleanup must not replace the durable write outcome.
             }

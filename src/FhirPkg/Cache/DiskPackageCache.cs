@@ -1859,7 +1859,7 @@ public class DiskPackageCache :
             IndexFileName);
         try
         {
-            await using FileStream stream =
+            await using Stream stream =
                 _fileOperations.OpenRead(indexPath);
             if (stream.Length > _installLimits.MaxEntryBytes)
             {

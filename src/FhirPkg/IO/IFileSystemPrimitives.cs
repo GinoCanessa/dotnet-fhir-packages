@@ -1,5 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using Microsoft.Win32.SafeHandles;
+
 namespace FhirPkg.IO;
 
 /// <summary>
@@ -39,6 +41,53 @@ internal interface IFileSystemPrimitives
         FileShare share,
         int bufferSize,
         FileOptions options);
+
+    FileSystemReplayOutcome<SafeFileHandle> OpenFileHandle(
+        string path,
+        FileMode mode,
+        FileAccess access,
+        FileShare share,
+        FileOptions options);
+
+    FileSystemReplayOutcome<int> OpenOwnedDescriptor(
+        string path,
+        FileMode mode,
+        FileAccess access,
+        FileShare share,
+        FileOptions options);
+
+    FileSystemReplayOutcome<bool> ConfigureFileSharing(SafeFileHandle handle, FileShare share, string path);
+
+    FileSystemReplayOutcome<bool> AdviseFileAccess(SafeFileHandle handle, FileOptions options, string path);
+
+    FileSystemReplayOutcome<int> ReadAt(SafeFileHandle handle, Memory<byte> buffer, long offset, string path);
+
+    ValueTask<FileSystemReplayOutcome<int>> ReadAtAsync(
+        SafeFileHandle handle, Memory<byte> buffer, long offset, string path, CancellationToken cancellationToken);
+
+    FileSystemReplayOutcome<bool> WriteAt(SafeFileHandle handle, ReadOnlyMemory<byte> buffer, long offset, string path);
+
+    ValueTask<FileSystemReplayOutcome<bool>> WriteAtAsync(
+        SafeFileHandle handle, ReadOnlyMemory<byte> buffer, long offset, string path, CancellationToken cancellationToken);
+
+    FileSystemReplayOutcome<long> GetLength(SafeFileHandle handle, string path);
+
+    FileSystemReplayOutcome<bool> SetLength(SafeFileHandle handle, long length, string path);
+
+    FileSystemReplayOutcome<bool> FlushFile(SafeFileHandle handle, string path);
+
+    FileSystemReplayOutcome<bool> CloseFile(SafeFileHandle handle, string path);
+
+    FileSystemReplayOutcome<BorrowedFileReadState> PrepareBorrowedRead(FileStream stream);
+
+    FileSystemReplayOutcome<long> GetPosition(FileStream stream);
+
+    FileSystemReplayOutcome<long> SetPosition(FileStream stream, long position);
+
+    FileSystemReplayOutcome<int> ReadBorrowed(FileStream stream, Memory<byte> buffer);
+
+    ValueTask<FileSystemReplayOutcome<int>> ReadBorrowedAsync(
+        FileStream stream, Memory<byte> buffer, CancellationToken cancellationToken);
 
     FileSystemReplayOutcome<bool> CreateDirectory(string path);
 

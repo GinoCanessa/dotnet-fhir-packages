@@ -1,5 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using Microsoft.Win32.SafeHandles;
+
 namespace FhirPkg.IO;
 
 internal enum DurableFileOperationKind
@@ -24,6 +26,7 @@ internal sealed class DurableFileReplayOperation : FileSystemReplayOperation<boo
     private readonly FileSystemEntryKind _expectedKind;
     private readonly bool _recursive;
     private readonly bool _missingAllowed;
+    private readonly DurableFileReplacement? _replacement;
     private readonly List<DirectoryCreation> _creations = [];
     private readonly Stack<Deletion> _deletions = new Stack<Deletion>();
     private string? _fullPath;
@@ -45,7 +48,8 @@ internal sealed class DurableFileReplayOperation : FileSystemReplayOperation<boo
         string? destinationPath = null,
         FileSystemEntryKind expectedKind = FileSystemEntryKind.Missing,
         bool recursive = false,
-        bool missingAllowed = true) : base(context.Policy, "ResolvePath")
+        bool missingAllowed = true,
+        DurableFileReplacement? replacement = null) : base(context.Policy, "ResolvePath")
     {
         _primitives = context.Primitives;
         _kind = kind;
@@ -54,6 +58,7 @@ internal sealed class DurableFileReplayOperation : FileSystemReplayOperation<boo
         _expectedKind = expectedKind;
         _recursive = recursive;
         _missingAllowed = missingAllowed;
+        _replacement = replacement;
     }
 
     internal override FileSystemReplayOutcome<bool> ExecuteStep(CancellationToken cancellationToken)
@@ -195,10 +200,17 @@ internal sealed class DurableFileReplayOperation : FileSystemReplayOperation<boo
                 _fullPath!, _fullDestinationPath!, _kind == DurableFileOperationKind.Replace);
             if (moved.Kind != FileSystemReplayOutcomeKind.Completed)
             {
+                if (_replacement is not null
+                    && moved.PrimitiveFailure?.ReplaySafety == FileSystemReplaySafety.Unsafe)
+                {
+                    _replacement.OutcomeUncertain = true;
+                }
                 _destinationChecked = false;
                 return moved;
             }
             _mutationCompleted = true;
+            if (_replacement is not null)
+                _replacement.Promoted = true;
             return FileSystemReplayOutcome<bool>.Continue();
         }
 
@@ -370,6 +382,213 @@ internal sealed class DurableFileReplayOperation : FileSystemReplayOperation<boo
         internal string[] Children { get; set; } = [];
         internal int NextChild { get; set; }
         internal DirectorySynchronizationState? Synchronization { get; set; }
+    }
+}
+
+/// <summary>
+/// A successful create is retained before sharing, truncation or metadata work.
+/// A later failure never reopens that path or adopts a create-new collision.
+/// </summary>
+internal sealed class OwnedFileOpenReplayOperation : FileSystemReplayOperation<PositionedFileStream>
+{
+    private readonly FileSystemContext _context;
+    private readonly string _path;
+    private readonly FileMode _mode;
+    private readonly FileAccess _access;
+    private readonly FileShare _share;
+    private readonly FileOptions _options;
+    private string? _fullPath;
+    private SafeFileHandle? _handle;
+    private int? _descriptor;
+    private int? _duplicate;
+    private bool _sharingConfigured;
+    private bool _advised;
+    private bool _truncated;
+
+    internal OwnedFileOpenReplayOperation(
+        FileSystemContext context, string path, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+        : base(context.Policy, "ResolveOwnedFilePath")
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        if (!Enum.IsDefined(mode) || mode == FileMode.Append)
+            throw new ArgumentException("Positioned files require a non-append file mode.", nameof(mode));
+        if (access is not (FileAccess.Read or FileAccess.Write or FileAccess.ReadWrite))
+            throw new ArgumentOutOfRangeException(nameof(access));
+        if ((share & ~(FileShare.ReadWrite | FileShare.Delete | FileShare.Inheritable)) != 0)
+            throw new ArgumentOutOfRangeException(nameof(share));
+        if ((access & FileAccess.Write) != 0 && (share & ~FileShare.Inheritable) != FileShare.None)
+            throw new ArgumentException("Positioned writes require an exclusive file.", nameof(share));
+        if ((mode is FileMode.Create or FileMode.CreateNew or FileMode.Truncate) && access == FileAccess.Read)
+            throw new ArgumentException("This file mode requires write access.", nameof(access));
+        const FileOptions supportedOptions = FileOptions.Asynchronous | FileOptions.WriteThrough
+            | FileOptions.SequentialScan | FileOptions.RandomAccess | FileOptions.Encrypted;
+        if ((options & ~supportedOptions) != 0)
+            throw new ArgumentException("Positioned files use explicit ownership/cleanup, not delete-on-close.", nameof(options));
+
+        _context = context;
+        _path = path;
+        _mode = mode;
+        _access = access;
+        _share = share;
+        _options = options;
+        bool nativeUnixCreation = context.Primitives.Platform is FileSystemPlatform.Linux or FileSystemPlatform.MacOS
+            && mode is not (FileMode.Open or FileMode.Truncate);
+        _sharingConfigured = !nativeUnixCreation;
+        _advised = !nativeUnixCreation;
+        _truncated = mode is not (FileMode.Create or FileMode.Truncate);
+    }
+
+    internal string? CreatedPath { get; private set; }
+
+    internal override FileSystemReplayOutcome<PositionedFileStream> ExecuteStep(CancellationToken cancellationToken)
+    {
+        IFileSystemPrimitives primitives = _context.Primitives;
+        if (_fullPath is null)
+        {
+            FileSystemReplayOutcome<string> resolved = ResilientFileSystem.ResolvePathAttempt(primitives, _path);
+            if (resolved.Kind != FileSystemReplayOutcomeKind.Completed)
+                return ResilientFileSystem.Failure<string, PositionedFileStream>(resolved);
+            _fullPath = resolved.Value;
+        }
+
+        if (_handle is null)
+        {
+            SetPhase("OpenOwnedFile");
+            if (primitives.Platform == FileSystemPlatform.Windows || _mode is FileMode.Open or FileMode.Truncate)
+            {
+                FileSystemReplayOutcome<SafeFileHandle> opened = primitives.OpenFileHandle(
+                    _fullPath, _mode, _access, _share, _options);
+                if (opened.Kind != FileSystemReplayOutcomeKind.Completed)
+                    return ResilientFileSystem.Failure<SafeFileHandle, PositionedFileStream>(opened);
+                _handle = opened.Value;
+                if (_mode == FileMode.CreateNew)
+                    CreatedPath = _fullPath;
+                return FileSystemReplayOutcome<PositionedFileStream>.Continue();
+            }
+
+            if (!_descriptor.HasValue)
+            {
+                FileSystemReplayOutcome<int> opened = primitives.OpenOwnedDescriptor(
+                    _fullPath, _mode, _access, _share, _options);
+                if (opened.Kind != FileSystemReplayOutcomeKind.Completed)
+                    return ResilientFileSystem.Failure<int, PositionedFileStream>(opened);
+                _descriptor = opened.Value;
+                if (_mode == FileMode.CreateNew)
+                    CreatedPath = _fullPath;
+                return FileSystemReplayOutcome<PositionedFileStream>.Continue();
+            }
+
+            if (_descriptor == 0)
+            {
+                SetPhase("GuardOwnedZeroDescriptor");
+                if (!_duplicate.HasValue)
+                {
+                    int command = primitives.Platform == FileSystemPlatform.Linux
+                        ? NativeFileSystemPrimitives.LinuxDuplicateFileDescriptorCloseOnExec
+                        : NativeFileSystemPrimitives.DarwinDuplicateFileDescriptorCloseOnExec;
+                    FileSystemReplayOutcome<int> duplicated = primitives.DuplicateDescriptor(
+                        0, command, NativeFileSystemPrimitives.MinimumTransferDescriptor, _fullPath);
+                    if (duplicated.Kind != FileSystemReplayOutcomeKind.Completed)
+                        return ResilientFileSystem.Failure<int, PositionedFileStream>(duplicated);
+                    if (duplicated.Value != 0)
+                        _duplicate = duplicated.Value;
+                    if (duplicated.Value < NativeFileSystemPrimitives.MinimumTransferDescriptor)
+                        throw new IOException("The duplicated owned file descriptor was below the safe minimum.");
+                    return FileSystemReplayOutcome<PositionedFileStream>.Continue();
+                }
+
+                _descriptor = null;
+                FileSystemReplayOutcome<bool> closed = primitives.CloseDescriptor(0, _fullPath);
+                if (closed.Kind == FileSystemReplayOutcomeKind.PrimitiveFailure)
+                    closed.PrimitiveFailure!.ThrowTerminal(Phase, AttemptCount, RetriesUsed, FileSystemFailureTermination.Unsafe);
+                ResilientFileSystem.ValueOrThrow(closed);
+                _descriptor = _duplicate;
+                _duplicate = null;
+            }
+
+            int descriptor = _descriptor!.Value;
+            _descriptor = null;
+            _handle = ResilientFileSystem.TransferDescriptorOwnership<SafeFileHandle, SafeFileHandle>(
+                descriptor,
+                value => new SafeFileHandle(new IntPtr(value), ownsHandle: true),
+                handle => handle,
+                handle => primitives.CloseFile(handle, _fullPath),
+                value => ResilientFileSystem.ValueOrThrow(primitives.CloseDescriptor(value, _fullPath)) ? 0 : -1);
+            return FileSystemReplayOutcome<PositionedFileStream>.Continue();
+        }
+
+        if (!_sharingConfigured)
+        {
+            SetPhase("ConfigureOwnedFileSharing");
+            FileSystemReplayOutcome<bool> configured = primitives.ConfigureFileSharing(_handle, _share, _fullPath);
+            if (configured.Kind != FileSystemReplayOutcomeKind.Completed)
+                return ResilientFileSystem.Failure<bool, PositionedFileStream>(configured);
+            _sharingConfigured = true;
+            return FileSystemReplayOutcome<PositionedFileStream>.Continue();
+        }
+        if (!_advised)
+        {
+            SetPhase("AdviseOwnedFileAccess");
+            FileSystemReplayOutcome<bool> advised = primitives.AdviseFileAccess(_handle, _options, _fullPath);
+            if (advised.Kind != FileSystemReplayOutcomeKind.Completed)
+                return ResilientFileSystem.Failure<bool, PositionedFileStream>(advised);
+            _advised = true;
+            return FileSystemReplayOutcome<PositionedFileStream>.Continue();
+        }
+        if (!_truncated)
+        {
+            SetPhase("TruncateOwnedFile");
+            FileSystemReplayOutcome<bool> truncated = primitives.SetLength(_handle, 0, _fullPath);
+            if (truncated.Kind != FileSystemReplayOutcomeKind.Completed)
+                return ResilientFileSystem.Failure<bool, PositionedFileStream>(truncated);
+            _truncated = true;
+            return FileSystemReplayOutcome<PositionedFileStream>.Continue();
+        }
+
+        SetPhase("GetOwnedFileLength");
+        FileSystemReplayOutcome<long> length = primitives.GetLength(_handle, _fullPath);
+        if (length.Kind != FileSystemReplayOutcomeKind.Completed)
+            return ResilientFileSystem.Failure<long, PositionedFileStream>(length);
+        PositionedFileStream stream = new PositionedFileStream(_context, _handle, _fullPath, _access, length.Value);
+        _handle = null;
+        return FileSystemReplayOutcome<PositionedFileStream>.Complete(stream);
+    }
+
+    internal void ReleaseAfterFailure()
+    {
+        SafeFileHandle? handle = _handle;
+        int? descriptor = _descriptor;
+        int? duplicate = _duplicate;
+        _handle = null;
+        _descriptor = null;
+        _duplicate = null;
+        if (handle is not null)
+        {
+            try
+            {
+                _context.Primitives.CloseFile(handle, _fullPath!);
+            }
+            catch
+            {
+                // Preserve the primary failure, never repeat release.
+            }
+        }
+        if (descriptor.HasValue)
+            ReleaseDescriptor(descriptor.Value);
+        if (duplicate.HasValue)
+            ReleaseDescriptor(duplicate.Value);
+    }
+
+    private void ReleaseDescriptor(int descriptor)
+    {
+        try
+        {
+            _context.Primitives.CloseDescriptor(descriptor, _fullPath);
+        }
+        catch
+        {
+            // Preserve the primary failure, never repeat release.
+        }
     }
 }
 

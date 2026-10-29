@@ -1,7 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using FhirPkg.IO;
-using FhirPkg.Utilities;
 
 namespace FhirPkg.Cache;
 
@@ -10,7 +9,9 @@ internal interface IPackageCacheFileOperations :
 {
     bool DirectoryExists(string path);
 
-    FileStream OpenRead(string path);
+    Stream OpenRead(string path);
+
+    ValueTask<Stream> OpenReadAsync(string path, CancellationToken cancellationToken);
 
     void MoveDirectory(string sourcePath, string destinationPath);
 
@@ -37,8 +38,6 @@ internal interface IPackageCacheFileOperations :
 internal sealed class SystemPackageCacheFileOperations :
     IPackageCacheFileOperations
 {
-    private const int BufferSize = 16_384;
-
     // Retain the process-host access shape, without process-global configuration.
     internal static SystemPackageCacheFileOperations Instance =>
         new SystemPackageCacheFileOperations(FileSystemContext.CreateDefault());
@@ -56,14 +55,22 @@ internal sealed class SystemPackageCacheFileOperations :
             or FileSystemEntryKind.DirectorySymbolicLink;
 
     public bool FileExists(string path) =>
-        Context.FileSystem.ProbeFollowing(path).Kind is FileSystemEntryKind.File
-            or FileSystemEntryKind.Other or FileSystemEntryKind.SymbolicLink;
+        Context.DurableFiles.FileExists(path);
 
-    public FileStream OpenRead(string path) =>
-        Context.FileSystem.OpenRegularRead(path);
+    public Stream OpenRead(string path) =>
+        Context.FileSystem.OpenProtectedRegularRead(path);
+
+    public ValueTask<Stream> OpenReadAsync(string path, CancellationToken cancellationToken) =>
+        Context.FileSystem.OpenProtectedRegularReadAsync(path, cancellationToken);
+
+    public ValueTask<string> GetFullPathAsync(string path, CancellationToken cancellationToken) =>
+        Context.DurableFiles.GetFullPathAsync(path, cancellationToken);
 
     public void CreateDirectory(string path) =>
-        Context.FileSystem.CreateDirectory(path);
+        Context.DurableFiles.CreateDirectory(path);
+
+    public ValueTask CreateDirectoryAsync(string path, CancellationToken cancellationToken) =>
+        Context.DurableFiles.CreateDirectoryAsync(path, cancellationToken);
 
     public void MoveDirectory(string sourcePath, string destinationPath) =>
         Context.FileSystem.MovePath(sourcePath, destinationPath);
@@ -75,37 +82,31 @@ internal sealed class SystemPackageCacheFileOperations :
         Context.FileSystem.DeleteDirectory(path, recursive);
 
     public void DeleteFile(string path) =>
-        Context.FileSystem.DeleteFile(path);
+        Context.DurableFiles.DeleteFile(path);
 
-    public async ValueTask WriteFileAndFlushAsync(
+    public ValueTask DeleteFileAsync(string path, CancellationToken cancellationToken) =>
+        Context.DurableFiles.DeleteFileAsync(path, cancellationToken);
+
+    public ValueTask WriteFileAndFlushAsync(
         string path,
         ReadOnlyMemory<byte> content,
-        CancellationToken cancellationToken)
-    {
-        // Stream-block replay and explicit live-handle flush move in Phase 3.
-        // A create-new constructor failure is not reconciled from path existence.
-        await using FileStream stream = await Context.FileSystem.OpenFileAsync(
-                path,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                BufferSize,
-                FileOptions.Asynchronous | FileOptions.WriteThrough,
-                cancellationToken)
-            .ConfigureAwait(false);
-        await stream.WriteAsync(content, cancellationToken).ConfigureAwait(false);
-        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        stream.Flush(flushToDisk: true);
-    }
+        CancellationToken cancellationToken) =>
+        Context.DurableFiles.WriteFileAndFlushAsync(path, content, cancellationToken);
 
     public ValueTask AtomicReplaceFileAsync(
         string sourcePath,
         string destinationPath,
         CancellationToken cancellationToken) =>
-        Context.FileSystem.ReplaceFileAsync(sourcePath, destinationPath, cancellationToken);
+        Context.DurableFiles.AtomicReplaceFileAsync(sourcePath, destinationPath, cancellationToken);
+
+    public ValueTask AtomicReplaceFileAsync(DurableFileReplacement replacement, CancellationToken cancellationToken) =>
+        Context.DurableFiles.AtomicReplaceFileAsync(replacement, cancellationToken);
 
     public void SynchronizeDirectory(string directoryPath) =>
-        Context.FileSystem.SynchronizeDirectory(directoryPath);
+        Context.DurableFiles.SynchronizeDirectory(directoryPath);
+
+    public ValueTask SynchronizeDirectoryAsync(string directoryPath, CancellationToken cancellationToken) =>
+        Context.DurableFiles.SynchronizeDirectoryAsync(directoryPath, cancellationToken);
 
     public PackageCacheArtifactKind GetArtifactKind(string path) =>
         Context.FileSystem.Probe(path).Kind switch

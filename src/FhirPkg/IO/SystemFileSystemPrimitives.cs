@@ -1,5 +1,9 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
 namespace FhirPkg.IO;
 
 internal sealed class SystemFileSystemPrimitives : IFileSystemPrimitives
@@ -170,6 +174,291 @@ internal sealed class SystemFileSystemPrimitives : IFileSystemPrimitives
     public FileSystemReplayOutcome<bool> CreateDirectory(string path) =>
         NativeFileSystemPrimitives.CreateDirectory(path);
 
+    public FileSystemReplayOutcome<SafeFileHandle> OpenFileHandle(
+        string path,
+        FileMode mode,
+        FileAccess access,
+        FileShare share,
+        FileOptions options)
+    {
+        if (mode is FileMode.Open or FileMode.Truncate)
+        {
+            try
+            {
+                // Truncation is a later, same-handle phase, not a constructor side effect.
+                return FileSystemReplayOutcome<SafeFileHandle>.Complete(
+                    File.OpenHandle(path, FileMode.Open, access, share, options));
+            }
+            catch (Exception exception) when (IsPhysicalFailure(exception))
+            {
+                return Failed<SafeFileHandle>(exception, "OpenFileHandle", path);
+            }
+        }
+
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Unix owned creation uses a retained descriptor.");
+
+        uint desiredAccess = (access.HasFlag(FileAccess.Read) ? 0x80000000U : 0)
+            | (access.HasFlag(FileAccess.Write) ? 0x40000000U : 0);
+        uint disposition = mode == FileMode.CreateNew ? 1U : 4U;
+        uint flags = unchecked((uint)options) | 0x80U | 0x00100000U;
+        FileSecurityAttributes security = new FileSecurityAttributes
+        {
+            Length = Marshal.SizeOf<FileSecurityAttributes>(),
+            SecurityDescriptor = IntPtr.Zero,
+            InheritHandle = (share & FileShare.Inheritable) != 0,
+        };
+        SafeFileHandle handle = CreateFile(
+            NativeFileSystemPrimitives.ToWindowsExtendedPath(path),
+            desiredAccess,
+            (uint)(share & ~FileShare.Inheritable),
+            ref security,
+            disposition,
+            flags,
+            IntPtr.Zero);
+        int error = Marshal.GetLastPInvokeError();
+        if (!handle.IsInvalid)
+            return FileSystemReplayOutcome<SafeFileHandle>.Complete(handle);
+
+        handle.Dispose();
+        return OwnedOpenFailure<SafeFileHandle>(path, mode, error, flags);
+    }
+
+    public FileSystemReplayOutcome<int> OpenOwnedDescriptor(
+        string path,
+        FileMode mode,
+        FileAccess access,
+        FileShare share,
+        FileOptions options)
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            throw new PlatformNotSupportedException("Owned descriptors require Linux or macOS.");
+
+        bool linux = OperatingSystem.IsLinux();
+        int flags = access == FileAccess.Read ? 0 : access == FileAccess.Write ? 1 : 2;
+        if (mode is FileMode.Create or FileMode.CreateNew or FileMode.OpenOrCreate)
+            flags |= linux ? 0x40 : 0x200;
+        if (mode == FileMode.CreateNew)
+            flags |= linux ? 0x80 : 0x800;
+        if ((share & FileShare.Inheritable) == 0)
+            flags |= linux ? 0x80000 : 0x01000000;
+        if ((options & FileOptions.WriteThrough) != 0)
+            flags |= linux ? 0x101000 : 0x80;
+
+        int descriptor = OpenOwned(path, flags, 0x1B6);
+        int error = Marshal.GetLastPInvokeError();
+        return descriptor >= 0
+            ? FileSystemReplayOutcome<int>.Complete(descriptor)
+            : OwnedOpenFailure<int>(path, mode, error, flags);
+    }
+
+    public FileSystemReplayOutcome<bool> ConfigureFileSharing(SafeFileHandle handle, FileShare share, string path)
+    {
+        int flags = (share & ~FileShare.Inheritable) == FileShare.None ? 2 | 4 : 1 | 4;
+        int result = LockOwned(handle, flags);
+        int error = Marshal.GetLastPInvokeError();
+        return result == 0
+            ? FileSystemReplayOutcome<bool>.Complete(true)
+            : NativeHandleFailure<bool>(error, "flock(owned file)", path, flags);
+    }
+
+    public FileSystemReplayOutcome<bool> AdviseFileAccess(SafeFileHandle handle, FileOptions options, string path)
+    {
+        if ((options & (FileOptions.RandomAccess | FileOptions.SequentialScan)) == 0)
+            return FileSystemReplayOutcome<bool>.Complete(true);
+
+        bool random = (options & FileOptions.RandomAccess) != 0;
+        if (OperatingSystem.IsLinux())
+        {
+            int advice = random ? 1 : 2;
+            int error = AdviseOwned(handle, 0, 0, advice);
+            return error == 0
+                ? FileSystemReplayOutcome<bool>.Complete(true)
+                : NativeHandleFailure<bool>(error, "posix_fadvise", path, advice);
+        }
+
+        int result = SetReadAhead(handle, 45, random ? 0 : 1);
+        int nativeError = Marshal.GetLastPInvokeError();
+        return result == 0
+            ? FileSystemReplayOutcome<bool>.Complete(true)
+            : NativeHandleFailure<bool>(nativeError, "fcntl(F_RDAHEAD)", path, 45);
+    }
+
+    public FileSystemReplayOutcome<int> ReadAt(
+        SafeFileHandle handle, Memory<byte> buffer, long offset, string path)
+    {
+        try
+        {
+            return FileSystemReplayOutcome<int>.Complete(RandomAccess.Read(handle, buffer.Span, offset));
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<int>(exception, "RandomAccess.Read", path);
+        }
+    }
+
+    public async ValueTask<FileSystemReplayOutcome<int>> ReadAtAsync(
+        SafeFileHandle handle, Memory<byte> buffer, long offset, string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return FileSystemReplayOutcome<int>.Complete(
+                await RandomAccess.ReadAsync(handle, buffer, offset, cancellationToken).ConfigureAwait(false));
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<int>(exception, "RandomAccess.ReadAsync", path);
+        }
+    }
+
+    public FileSystemReplayOutcome<bool> WriteAt(
+        SafeFileHandle handle, ReadOnlyMemory<byte> buffer, long offset, string path)
+    {
+        try
+        {
+            RandomAccess.Write(handle, buffer.Span, offset);
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            // The owner retains these bytes and an exclusive, non-append handle.
+            return Failed<bool>(exception, "RandomAccess.Write", path);
+        }
+    }
+
+    public async ValueTask<FileSystemReplayOutcome<bool>> WriteAtAsync(
+        SafeFileHandle handle, ReadOnlyMemory<byte> buffer, long offset, string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RandomAccess.WriteAsync(handle, buffer, offset, cancellationToken).ConfigureAwait(false);
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<bool>(exception, "RandomAccess.WriteAsync", path);
+        }
+    }
+
+    public FileSystemReplayOutcome<long> GetLength(SafeFileHandle handle, string path)
+    {
+        try
+        {
+            return FileSystemReplayOutcome<long>.Complete(RandomAccess.GetLength(handle));
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<long>(exception, "RandomAccess.GetLength", path);
+        }
+    }
+
+    public FileSystemReplayOutcome<bool> SetLength(SafeFileHandle handle, long length, string path)
+    {
+        try
+        {
+            RandomAccess.SetLength(handle, length);
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<bool>(exception, "RandomAccess.SetLength", path);
+        }
+    }
+
+    public FileSystemReplayOutcome<bool> FlushFile(SafeFileHandle handle, string path)
+    {
+        try
+        {
+            RandomAccess.FlushToDisk(handle);
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<bool>(exception, "RandomAccess.FlushToDisk", path);
+        }
+    }
+
+    public FileSystemReplayOutcome<bool> CloseFile(SafeFileHandle handle, string path)
+    {
+        try
+        {
+            handle.Dispose();
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<bool>(exception, "SafeFileHandle.Dispose", path, FileSystemReplaySafety.Unsafe);
+        }
+    }
+
+    public FileSystemReplayOutcome<BorrowedFileReadState> PrepareBorrowedRead(FileStream stream)
+    {
+        try
+        {
+            // Flush/getter/seek can emit pending caller writes. This preparation
+            // is deliberately one-shot, even for a readable, seekable FileStream.
+            stream.Flush();
+            SafeFileHandle handle = stream.SafeFileHandle;
+            return FileSystemReplayOutcome<BorrowedFileReadState>.Complete(
+                new BorrowedFileReadState(handle, stream.Position));
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<BorrowedFileReadState>(
+                exception, "PrepareBorrowedRead", stream.Name, FileSystemReplaySafety.Unsafe);
+        }
+    }
+
+    public FileSystemReplayOutcome<long> GetPosition(FileStream stream)
+    {
+        try
+        {
+            return FileSystemReplayOutcome<long>.Complete(stream.Position);
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<long>(exception, "FileStream.Position", stream.Name);
+        }
+    }
+
+    public FileSystemReplayOutcome<long> SetPosition(FileStream stream, long position)
+    {
+        try
+        {
+            return FileSystemReplayOutcome<long>.Complete(stream.Seek(position, SeekOrigin.Begin));
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<long>(exception, "FileStream.Seek", stream.Name);
+        }
+    }
+
+    public FileSystemReplayOutcome<int> ReadBorrowed(FileStream stream, Memory<byte> buffer)
+    {
+        try
+        {
+            return FileSystemReplayOutcome<int>.Complete(stream.Read(buffer.Span));
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<int>(exception, "FileStream.Read", stream.Name);
+        }
+    }
+
+    public async ValueTask<FileSystemReplayOutcome<int>> ReadBorrowedAsync(
+        FileStream stream, Memory<byte> buffer, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return FileSystemReplayOutcome<int>.Complete(
+                await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false));
+        }
+        catch (Exception exception) when (IsPhysicalFailure(exception))
+        {
+            return Failed<int>(exception, "FileStream.ReadAsync", stream.Name);
+        }
+    }
+
     public FileSystemReplayOutcome<bool> MovePath(
         string sourcePath,
         string destinationPath,
@@ -258,6 +547,73 @@ internal sealed class SystemFileSystemPrimitives : IFileSystemPrimitives
 
     private static bool IsPhysicalFailure(Exception exception) =>
         exception is IOException or UnauthorizedAccessException;
+
+    private static FileSystemReplayOutcome<T> OwnedOpenFailure<T>(
+        string path, FileMode mode, int error, long flags)
+    {
+        bool windows = OperatingSystem.IsWindows();
+        bool collision = mode == FileMode.CreateNew && (windows ? error is 80 or 183 : error == 17);
+        Win32Exception native = new Win32Exception(error);
+        string message = $"The file '{path}' could not be opened: {native.Message}";
+        Exception exception = error switch
+        {
+            2 => new FileNotFoundException(message, path, native),
+            3 when windows => new DirectoryNotFoundException(message, native),
+            20 when !windows => new DirectoryNotFoundException(message, native),
+            5 when windows => new UnauthorizedAccessException(message, native),
+            1 or 13 when !windows => new UnauthorizedAccessException(message, native),
+            206 when windows => new PathTooLongException(message, native),
+            36 or 63 when !windows => new PathTooLongException(message, native),
+            _ => new IOException(message, native),
+        };
+        if (collision)
+            return FileSystemReplayOutcome<T>.SemanticFailure(exception);
+
+        // As with namespace mutations, these are definite rejections, not a
+        // transient-code allowlist. Unknown creation outcomes cannot be adopted.
+        bool rejected = windows
+            ? error is 2 or 3 or 5 or 17 or 32 or 33 or 80 or 87 or 123 or 145 or 183 or 206 or 267
+            : error is 1 or 2 or 9 or 13 or 17 or 18 or 20 or 21 or 22 or 28 or 30 or 36 or 39 or 40 or 45 or 62 or 63 or 66 or 95;
+        return FileSystemReplayOutcome<T>.Failed(FileSystemFailureContext.CapturePrimitiveFailure(
+            exception,
+            rejected ? FileSystemReplaySafety.Safe : FileSystemReplaySafety.Unsafe,
+            windows ? "CreateFileW" : "open(owned file)",
+            path,
+            nativeErrorCode: error,
+            nativeFlags: flags));
+    }
+
+    private static FileSystemReplayOutcome<T> NativeHandleFailure<T>(
+        int error, string operation, string path, long flags) =>
+        FileSystemReplayOutcome<T>.Failed(FileSystemFailureContext.CapturePrimitiveFailure(
+            new IOException($"The file handle operation '{operation}' failed.", new Win32Exception(error)),
+            FileSystemReplaySafety.Safe, operation, path, nativeErrorCode: error, nativeFlags: flags));
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileSecurityAttributes
+    {
+        internal int Length;
+        internal IntPtr SecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)]
+        internal bool InheritHandle;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string path, uint access, uint share, ref FileSecurityAttributes security,
+        uint disposition, uint flags, IntPtr template);
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int OpenOwned(string path, int flags, uint mode);
+
+    [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
+    private static extern int LockOwned(SafeFileHandle handle, int flags);
+
+    [DllImport("libc", EntryPoint = "posix_fadvise")]
+    private static extern int AdviseOwned(SafeFileHandle handle, long offset, long length, int advice);
+
+    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int SetReadAhead(SafeFileHandle handle, int command, int value);
 
     private static FileSystemReplayOutcome<T> Failed<T>(
         Exception exception,

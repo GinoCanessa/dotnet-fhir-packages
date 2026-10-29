@@ -2182,16 +2182,34 @@ public sealed class PackageCacheTransactionTests : IDisposable
             return _inner.FileExists(path);
         }
 
-        public FileStream OpenRead(string path)
+        public Stream OpenRead(string path)
         {
             Before("OpenRead", isMutating: false);
             return _inner.OpenRead(path);
+        }
+
+        public ValueTask<Stream> OpenReadAsync(string path, CancellationToken cancellationToken)
+        {
+            Before("OpenRead", isMutating: false);
+            return _inner.OpenReadAsync(path, cancellationToken);
+        }
+
+        public ValueTask<string> GetFullPathAsync(string path, CancellationToken cancellationToken)
+        {
+            Before("GetFullPath", isMutating: false);
+            return _inner.GetFullPathAsync(path, cancellationToken);
         }
 
         public void CreateDirectory(string path)
         {
             Before("CreateDirectory");
             _inner.CreateDirectory(path);
+        }
+
+        public ValueTask CreateDirectoryAsync(string path, CancellationToken cancellationToken)
+        {
+            Before("CreateDirectory");
+            return _inner.CreateDirectoryAsync(path, cancellationToken);
         }
 
         public void MoveDirectory(
@@ -2223,6 +2241,13 @@ public sealed class PackageCacheTransactionTests : IDisposable
             _inner.DeleteFile(path);
         }
 
+        public ValueTask DeleteFileAsync(string path, CancellationToken cancellationToken)
+        {
+            Before("DeleteFile");
+            DeletedFiles.Add(path);
+            return _inner.DeleteFileAsync(path, cancellationToken);
+        }
+
         public async ValueTask WriteFileAndFlushAsync(
             string path,
             ReadOnlyMemory<byte> content,
@@ -2236,23 +2261,36 @@ public sealed class PackageCacheTransactionTests : IDisposable
                 .ConfigureAwait(false);
         }
 
-        public async ValueTask AtomicReplaceFileAsync(
+        public ValueTask AtomicReplaceFileAsync(
             string sourcePath,
             string destinationPath,
+            CancellationToken cancellationToken) =>
+            AtomicReplaceFileAsync(new DurableFileReplacement(sourcePath, destinationPath), cancellationToken);
+
+        public async ValueTask AtomicReplaceFileAsync(
+            DurableFileReplacement replacement,
             CancellationToken cancellationToken)
         {
             Before("AtomicReplaceFile");
             await _inner.AtomicReplaceFileAsync(
-                    sourcePath,
-                    destinationPath,
+                    replacement,
                     cancellationToken)
                 .ConfigureAwait(false);
+            // The port includes the parent barrier. Domain crashes remain above
+            // the executor, here at that completed durability boundary.
+            Before("SynchronizeDirectory");
         }
 
         public void SynchronizeDirectory(string directoryPath)
         {
             Before("SynchronizeDirectory");
             _inner.SynchronizeDirectory(directoryPath);
+        }
+
+        public ValueTask SynchronizeDirectoryAsync(string directoryPath, CancellationToken cancellationToken)
+        {
+            Before("SynchronizeDirectory");
+            return _inner.SynchronizeDirectoryAsync(directoryPath, cancellationToken);
         }
 
         public PackageCacheArtifactKind GetArtifactKind(string path)

@@ -99,7 +99,7 @@ internal sealed class ResilientFileSystem
 
     internal FileStream OpenRegularRead(string path, CancellationToken cancellationToken = default)
     {
-        RegularFileReplayOperation operation = new RegularFileReplayOperation(_context, path);
+        RegularFileReplayOperation<FileStream> operation = CreateRegularFileOperation(path);
         try
         {
             return _context.Executor.Execute(operation, cancellationToken).Value;
@@ -115,7 +115,7 @@ internal sealed class ResilientFileSystem
         string path,
         CancellationToken cancellationToken = default)
     {
-        RegularFileReplayOperation operation = new RegularFileReplayOperation(_context, path);
+        RegularFileReplayOperation<FileStream> operation = CreateRegularFileOperation(path);
         try
         {
             return (await _context.Executor.ExecuteAsync(operation, cancellationToken).ConfigureAwait(false)).Value;
@@ -124,6 +124,142 @@ internal sealed class ResilientFileSystem
         {
             operation.ReleaseAfterFailure();
             throw;
+        }
+    }
+
+    private RegularFileReplayOperation<FileStream> CreateRegularFileOperation(string path) =>
+        new RegularFileReplayOperation<FileStream>(
+            _context, path,
+            fullPath => _context.Primitives.OpenFile(
+                fullPath, FileMode.Open, FileAccess.Read, FileShare.Read, 16_384, FileOptions.SequentialScan),
+            handle => new FileStream(handle, FileAccess.Read, 16_384, isAsync: false));
+
+    internal Stream OpenProtectedRegularRead(string path, CancellationToken cancellationToken = default)
+    {
+        RegularFileReplayOperation<SafeFileHandle> operation = CreateProtectedRegularFileOperation(path);
+        try
+        {
+            SafeFileHandle handle = _context.Executor.Execute(operation, cancellationToken).Value;
+            return new PositionedFileStream(_context, handle, operation.FullPath!, FileAccess.Read, 0);
+        }
+        catch
+        {
+            operation.ReleaseAfterFailure();
+            throw;
+        }
+    }
+
+    internal async ValueTask<Stream> OpenProtectedRegularReadAsync(
+        string path, CancellationToken cancellationToken = default)
+    {
+        RegularFileReplayOperation<SafeFileHandle> operation = CreateProtectedRegularFileOperation(path);
+        try
+        {
+            SafeFileHandle handle = (await _context.Executor.ExecuteAsync(operation, cancellationToken).ConfigureAwait(false)).Value;
+            return new PositionedFileStream(_context, handle, operation.FullPath!, FileAccess.Read, 0);
+        }
+        catch
+        {
+            operation.ReleaseAfterFailure();
+            throw;
+        }
+    }
+
+    private RegularFileReplayOperation<SafeFileHandle> CreateProtectedRegularFileOperation(string path) =>
+        new RegularFileReplayOperation<SafeFileHandle>(
+            _context, path,
+            fullPath => _context.Primitives.OpenFileHandle(
+                fullPath, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.SequentialScan),
+            handle => handle);
+
+    internal PositionedFileStream OpenPositionedFile(
+        string path, FileMode mode, FileAccess access, FileShare share, FileOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        OwnedFileOpenReplayOperation operation = new OwnedFileOpenReplayOperation(
+            _context, path, mode, access, share, options);
+        try
+        {
+            return _context.Executor.Execute(operation, cancellationToken).Value;
+        }
+        catch
+        {
+            operation.ReleaseAfterFailure();
+            if (operation.CreatedPath is string createdPath)
+                CleanOwnedFile(createdPath);
+            throw;
+        }
+    }
+
+    internal async ValueTask<PositionedFileStream> OpenPositionedFileAsync(
+        string path, FileMode mode, FileAccess access, FileShare share, FileOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        OwnedFileOpenReplayOperation operation = new OwnedFileOpenReplayOperation(
+            _context, path, mode, access, share, options);
+        try
+        {
+            return (await _context.Executor.ExecuteAsync(operation, cancellationToken).ConfigureAwait(false)).Value;
+        }
+        catch
+        {
+            operation.ReleaseAfterFailure();
+            if (operation.CreatedPath is string createdPath)
+                await CleanOwnedFileAsync(createdPath).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    internal async ValueTask WriteFileAndFlushAsync(
+        string path, ReadOnlyMemory<byte> content, CancellationToken cancellationToken)
+    {
+        // Capture before open can await: later block replay must not depend on
+        // caller memory, encoding or a source stream being consumed again.
+        byte[] bytes = content.ToArray();
+        PositionedFileStream? stream = null;
+        try
+        {
+            stream = await OpenPositionedFileAsync(
+                path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                FileOptions.Asynchronous | FileOptions.WriteThrough, cancellationToken).ConfigureAwait(false);
+            await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await stream.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            if (stream is not null)
+            {
+                stream.ReleaseAfterFailure();
+                await CleanOwnedFileAsync(stream.FilePath).ConfigureAwait(false);
+            }
+            throw;
+        }
+    }
+
+    private void CleanOwnedFile(string path)
+    {
+        try
+        {
+            DeleteFile(path, CancellationToken.None);
+        }
+        catch
+        {
+            // Only owned create-new files reach here; cleanup has its own bounded
+            // operation and cannot replace the failed open/write/flush.
+        }
+    }
+
+    private async ValueTask CleanOwnedFileAsync(string path)
+    {
+        try
+        {
+            await DeleteAsync(path, FileSystemEntryKind.File, recursive: false, missingAllowed: true,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Preserve the primary failure, including cancellation.
         }
     }
 
@@ -142,8 +278,12 @@ internal sealed class ResilientFileSystem
             _context, DurableFileOperationKind.Move, sourcePath, destinationPath), cancellationToken);
 
     internal ValueTask ReplaceFileAsync(string sourcePath, string destinationPath, CancellationToken cancellationToken = default) =>
+        ReplaceFileAsync(new DurableFileReplacement(sourcePath, destinationPath), cancellationToken);
+
+    internal ValueTask ReplaceFileAsync(DurableFileReplacement replacement, CancellationToken cancellationToken = default) =>
         ExecuteDurableAsync(new DurableFileReplayOperation(
-            _context, DurableFileOperationKind.Replace, sourcePath, destinationPath), cancellationToken);
+            _context, DurableFileOperationKind.Replace, replacement.SourcePath, replacement.DestinationPath,
+            replacement: replacement), cancellationToken);
 
     internal void DeleteFile(string path, CancellationToken cancellationToken = default) =>
         Delete(path, FileSystemEntryKind.File, recursive: false, missingAllowed: true, cancellationToken);
@@ -548,29 +688,37 @@ internal sealed class ResilientFileSystem
         }
     }
 
-    private sealed class RegularFileReplayOperation : FileSystemReplayOperation<FileStream>
+    private sealed class RegularFileReplayOperation<T> : FileSystemReplayOperation<T> where T : class
     {
-        private const int BufferSize = 16_384;
         private readonly IFileSystemPrimitives _primitives;
         private readonly string _path;
+        private readonly Func<string, FileSystemReplayOutcome<T>> _openWindows;
+        private readonly Func<SafeFileHandle, T> _createOwner;
         private string? _fullPath;
         private int? _descriptor;
         private int? _duplicate;
         private int _stage;
 
-        internal RegularFileReplayOperation(FileSystemContext context, string path) : base(context.Policy, "ResolvePath")
+        internal RegularFileReplayOperation(
+            FileSystemContext context, string path,
+            Func<string, FileSystemReplayOutcome<T>> openWindows,
+            Func<SafeFileHandle, T> createOwner) : base(context.Policy, "ResolvePath")
         {
             _primitives = context.Primitives;
             _path = path;
+            _openWindows = openWindows;
+            _createOwner = createOwner;
         }
 
-        internal override FileSystemReplayOutcome<FileStream> ExecuteStep(CancellationToken cancellationToken)
+        internal string? FullPath => _fullPath;
+
+        internal override FileSystemReplayOutcome<T> ExecuteStep(CancellationToken cancellationToken)
         {
             if (_fullPath is null)
             {
                 FileSystemReplayOutcome<string> resolved = ResolvePathAttempt(_primitives, _path);
                 if (resolved.Kind != FileSystemReplayOutcomeKind.Completed)
-                    return Failure<string, FileStream>(resolved);
+                    return Failure<string, T>(resolved);
                 _fullPath = resolved.Value;
                 if (_primitives.Platform == FileSystemPlatform.Unsupported)
                     throw new PlatformNotSupportedException("Regular cache-file verification requires Windows, Linux, or macOS.");
@@ -584,27 +732,25 @@ internal sealed class ResilientFileSystem
                 {
                     FileSystemReplayOutcome<FileAttributes> attributes = _primitives.GetAttributes(_fullPath);
                     if (attributes.Kind != FileSystemReplayOutcomeKind.Completed)
-                        return Failure<FileAttributes, FileStream>(attributes);
+                        return Failure<FileAttributes, T>(attributes);
                     RequireRegular(FileSystemProbeResult.FromAttributes(attributes.Value));
                 }
                 else if (_primitives.Platform == FileSystemPlatform.MacOS)
                 {
                     FileSystemReplayOutcome<FileSystemProbeResult> probe = _primitives.Probe(_fullPath);
                     if (probe.Kind is not (FileSystemReplayOutcomeKind.Completed or FileSystemReplayOutcomeKind.Missing))
-                        return Failure<FileSystemProbeResult, FileStream>(probe);
+                        return Failure<FileSystemProbeResult, T>(probe);
                     if (probe.Value.Exists)
                         RequireRegular(probe.Value);
                 }
                 _stage = 1;
                 SetPhase("OpenRegularFile");
-                return FileSystemReplayOutcome<FileStream>.Continue();
+                return FileSystemReplayOutcome<T>.Continue();
             }
 
             if (_primitives.Platform == FileSystemPlatform.Windows)
             {
-                FileSystemReplayOutcome<FileStream> opened = _primitives.OpenFile(
-                    _fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-                    BufferSize, FileOptions.SequentialScan);
+                FileSystemReplayOutcome<T> opened = _openWindows(_fullPath);
                 if (opened.Kind != FileSystemReplayOutcomeKind.Completed)
                     _stage = 0;
                 return opened;
@@ -619,23 +765,23 @@ internal sealed class ResilientFileSystem
                 if (opened.Kind != FileSystemReplayOutcomeKind.Completed)
                 {
                     _stage = 0;
-                    return Failure<int, FileStream>(opened);
+                    return Failure<int, T>(opened);
                 }
                 _descriptor = opened.Value;
                 _stage = 2;
                 SetPhase("InspectRegularDescriptor");
-                return FileSystemReplayOutcome<FileStream>.Continue();
+                return FileSystemReplayOutcome<T>.Continue();
             }
 
             if (_stage == 2)
             {
                 FileSystemReplayOutcome<FileSystemProbeResult> inspected = _primitives.InspectDescriptor(_descriptor!.Value, _fullPath);
                 if (inspected.Kind != FileSystemReplayOutcomeKind.Completed)
-                    return Failure<FileSystemProbeResult, FileStream>(inspected);
+                    return Failure<FileSystemProbeResult, T>(inspected);
                 RequireRegular(inspected.Value);
                 _stage = _descriptor == 0 ? 3 : 5;
                 SetPhase(_stage == 3 ? "DuplicateZeroDescriptor" : "TransferDescriptor");
-                return FileSystemReplayOutcome<FileStream>.Continue();
+                return FileSystemReplayOutcome<T>.Continue();
             }
 
             if (_stage == 3)
@@ -646,14 +792,14 @@ internal sealed class ResilientFileSystem
                 FileSystemReplayOutcome<int> duplicated = _primitives.DuplicateDescriptor(
                     _descriptor!.Value, command, NativeFileSystemPrimitives.MinimumTransferDescriptor, _fullPath);
                 if (duplicated.Kind != FileSystemReplayOutcomeKind.Completed)
-                    return Failure<int, FileStream>(duplicated);
+                    return Failure<int, T>(duplicated);
                 if (duplicated.Value != _descriptor)
                     _duplicate = duplicated.Value;
                 if (duplicated.Value < NativeFileSystemPrimitives.MinimumTransferDescriptor)
                     throw new IOException("The duplicated package manifest descriptor was below the safe minimum.");
                 _stage = 4;
                 SetPhase("CloseOriginalDescriptor");
-                return FileSystemReplayOutcome<FileStream>.Continue();
+                return FileSystemReplayOutcome<T>.Continue();
             }
 
             if (_stage == 4)
@@ -662,23 +808,23 @@ internal sealed class ResilientFileSystem
                 _descriptor = null;
                 FileSystemReplayOutcome<bool> closed = _primitives.CloseDescriptor(descriptor, _fullPath);
                 if (closed.Kind != FileSystemReplayOutcomeKind.Completed)
-                    return Failure<bool, FileStream>(closed);
+                    return Failure<bool, T>(closed);
                 _descriptor = _duplicate;
                 _duplicate = null;
                 _stage = 5;
                 SetPhase("TransferDescriptor");
-                return FileSystemReplayOutcome<FileStream>.Continue();
+                return FileSystemReplayOutcome<T>.Continue();
             }
 
             int transferDescriptor = _descriptor!.Value;
             _descriptor = null;
-            FileStream stream = TransferDescriptorOwnership<SafeFileHandle, FileStream>(
+            T owner = TransferDescriptorOwnership<SafeFileHandle, T>(
                 transferDescriptor,
                 value => new SafeFileHandle(new IntPtr(value), ownsHandle: true),
-                handle => new FileStream(handle, FileAccess.Read, BufferSize, isAsync: false),
+                _createOwner,
                 handle => handle.Dispose(),
                 value => ValueOrThrow(_primitives.CloseDescriptor(value, _fullPath)) ? 0 : -1);
-            return FileSystemReplayOutcome<FileStream>.Complete(stream);
+            return FileSystemReplayOutcome<T>.Complete(owner);
         }
 
         private static void RequireRegular(FileSystemProbeResult probe)
