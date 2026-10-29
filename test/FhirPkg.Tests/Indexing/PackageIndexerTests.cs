@@ -1,7 +1,11 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using FhirPkg.Indexing;
+using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
+using FhirPkg.Tests.Support;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using Xunit;
@@ -255,10 +259,169 @@ public sealed class PackageIndexerTests : IDisposable
                 invalid));
     }
 
+    [Fact]
+    public async Task BuildIndex_EnumerationRetryDoesNotDuplicateResources()
+    {
+        string contentPath = CreatePackageContent(
+            "example.package",
+            "1.0.0",
+            ("a.json", """{"resourceType":"Patient","id":"a"}"""),
+            ("b.json", """{"resourceType":"Patient","id":"b"}"""),
+            ("c.json", """{"resourceType":"Patient","id":"c"}"""));
+        ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        int created = 0;
+        primitives.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+        {
+            IEnumerator<string> inner = Directory.EnumerateFileSystemEntries(call.Path!).GetEnumerator();
+            // The first attempt fails after yielding two entries.
+            IEnumerator<string> result = created++ == 0 ? new FailingEnumerator(inner, 2) : inner;
+            return FileSystemReplayOutcome<IEnumerator<string>>.Complete(result);
+        });
+        PackageIndexer indexer = new(NullLogger.Instance, primitives.CreateContext());
+        PackageRecord record = CreateRecord(
+            new PackageReference("example.package", "1.0.0"),
+            contentPath);
+
+        PackageIndex index = await ((IManagedPackageIndexer)indexer).BuildIndexAsync(
+            record,
+            TestContext.Current.CancellationToken);
+
+        index.Files.Select(file => file.Filename).ShouldBe(["a.json", "b.json", "c.json"]);
+        primitives.Count("CreateDirectoryEnumerator").ShouldBe(2);
+        primitives.AsyncWaits.ShouldBe([10]);
+    }
+
+    [Fact]
+    public async Task ReadExistingIndex_ExhaustedIoRetainsRegenerationBehavior()
+    {
+        string contentPath = CreatePackageContent(
+            "example.package",
+            "1.0.0",
+            ("patient.json", """{"resourceType":"Patient","id":"fresh"}"""));
+        await File.WriteAllTextAsync(
+            Path.Combine(contentPath, ".index.json"),
+            """{"index-version":2,"files":[{"filename":"patient.json","resourceType":"Patient","id":"stale"}]}""",
+            TestContext.Current.CancellationToken);
+        ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<FileSystemProbeResult>("Probe", call =>
+            call.Path!.EndsWith(".index.json", StringComparison.Ordinal)
+                ? ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "Probe", call.Path)
+                : SystemFileSystemPrimitives.Instance.Probe(call.Path!));
+        primitives.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+            FileSystemReplayOutcome<IEnumerator<string>>.Complete(
+                Directory.EnumerateFileSystemEntries(call.Path!).GetEnumerator()));
+        CountingLogger logger = new();
+        PackageIndexer indexer = new(logger, primitives.CreateContext());
+
+        PackageIndex index = await indexer.IndexPackageAsync(
+            contentPath,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        index.Files.Single().Id.ShouldBe("fresh");
+        primitives.Calls.Count(call => call.Operation == "Probe"
+            && call.Path!.EndsWith(".index.json", StringComparison.Ordinal)).ShouldBe(6);
+        primitives.AsyncWaits.Count.ShouldBe(5);
+        logger.Warnings.ShouldBe(1);
+        indexer.FindByResourceType("Patient").Single().Id.ShouldBe("fresh");
+    }
+
+    [Fact]
+    public void ReferencedFile_UsesSamePolicyWithoutRewrapping()
+    {
+        string contentPath = CreatePackageContent(
+            "example.package",
+            "1.0.0",
+            ("patient.json", """{"resourceType":"Patient","id":"one"}"""));
+        ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<FileSystemProbeResult>("Probe", call =>
+            call.Path!.EndsWith("patient.json", StringComparison.Ordinal)
+                ? ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "Probe", call.Path)
+                : SystemFileSystemPrimitives.Instance.Probe(call.Path!));
+        FileSystemContext context = primitives.CreateContext();
+
+        bool valid = PackageIndexValidation.TryValidateReferencedFiles(
+            CreateIndex(("patient.json", "Patient", "one")),
+            contentPath,
+            context,
+            out string? failureReason);
+
+        valid.ShouldBeFalse();
+        failureReason.ShouldNotBeNullOrEmpty();
+        // One budget for the probe: six executions and five waits, no nested loop.
+        primitives.Count("Probe").ShouldBe(6);
+        primitives.Waits.ShouldBe([10, 10, 10, 10, 10]);
+    }
+
+    [Fact]
+    public void StandaloneIndexer_SnapshotsExplicitSettings()
+    {
+        FileSystemRetryOptions options = new()
+        {
+            RetryCount = 2,
+            MinimumDelayMilliseconds = 3,
+            MaximumJitterMilliseconds = 0,
+        };
+        PackageIndexer indexer = new(NullLogger.Instance, options);
+        options.RetryCount = 9;
+        options.MinimumDelayMilliseconds = 99;
+
+        FileSystemContext context = indexer.FileSystemContext;
+        context.Policy.RetryCount.ShouldBe(2);
+        context.Policy.MinimumDelayMilliseconds.ShouldBe(3);
+        context.Policy.MaximumJitterMilliseconds.ShouldBe(0);
+        context.HasExplicitValues.ShouldBeTrue();
+        Should.Throw<PackageInstallException>(
+            () => new PackageIndexer(NullLogger.Instance, (FileSystemRetryOptions)null!));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_testRoot))
             Directory.Delete(_testRoot, recursive: true);
+    }
+
+    private sealed class FailingEnumerator(IEnumerator<string> inner, int failAfter) : IEnumerator<string>
+    {
+        private int _moves;
+
+        public string Current => inner.Current;
+
+        object System.Collections.IEnumerator.Current => Current;
+
+        public bool MoveNext()
+        {
+            if (_moves++ == failAfter)
+                throw new IOException("Scripted enumeration failure.");
+            return inner.MoveNext();
+        }
+
+        public void Reset() => inner.Reset();
+
+        public void Dispose() => inner.Dispose();
+    }
+
+    private sealed class CountingLogger : ILogger
+    {
+        internal int Warnings { get; private set; }
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+                Warnings++;
+        }
     }
 
     private string CreatePackageContent(
