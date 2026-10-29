@@ -2,8 +2,10 @@
 
 using System.Net;
 using System.Text;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
+using FhirPkg.Tests.Support;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -26,6 +28,27 @@ public class RegistryClientBaseTests
             RegistryEndpoint endpoint,
             ILogger logger)
             : base(transport, endpoint, logger) { }
+
+        public TestableRegistryClient(
+            RegistryHttpTransport transport,
+            RegistryEndpoint endpoint,
+            ILogger logger,
+            FileSystemContext context)
+            : base(transport, endpoint, logger, context) { }
+
+        public TestableRegistryClient(
+            HttpClient httpClient,
+            RegistryEndpoint endpoint,
+            ILogger logger,
+            FileSystemRetryOptions fileSystemRetry)
+            : base(httpClient, endpoint, logger, fileSystemRetry) { }
+
+        public TestableRegistryClient(
+            RegistryHttpTransport transport,
+            RegistryEndpoint endpoint,
+            ILogger logger,
+            FileSystemRetryOptions fileSystemRetry)
+            : base(transport, endpoint, logger, fileSystemRetry) { }
 
         public override IReadOnlyList<PackageNameType> SupportedNameTypes => [];
         public override IReadOnlyList<VersionType> SupportedVersionTypes => [];
@@ -415,6 +438,188 @@ public class RegistryClientBaseTests
                 "https://cdn.example.com/package",
                 TestContext.Current.CancellationToken));
 
+        handler.CapturedRequests.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task PutStream_FileStreamIsProtectedBeforeNonDisposingWrapper()
+    {
+        using PublicationWorkspace workspace = new();
+        byte[] bytes = [0x10, 0x20, 0x1F, 0x8B, 0x08, 0x00, 1, 2, 3, 4, 5, 6];
+        string path = workspace.CreateFile(bytes);
+        using FileStream caller = new(
+            path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, 128, FileOptions.Asynchronous);
+        caller.Position = 2;
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        primitives.Enqueue<int>("ReadBorrowedAsync", call =>
+        {
+            call.Stream!.Read(call.Buffer.Span[..4]).ShouldBe(4);
+            return ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "caller read", path);
+        });
+        SequenceHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK));
+        using HttpClient http = new(handler);
+        TestableRegistryClient client = new(
+            ControlledTransport(http),
+            PublicationTestSupport.Endpoint("publish"),
+            NullLogger.Instance,
+            primitives.CreateContext(retries: 1));
+
+        using HttpResponseMessage response = await client.TestPutStreamAsync(
+            "https://publish.example/package",
+            caller,
+            TestContext.Current.CancellationToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        handler.Requests.Count.ShouldBe(1);
+        handler.Requests[0].Body.ShouldBe(bytes[2..]);
+        primitives.Count("PrepareBorrowedRead").ShouldBe(1);
+        primitives.Count("ReadBorrowedAsync").ShouldBe(3);
+        primitives.Calls.Where(call => call.Operation == "SetPosition")
+            .Select(call => call.Offset).ShouldBe([2L]);
+        primitives.AsyncWaits.ShouldBe([10]);
+        primitives.Waits.ShouldBeEmpty();
+        primitives.Count("CloseFile").ShouldBe(0);
+        caller.Position.ShouldBe(bytes.LongLength);
+        caller.CanRead.ShouldBeTrue();
+        caller.CanWrite.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task PutStream_OpaqueSourceFailureIsConsumedOnceWithoutFilesystemRetries()
+    {
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        SequenceHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.OK));
+        using HttpClient http = new(handler);
+        TestableRegistryClient client = new(
+            ControlledTransport(http),
+            PublicationTestSupport.Endpoint("opaque"),
+            NullLogger.Instance,
+            primitives.CreateContext());
+        using FailingOpaqueStream source = new();
+
+        HttpRequestException exception = await Should.ThrowAsync<HttpRequestException>(
+            () => client.TestPutStreamAsync(
+                "https://opaque.example/package", source, TestContext.Current.CancellationToken));
+
+        exception.InnerException.ShouldBeSameAs(source.Failure);
+        FileSystemFailureContext.TryGetOrigin(exception, out _).ShouldBeFalse();
+        source.ReadCalls.ShouldBe(1);
+        source.BytesConsumed.ShouldBe(3);
+        source.WasDisposed.ShouldBeFalse();
+        source.CanRead.ShouldBeTrue();
+        primitives.Calls.ShouldBeEmpty();
+        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task ErrorResponse_TerminalLocalReadIsNotReplacedBySanitizedHttpFailure()
+    {
+        using PublicationWorkspace workspace = new();
+        string path = workspace.CreateFile("local response fixture"u8.ToArray());
+        using FileStream caller = File.OpenRead(path);
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        FileSystemContext context = primitives.CreateContext(retries: 1);
+        using Stream protectedInput = context.ProtectRead(caller);
+        IOException failure = new("terminal response fixture read");
+        primitives.Set<int>("ReadBorrowedAsync", call =>
+            ScriptedFileSystemPrimitives.Fail<int>(failure, "response fixture read", call.Path));
+        SequenceHandler handler = new(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
+        {
+            Content = new StreamContent(protectedInput),
+        });
+        using HttpClient http = new(handler);
+        TestableRegistryClient client = new(
+            ControlledTransport(http),
+            PublicationTestSupport.Endpoint("response"),
+            NullLogger.Instance,
+            context);
+
+        HttpRequestException exception = await Should.ThrowAsync<HttpRequestException>(
+            () => client.TestGetResponseAsync("https://response.example/package", TestContext.Current.CancellationToken));
+
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? terminal).ShouldBeTrue();
+        terminal!.Operation.ShouldBe("response fixture read");
+        terminal.RetriesUsed.ShouldBe(1);
+        handler.Requests.Count.ShouldBe(1);
+        primitives.Count("ReadBorrowedAsync").ShouldBe(2);
+        primitives.AsyncWaits.ShouldBe([10]);
+        primitives.Waits.ShouldBeEmpty();
+        caller.CanRead.ShouldBeTrue();
+        caller.Position.ShouldBe(0);
+    }
+
+    private sealed class FailingOpaqueStream : Stream
+    {
+        internal IOException Failure { get; } = new("opaque source failed after consuming bytes");
+
+        internal int ReadCalls { get; private set; }
+
+        internal int BytesConsumed { get; private set; }
+
+        internal bool WasDisposed { get; private set; }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ReadCalls++;
+            "abc"u8.CopyTo(buffer.Span);
+            BytesConsumed += 3;
+            return ValueTask.FromException<int>(Failure);
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            WasDisposed = true;
+            base.Dispose(disposing);
+        }
+    }
+
+    [Fact]
+    public void ProtectedOptionsConstructors_RetainSnapshotAndLegacyBindings()
+    {
+        HeaderCapturingHandler handler = new();
+        using HttpClient http = new(handler);
+        RegistryEndpoint endpoint = PublicationTestSupport.Endpoint("construct");
+        FileSystemRetryOptions options = new()
+        {
+            RetryCount = 2,
+            MinimumDelayMilliseconds = 3,
+            MaximumJitterMilliseconds = 4,
+        };
+        TestableRegistryClient configuredHttp = new(http, endpoint, NullLogger.Instance, options);
+        TestableRegistryClient configuredTransport = new(ControlledTransport(http), endpoint, NullLogger.Instance, options);
+        TestableRegistryClient legacyHttp = new(http, endpoint, NullLogger.Instance);
+        TestableRegistryClient legacyTransport = new(ControlledTransport(http), endpoint, NullLogger.Instance);
+        options.RetryCount = 0;
+        options.MinimumDelayMilliseconds = 0;
+        options.MaximumJitterMilliseconds = 0;
+
+        configuredHttp.FileSystemContext.Policy.RetryCount.ShouldBe(2);
+        configuredTransport.FileSystemContext.Policy.ShouldBe(configuredHttp.FileSystemContext.Policy);
+        configuredHttp.FileSystemContext.Policy.MinimumDelayMilliseconds.ShouldBe(3);
+        configuredHttp.FileSystemContext.Policy.MaximumJitterMilliseconds.ShouldBe(4);
+        legacyHttp.Endpoint.ShouldBeSameAs(endpoint);
+        legacyTransport.Endpoint.ShouldBeSameAs(endpoint);
         handler.CapturedRequests.ShouldBeEmpty();
     }
 

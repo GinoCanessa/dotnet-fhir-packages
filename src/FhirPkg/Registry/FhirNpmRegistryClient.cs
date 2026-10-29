@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License. See LICENSE in the project root.
 
 using System.Net;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using Microsoft.Extensions.Logging;
 
@@ -36,11 +37,36 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
     {
     }
 
+    /// <summary>
+    /// Initialises a client with a construction-time filesystem retry policy.
+    /// </summary>
+    /// <param name="httpClient">The HTTP client to use for requests.</param>
+    /// <param name="endpoint">The FHIR NPM registry endpoint.</param>
+    /// <param name="logger">The logger instance.</param>
+    /// <param name="fileSystemRetry">The bounded filesystem retry options.</param>
+    public FhirNpmRegistryClient(
+        HttpClient httpClient,
+        RegistryEndpoint endpoint,
+        ILogger<FhirNpmRegistryClient> logger,
+        FileSystemRetryOptions fileSystemRetry)
+        : base(httpClient, endpoint, logger, fileSystemRetry)
+    {
+    }
+
     internal FhirNpmRegistryClient(
         RegistryHttpTransport transport,
         RegistryEndpoint endpoint,
         ILogger<FhirNpmRegistryClient> logger)
         : base(transport, endpoint, logger)
+    {
+    }
+
+    internal FhirNpmRegistryClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<FhirNpmRegistryClient> logger,
+        FileSystemContext context)
+        : base(transport, endpoint, logger, context)
     {
     }
 
@@ -274,12 +300,12 @@ public sealed class FhirNpmRegistryClient : RegistryClientBase, IRegistryClient
             Logger.LogError(
                 ex, "Failed to publish {PackageId}@{Version}", reference.Name, reference.Version);
 
-            return new PublishResult
+            return FileSystemFailureContext.AttachToResult(new PublishResult
             {
                 Success = false,
                 StatusCode = ex.StatusCode ?? HttpStatusCode.InternalServerError,
-                Message = ex.Message,
-            };
+                Message = FileSystemFailureContext.FormatMessage(ex),
+            }, ex);
         }
     }
 

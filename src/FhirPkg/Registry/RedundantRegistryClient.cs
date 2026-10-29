@@ -1,5 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License. See LICENSE in the project root.
 
+using System.Runtime.ExceptionServices;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Resolution;
 using Microsoft.Extensions.Logging;
@@ -47,6 +49,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
     private readonly IReadOnlyList<IRegistryClient> _clients;
     private readonly ILogger<RedundantRegistryClient> _logger;
     private readonly int _maxParallelRegistryQueries;
+    private readonly FileSystemContext _context;
 
     /// <summary>
     /// Initialises a new <see cref="RedundantRegistryClient"/> with the specified ordered list of clients.
@@ -67,8 +70,18 @@ public sealed class RedundantRegistryClient : IRegistryClient
         IEnumerable<IRegistryClient> clients,
         int maxParallelRegistryQueries,
         ILogger<RedundantRegistryClient>? logger = null)
+        : this(clients, maxParallelRegistryQueries, logger, FileSystemContext.CreateDefault())
+    {
+    }
+
+    internal RedundantRegistryClient(
+        IEnumerable<IRegistryClient> clients,
+        int maxParallelRegistryQueries,
+        ILogger<RedundantRegistryClient>? logger,
+        FileSystemContext context)
     {
         ArgumentNullException.ThrowIfNull(clients);
+        ArgumentNullException.ThrowIfNull(context);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxParallelRegistryQueries, 1);
 
         List<IRegistryClient> flattenedClients = [];
@@ -91,6 +104,7 @@ public sealed class RedundantRegistryClient : IRegistryClient
 
         _logger = logger ?? NullLogger<RedundantRegistryClient>.Instance;
         _maxParallelRegistryQueries = maxParallelRegistryQueries;
+        _context = context;
 
         // Cache computed properties (the client list is immutable)
         _supportedNameTypes = _clients.SelectMany(c => c.SupportedNameTypes).Distinct().ToList().AsReadOnly();
@@ -105,6 +119,28 @@ public sealed class RedundantRegistryClient : IRegistryClient
         : this((IEnumerable<IRegistryClient>)clients)
     {
     }
+
+    /// <summary>
+    /// Creates a composite whose local file preparation and rewinds retain the
+    /// supplied filesystem retry policy. Existing clients are not reconfigured.
+    /// </summary>
+    /// <param name="clients">The registry clients to try, in priority order.</param>
+    /// <param name="fileSystemRetry">The bounded filesystem retry options.</param>
+    /// <param name="logger">The optional logger.</param>
+    /// <returns>The configured composite registry client.</returns>
+    public static RedundantRegistryClient CreateWithFileSystemRetry(
+        IEnumerable<IRegistryClient> clients,
+        FileSystemRetryOptions fileSystemRetry,
+        ILogger<RedundantRegistryClient>? logger = null) =>
+        new(clients, 3, logger, new FileSystemContext(fileSystemRetry));
+
+    internal FileSystemContext FileSystemContext => _context;
+
+    // Only known built-in ownership is traversable; third-party clients stay opaque.
+    internal IEnumerable<RegistryClientBase> BuiltInClients => _clients
+        .Where(client => client is FhirNpmRegistryClient or NpmRegistryClient
+            or FhirCiBuildClient or Hl7WebsiteClient)
+        .Cast<RegistryClientBase>();
 
     private readonly IReadOnlyList<PackageNameType> _supportedNameTypes;
     private readonly IReadOnlyList<VersionType> _supportedVersionTypes;
@@ -307,7 +343,8 @@ public sealed class RedundantRegistryClient : IRegistryClient
                         cancellationToken)
                     .ConfigureAwait(false);
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception) when (exception is not OperationCanceledException
+                && !FileSystemFailureContext.TryGetTerminal(exception, out _))
             {
                 _logger.LogWarning(
                     exception,
@@ -346,7 +383,8 @@ public sealed class RedundantRegistryClient : IRegistryClient
                     "Download returned null from {Endpoint}; trying next registry",
                     client.Endpoint.Url);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && !FileSystemFailureContext.TryGetTerminal(ex, out _))
             {
                 failures.AddRange(CaptureFailures(client, ex));
                 _logger.LogWarning(
@@ -372,15 +410,25 @@ public sealed class RedundantRegistryClient : IRegistryClient
         CancellationToken cancellationToken)
     {
         using SemaphoreSlim semaphore = new(_maxParallelRegistryQueries);
+        QueryState state = new();
         Task<SearchAttempt>[] tasks = _clients
             .Select((client, priority) => ExecuteSearchAttemptAsync(
                 client,
                 priority,
                 criteria,
                 semaphore,
+                state,
                 cancellationToken))
             .ToArray();
-        return await Task.WhenAll(tasks).ConfigureAwait(false);
+        try
+        {
+            return await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        catch
+        {
+            state.ThrowIfTerminal();
+            throw;
+        }
     }
 
     private async Task<SearchAttempt> ExecuteSearchAttemptAsync(
@@ -388,11 +436,14 @@ public sealed class RedundantRegistryClient : IRegistryClient
         int priority,
         PackageSearchCriteria criteria,
         SemaphoreSlim semaphore,
+        QueryState state,
         CancellationToken cancellationToken)
     {
+        state.ThrowIfTerminal();
         await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            state.ThrowIfTerminal();
             _logger.LogDebug("Searching {Endpoint} for packages", client.Endpoint.Url);
             IReadOnlyList<CatalogEntry> results = await client.SearchAsync(
                     criteria,
@@ -402,6 +453,8 @@ public sealed class RedundantRegistryClient : IRegistryClient
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
+            state.CaptureTerminal(exception);
+            state.ThrowIfTerminal();
             _logger.LogWarning(
                 exception,
                 "Search failed on {Endpoint}",
@@ -428,16 +481,26 @@ public sealed class RedundantRegistryClient : IRegistryClient
         }
 
         using SemaphoreSlim semaphore = new(_maxParallelRegistryQueries);
+        QueryState state = new();
         Task<ListingAttempt>[] tasks = clients
             .Select((client, priority) => ExecuteListingAttemptAsync(
                 client,
                 priority,
                 packageId,
                 semaphore,
+                state,
                 cancellationToken))
             .ToArray();
-        IReadOnlyList<ListingAttempt> attempts = await Task.WhenAll(tasks)
-            .ConfigureAwait(false);
+        IReadOnlyList<ListingAttempt> attempts;
+        try
+        {
+            attempts = await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        catch
+        {
+            state.ThrowIfTerminal();
+            throw;
+        }
         List<ListingAttempt> positiveAttempts = attempts
             .Where(attempt => attempt.Listing is not null)
             .OrderBy(attempt => attempt.Priority)
@@ -467,11 +530,14 @@ public sealed class RedundantRegistryClient : IRegistryClient
         int priority,
         string packageId,
         SemaphoreSlim semaphore,
+        QueryState state,
         CancellationToken cancellationToken)
     {
+        state.ThrowIfTerminal();
         await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            state.ThrowIfTerminal();
             _logger.LogDebug(
                 "Fetching listing for {PackageId} from {Endpoint}",
                 packageId,
@@ -484,6 +550,8 @@ public sealed class RedundantRegistryClient : IRegistryClient
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
+            state.CaptureTerminal(exception);
+            state.ThrowIfTerminal();
             _logger.LogWarning(
                 exception,
                 "GetPackageListing failed on {Endpoint} for {PackageId}",
@@ -640,7 +708,8 @@ public sealed class RedundantRegistryClient : IRegistryClient
                     };
                 }
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception) when (exception is not OperationCanceledException
+                && !FileSystemFailureContext.TryGetTerminal(exception, out _))
             {
                 failures.AddRange(CaptureFailures(client, exception));
                 _logger.LogWarning(
@@ -836,7 +905,8 @@ public sealed class RedundantRegistryClient : IRegistryClient
                 };
             }
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (exception is not OperationCanceledException
+            && !FileSystemFailureContext.TryGetTerminal(exception, out _))
         {
             _logger.LogWarning(
                 exception,
@@ -915,10 +985,28 @@ public sealed class RedundantRegistryClient : IRegistryClient
 
     private static IReadOnlyList<RegistryAttemptFailure> CaptureFailures(
         IRegistryClient client,
-        Exception exception) =>
-        exception is RegistryOperationException operationException
+        Exception exception)
+    {
+        if (FileSystemFailureContext.TryGetTerminal(exception, out _))
+            ExceptionDispatchInfo.Capture(exception).Throw();
+
+        return exception is RegistryOperationException operationException
             ? operationException.Failures
             : [RegistryAttemptFailure.Capture(client.Endpoint, exception)];
+    }
+
+    private sealed class QueryState
+    {
+        private ExceptionDispatchInfo? _terminal;
+
+        internal void CaptureTerminal(Exception exception)
+        {
+            if (FileSystemFailureContext.TryGetTerminal(exception, out _))
+                Interlocked.CompareExchange(ref _terminal, ExceptionDispatchInfo.Capture(exception), null);
+        }
+
+        internal void ThrowIfTerminal() => Volatile.Read(ref _terminal)?.Throw();
+    }
 
     private IReadOnlyList<IRegistryClient> FindSourceClients(
         RegistryEndpoint sourceRegistry,
@@ -1039,6 +1127,25 @@ public sealed class RedundantRegistryClient : IRegistryClient
                 "chain, so the stream can be rewound for retry attempts.", nameof(tarballStream));
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
+        Stream source = _context.ProtectRead(tarballStream);
+        try
+        {
+            return await PublishCoreAsync(reference, source, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (!ReferenceEquals(source, tarballStream))
+                await source.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task<PublishResult> PublishCoreAsync(
+        PackageReference reference,
+        Stream tarballStream,
+        CancellationToken cancellationToken)
+    {
         Exception? lastException = null;
         PublishResult? lastResult = null;
 
@@ -1047,7 +1154,11 @@ public sealed class RedundantRegistryClient : IRegistryClient
             try
             {
                 // Rewind the stream for each attempt.
-                tarballStream.Position = 0;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (tarballStream is BorrowedFileReadStream borrowed)
+                    await borrowed.SeekAsync(0, SeekOrigin.Begin, cancellationToken).ConfigureAwait(false);
+                else
+                    tarballStream.Position = 0;
 
                 _logger.LogDebug(
                     "Publishing {PackageId}@{Version} to {Endpoint}",
@@ -1055,6 +1166,9 @@ public sealed class RedundantRegistryClient : IRegistryClient
 
                 PublishResult result = await client.PublishAsync(reference, tarballStream, cancellationToken)
                     .ConfigureAwait(false);
+
+                if (FileSystemFailureContext.TryGetResult(result, out _))
+                    return result;
 
                 if (result.Success)
                 {
@@ -1069,7 +1183,8 @@ public sealed class RedundantRegistryClient : IRegistryClient
                     "Publish to {Endpoint} returned failure: {Message}; trying next registry",
                     client.Endpoint.Url, result.Message);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && !FileSystemFailureContext.TryGetTerminal(ex, out _))
             {
                 lastException = ex;
                 _logger.LogWarning(

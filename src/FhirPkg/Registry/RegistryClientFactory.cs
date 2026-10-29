@@ -1,5 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using FhirPkg.IO;
 using FhirPkg.Models;
 using Microsoft.Extensions.Logging;
 
@@ -56,12 +57,26 @@ public static class RegistryClientFactory
         RegistryHttpTransport transport,
         ILoggerFactory loggerFactory,
         TimeProvider? timeProvider = null)
+        => BuildRegistryClient(
+            options,
+            transport,
+            loggerFactory,
+            timeProvider,
+            FileSystemContext.CreateDefault());
+
+    internal static IRegistryClient BuildRegistryClient(
+        FhirPackageManagerOptions options,
+        RegistryHttpTransport transport,
+        ILoggerFactory loggerFactory,
+        TimeProvider? timeProvider,
+        FileSystemContext context)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(loggerFactory);
+        ArgumentNullException.ThrowIfNull(context);
 
-        List<IRegistryClient> clients = new List<IRegistryClient>();
+        List<IRegistryClient> clients = [];
 
         if (options.Registries.Count > 0)
         {
@@ -73,7 +88,8 @@ public static class RegistryClientFactory
                     loggerFactory,
                     options.InstallLimits,
                     timeProvider,
-                    options.GitHubToken));
+                    options.GitHubToken,
+                    context));
             }
         }
         else
@@ -81,11 +97,13 @@ public static class RegistryClientFactory
             clients.Add(new FhirNpmRegistryClient(
                 transport,
                 RegistryEndpoint.FhirPrimary,
-                loggerFactory.CreateLogger<FhirNpmRegistryClient>()));
+                loggerFactory.CreateLogger<FhirNpmRegistryClient>(),
+                context));
             clients.Add(new FhirNpmRegistryClient(
                 transport,
                 RegistryEndpoint.FhirSecondary,
-                loggerFactory.CreateLogger<FhirNpmRegistryClient>()));
+                loggerFactory.CreateLogger<FhirNpmRegistryClient>(),
+                context));
         }
 
         if (options.IncludeCiBuilds)
@@ -95,7 +113,8 @@ public static class RegistryClientFactory
                 RegistryEndpoint.FhirCiBuild,
                 loggerFactory.CreateLogger<FhirCiBuildClient>(),
                 timeProvider,
-                options.GitHubToken));
+                options.GitHubToken,
+                context));
         }
 
         if (options.IncludeHl7WebsiteFallback)
@@ -103,13 +122,15 @@ public static class RegistryClientFactory
             clients.Add(new Hl7WebsiteClient(
                 transport,
                 RegistryEndpoint.Hl7Website,
-                loggerFactory.CreateLogger<Hl7WebsiteClient>()));
+                loggerFactory.CreateLogger<Hl7WebsiteClient>(),
+                context));
         }
 
         return new RedundantRegistryClient(
             clients,
             options.MaxParallelRegistryQueries,
-            loggerFactory.CreateLogger<RedundantRegistryClient>());
+            loggerFactory.CreateLogger<RedundantRegistryClient>(),
+            context);
     }
 
     /// <summary>
@@ -147,7 +168,57 @@ public static class RegistryClientFactory
             loggerFactory,
             installLimits: null,
             timeProvider,
-            gitHubToken: null);
+            gitHubToken: null,
+            FileSystemContext.CreateDefault());
+
+    /// <summary>
+    /// Creates an endpoint client with a construction-time filesystem retry policy.
+    /// </summary>
+    /// <param name="endpoint">The registry endpoint configuration.</param>
+    /// <param name="httpClient">The HTTP client to use for requests.</param>
+    /// <param name="loggerFactory">The logger factory for typed loggers.</param>
+    /// <param name="timeProvider">The time provider, or <see langword="null"/> for the system provider.</param>
+    /// <param name="fileSystemRetry">The bounded filesystem retry options.</param>
+    /// <returns>The registry client for the endpoint.</returns>
+    public static IRegistryClient CreateClientForEndpoint(
+        RegistryEndpoint endpoint,
+        HttpClient httpClient,
+        ILoggerFactory loggerFactory,
+        TimeProvider? timeProvider,
+        FileSystemRetryOptions fileSystemRetry) =>
+        CreateClientForEndpointCore(
+            endpoint,
+            RegistryHttpTransport.CreateUnverified(httpClient),
+            loggerFactory,
+            installLimits: null,
+            timeProvider,
+            gitHubToken: null,
+            new FileSystemContext(fileSystemRetry));
+
+    /// <summary>
+    /// Creates an endpoint client with explicit transport guarantees and a
+    /// construction-time filesystem retry policy.
+    /// </summary>
+    /// <param name="endpoint">The registry endpoint configuration.</param>
+    /// <param name="transport">The HTTP transport to use for requests.</param>
+    /// <param name="loggerFactory">The logger factory for typed loggers.</param>
+    /// <param name="timeProvider">The time provider, or <see langword="null"/> for the system provider.</param>
+    /// <param name="fileSystemRetry">The bounded filesystem retry options.</param>
+    /// <returns>The registry client for the endpoint.</returns>
+    public static IRegistryClient CreateClientForEndpoint(
+        RegistryEndpoint endpoint,
+        RegistryHttpTransport transport,
+        ILoggerFactory loggerFactory,
+        TimeProvider? timeProvider,
+        FileSystemRetryOptions fileSystemRetry) =>
+        CreateClientForEndpointCore(
+            endpoint,
+            transport,
+            loggerFactory,
+            installLimits: null,
+            timeProvider,
+            gitHubToken: null,
+            new FileSystemContext(fileSystemRetry));
 
     internal static IRegistryClient CreateClientForEndpoint(
         RegistryEndpoint endpoint,
@@ -156,6 +227,23 @@ public static class RegistryClientFactory
         PackageInstallLimits installLimits,
         TimeProvider? timeProvider = null,
         string? gitHubToken = null)
+        => CreateClientForEndpoint(
+            endpoint,
+            transport,
+            loggerFactory,
+            installLimits,
+            timeProvider,
+            gitHubToken,
+            FileSystemContext.CreateDefault());
+
+    internal static IRegistryClient CreateClientForEndpoint(
+        RegistryEndpoint endpoint,
+        RegistryHttpTransport transport,
+        ILoggerFactory loggerFactory,
+        PackageInstallLimits installLimits,
+        TimeProvider? timeProvider,
+        string? gitHubToken,
+        FileSystemContext context)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(transport);
@@ -168,7 +256,8 @@ public static class RegistryClientFactory
             loggerFactory,
             installLimits,
             timeProvider,
-            gitHubToken);
+            gitHubToken,
+            context);
     }
 
     private static IRegistryClient CreateClientForEndpointCore(
@@ -177,33 +266,39 @@ public static class RegistryClientFactory
         ILoggerFactory loggerFactory,
         PackageInstallLimits? installLimits,
         TimeProvider? timeProvider,
-        string? gitHubToken)
+        string? gitHubToken,
+        FileSystemContext context)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(loggerFactory);
+        ArgumentNullException.ThrowIfNull(context);
 
         return endpoint.Type switch
         {
             RegistryType.FhirNpm => new FhirNpmRegistryClient(
                 transport,
                 endpoint,
-                loggerFactory.CreateLogger<FhirNpmRegistryClient>()),
+                loggerFactory.CreateLogger<FhirNpmRegistryClient>(),
+                context),
             RegistryType.FhirCiBuild => new FhirCiBuildClient(
                 transport,
                 endpoint,
                 loggerFactory.CreateLogger<FhirCiBuildClient>(),
                 timeProvider,
-                gitHubToken),
+                gitHubToken,
+                context),
             RegistryType.FhirHttp => new Hl7WebsiteClient(
                 transport,
                 endpoint,
-                loggerFactory.CreateLogger<Hl7WebsiteClient>()),
+                loggerFactory.CreateLogger<Hl7WebsiteClient>(),
+                context),
             RegistryType.Npm => new NpmRegistryClient(
                 transport,
                 endpoint,
                 loggerFactory.CreateLogger<NpmRegistryClient>(),
-                installLimits ?? PackageInstallLimits.FromEnvironment()),
+                installLimits ?? PackageInstallLimits.FromEnvironment(),
+                context),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(endpoint), endpoint.Type, $"Unsupported registry type: {endpoint.Type}.")
         };

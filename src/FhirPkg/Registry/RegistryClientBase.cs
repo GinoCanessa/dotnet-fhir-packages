@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Resolution;
 using FhirPkg.Utilities;
@@ -95,6 +96,26 @@ public abstract class RegistryClientBase : IRegistryClient
     }
 
     /// <summary>
+    /// Initialises the base class with a construction-time filesystem retry policy.
+    /// </summary>
+    /// <param name="httpClient">The HTTP client to use for requests.</param>
+    /// <param name="endpoint">The registry endpoint configuration.</param>
+    /// <param name="logger">The logger instance.</param>
+    /// <param name="fileSystemRetry">The bounded filesystem retry options.</param>
+    protected RegistryClientBase(
+        HttpClient httpClient,
+        RegistryEndpoint endpoint,
+        ILogger logger,
+        FileSystemRetryOptions fileSystemRetry)
+        : this(
+            RegistryHttpTransport.CreateUnverified(httpClient),
+            endpoint,
+            logger,
+            new FileSystemContext(fileSystemRetry))
+    {
+    }
+
+    /// <summary>
     /// Initialises the base class with an explicit redirect-controlled transport capability.
     /// </summary>
     /// <param name="transport">The HTTP transport to use for requests.</param>
@@ -104,11 +125,39 @@ public abstract class RegistryClientBase : IRegistryClient
         RegistryHttpTransport transport,
         RegistryEndpoint endpoint,
         ILogger logger)
+        : this(transport, endpoint, logger, FileSystemContext.CreateDefault())
+    {
+    }
+
+    /// <summary>
+    /// Initialises the base class with explicit transport guarantees and a
+    /// construction-time filesystem retry policy.
+    /// </summary>
+    /// <param name="transport">The HTTP transport to use for requests.</param>
+    /// <param name="endpoint">The registry endpoint configuration.</param>
+    /// <param name="logger">The logger instance.</param>
+    /// <param name="fileSystemRetry">The bounded filesystem retry options.</param>
+    protected RegistryClientBase(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger logger,
+        FileSystemRetryOptions fileSystemRetry)
+        : this(transport, endpoint, logger, new FileSystemContext(fileSystemRetry))
+    {
+    }
+
+    private protected RegistryClientBase(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger logger,
+        FileSystemContext context)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(context);
 
+        FileSystemContext = context;
         _transport = transport;
         Http = transport.HttpClient;
         EndpointConfig = endpoint;
@@ -131,6 +180,8 @@ public abstract class RegistryClientBase : IRegistryClient
                         nameof(endpoint.TrustedHeaderOrigins))));
         }
     }
+
+    internal FileSystemContext FileSystemContext { get; }
 
     // ── Protected HTTP helpers ──────────────────────────────────────────
 
@@ -285,14 +336,26 @@ public abstract class RegistryClientBase : IRegistryClient
     {
         Logger.LogDebug("PUT stream {Uri} ({ContentType})", requestUri, contentType);
 
-        using StreamContent httpContent = new StreamContent(
-            new NonDisposingStream(stream));
-        httpContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-        return await PutContentAsync(
-                requestUri,
-                httpContent,
-                cancellationToken)
-            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        // Adapt before our leave-open wrapper hides an ordinary caller file.
+        // Already-protected inputs keep their original handle, context and budget.
+        Stream source = FileSystemContext.ProtectRead(stream);
+        try
+        {
+            using StreamContent httpContent = new StreamContent(
+                new NonDisposingStream(source));
+            httpContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+            return await PutContentAsync(
+                    requestUri,
+                    httpContent,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (!ReferenceEquals(source, stream))
+                await source.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -593,7 +656,8 @@ public abstract class RegistryClientBase : IRegistryClient
         {
             throw CreateTimeoutException(requestUri, exception);
         }
-        catch
+        catch (Exception exception)
+            when (!FileSystemFailureContext.TryGetTerminal(exception, out _))
         {
             body = "(unable to read response body)";
         }

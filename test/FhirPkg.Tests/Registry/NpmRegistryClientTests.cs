@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Tests.Support;
@@ -24,6 +25,275 @@ public sealed class NpmRegistryClientTests : IDisposable
     public NpmRegistryClientTests()
     {
         Directory.CreateDirectory(_tempRoot);
+    }
+
+    [Fact]
+    public async Task NpmSpool_PartialWriteDoesNotRereadOrDoubleHash()
+    {
+        byte[] resource = new byte[220_000];
+        new Random(11).NextBytes(resource);
+        byte[] archive = CreateArchive("example.package", "1.0.0", resource: resource);
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        using TrackingReadStream source = new(new MemoryStream(archive), canSeek: false);
+        primitives.Enqueue<bool>("WriteAtAsync", call =>
+        {
+            Path.GetFileName(call.Path).ShouldBe("package.tgz");
+            call.Offset.ShouldBe(0);
+            source.BytesRead.ShouldBe(81_920);
+            RandomAccess.Write(call.Handle!, call.Content.Span[..7], call.Offset!.Value);
+            return ScriptedFileSystemPrimitives.NativeFailure<bool>(1117, "spool write", call.Path);
+        });
+        primitives.OnWait = () =>
+        {
+            source.ReadCalls.ShouldBe(1);
+            source.BytesRead.ShouldBe(81_920);
+        };
+        CaptureHandler handler = new();
+        using HttpClient http = CreateHttpClient(handler);
+        NpmRegistryClient client = CreateClient(http, context: primitives.CreateContext(retries: 1));
+
+        PublishResult result = await client.PublishAsync(
+            new PackageReference("example.package", "1.0.0"),
+            source,
+            TestContext.Current.CancellationToken);
+
+        result.Success.ShouldBeTrue();
+        handler.RequestCount.ShouldBe(1);
+        source.BytesRead.ShouldBe(archive.LongLength);
+        source.ReadCalls.ShouldBe(((archive.Length + 81_919) / 81_920) + 1);
+        source.WasDisposed.ShouldBeFalse();
+        source.PositionWasRead.ShouldBeFalse();
+        FileSystemPrimitiveCall[] spoolWrites = primitives.Calls
+            .Where(call => call.Operation == "WriteAtAsync" && Path.GetFileName(call.Path) == "package.tgz")
+            .ToArray();
+        spoolWrites.Length.ShouldBe(((archive.Length + 81_919) / 81_920) + 1);
+        spoolWrites[0].Offset.ShouldBe(0);
+        spoolWrites[1].Offset.ShouldBe(0);
+        spoolWrites[0].Handle.ShouldBeSameAs(spoolWrites[1].Handle);
+        spoolWrites[0].Content.Equals(spoolWrites[1].Content).ShouldBeTrue();
+        spoolWrites[1].Content.ToArray().ShouldBe(archive[..81_920]);
+        primitives.AsyncWaits.ShouldBe([10]);
+        primitives.Waits.ShouldBeEmpty();
+        using JsonDocument document = JsonDocument.Parse(handler.Body);
+        JsonElement version = document.RootElement.GetProperty("versions").GetProperty("1.0.0");
+        version.GetProperty("dist").GetProperty("shasum").GetString().ShouldBe(
+            Convert.ToHexString(SHA1.HashData(archive)).ToLowerInvariant());
+        version.GetProperty("dist").GetProperty("integrity").GetString().ShouldBe(
+            $"sha512-{Convert.ToBase64String(SHA512.HashData(archive))}");
+        JsonElement attachment = document.RootElement.GetProperty("_attachments")
+            .GetProperty("example.package-1.0.0.tgz");
+        attachment.GetProperty("length").GetInt64().ShouldBe(archive.LongLength);
+        Convert.FromBase64String(attachment.GetProperty("data").GetString()!).ShouldBe(archive);
+        AssertNoPublishWorkspaces();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PublishAsync_ManifestIoExhaustionStopsBeforeRequest(bool failLength)
+    {
+        byte[] archive = CreateArchive("example.package", "1.0.0");
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        IOException failure = new("manifest filesystem failure");
+        if (failLength)
+        {
+            primitives.Set<long>("GetLength", call =>
+                ScriptedFileSystemPrimitives.Fail<long>(failure, "manifest length", call.Path));
+        }
+        else
+        {
+            primitives.Set<int>("ReadAtAsync", call =>
+                Path.GetFileName(call.Path) == "package.json"
+                    ? ScriptedFileSystemPrimitives.Fail<int>(failure, "manifest read", call.Path)
+                    : SystemFileSystemPrimitives.Instance.ReadAt(
+                        call.Handle!, call.Buffer, call.Offset!.Value, call.Path!));
+        }
+        CaptureHandler handler = new();
+        using HttpClient http = CreateHttpClient(handler);
+        NpmRegistryClient client = CreateClient(http, context: primitives.CreateContext(retries: 1));
+        using MemoryStream source = new(archive);
+
+        Exception exception;
+        if (failLength)
+        {
+            exception = await Should.ThrowAsync<IOException>(() => client.PublishAsync(
+                new PackageReference("example.package", "1.0.0"), source, TestContext.Current.CancellationToken));
+            exception.ShouldBeSameAs(failure);
+        }
+        else
+        {
+            PackageInstallException installationException = await Should.ThrowAsync<PackageInstallException>(
+                () => client.PublishAsync(
+                    new PackageReference("example.package", "1.0.0"), source, TestContext.Current.CancellationToken));
+            installationException.ErrorCode.ShouldBe(PackageInstallErrorCode.InvalidArchive);
+            installationException.InnerException.ShouldBeSameAs(failure);
+            exception = installationException;
+        }
+
+        handler.RequestCount.ShouldBe(0);
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? context).ShouldBeTrue();
+        context!.RetriesUsed.ShouldBe(1);
+        primitives.Calls.Count(call => call.Operation == (failLength ? "GetLength" : "ReadAtAsync")
+            && Path.GetFileName(call.Path) == "package.json").ShouldBe(2);
+        primitives.AsyncWaits.ShouldBe([10]);
+        primitives.Waits.ShouldBeEmpty();
+        AssertNoPublishWorkspaces();
+    }
+
+    [Fact]
+    public async Task PublishAsync_TempDiscoveryExhaustionDoesNotRestart()
+    {
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        IOException failure = new("system temp unavailable");
+        primitives.Set<string>("GetTempPath", _ =>
+            ScriptedFileSystemPrimitives.Fail<string>(failure, "system temp"));
+        CaptureHandler handler = new();
+        using HttpClient http = CreateHttpClient(handler);
+        NpmRegistryClient client = new(
+            PublicationTestSupport.Transport(http),
+            PublicationTestSupport.Endpoint("npm", RegistryType.Npm),
+            NullLogger<NpmRegistryClient>.Instance,
+            new PackageInstallLimits(),
+            primitives.CreateContext(retries: 2));
+        using MemoryStream source = new(CreateArchive("example.package", "1.0.0"));
+
+        IOException exception = await Should.ThrowAsync<IOException>(() => client.PublishAsync(
+            new PackageReference("example.package", "1.0.0"), source, TestContext.Current.CancellationToken));
+
+        exception.ShouldBeSameAs(failure);
+        primitives.Count("GetTempPath").ShouldBe(3);
+        primitives.Count("CreateDirectory").ShouldBe(0);
+        primitives.Count("OpenFileHandle").ShouldBe(0);
+        primitives.Count("OpenOwnedDescriptor").ShouldBe(0);
+        primitives.AsyncWaits.ShouldBe([10, 10]);
+        primitives.Waits.ShouldBeEmpty();
+        handler.RequestCount.ShouldBe(0);
+        source.Position.ShouldBe(0);
+        source.CanRead.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task PublishAsync_DeferredAttachmentRetainsClientContextAfterEnvironmentChanges()
+    {
+        string[] variables =
+        [
+            FileSystemRetryOptions.RetryCountEnvironmentVariable,
+            FileSystemRetryOptions.MinimumDelayMillisecondsEnvironmentVariable,
+            FileSystemRetryOptions.MaximumJitterMillisecondsEnvironmentVariable,
+        ];
+        string?[] originals = variables.Select(Environment.GetEnvironmentVariable).ToArray();
+        try
+        {
+            byte[] archive = CreateArchive("example.package", "1.0.0");
+            ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+            int callsBeforeSerialization = 0;
+            CaptureHandler handler = new()
+            {
+                BeforeSerialization = () =>
+                {
+                    callsBeforeSerialization = primitives.Calls.Count;
+                    primitives.Enqueue("ReadAtAsync",
+                        ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "deferred attachment"));
+                },
+            };
+            using HttpClient http = CreateHttpClient(handler);
+            NpmRegistryClient client = CreateClient(http, context: primitives.CreateContext(retries: 1));
+            foreach (string variable in variables)
+                Environment.SetEnvironmentVariable(variable, "invalid-after-client-construction");
+            using MemoryStream source = new(archive);
+
+            PublishResult result = await client.PublishAsync(
+                new PackageReference("example.package", "1.0.0"), source, TestContext.Current.CancellationToken);
+
+            result.Success.ShouldBeTrue();
+            handler.RequestCount.ShouldBe(1);
+            primitives.AsyncWaits.ShouldBe([10]);
+            primitives.Waits.ShouldBeEmpty();
+            FileSystemPrimitiveCall[] deferredReads = primitives.Calls.Skip(callsBeforeSerialization)
+                .Where(call => call.Operation == "ReadAtAsync")
+                .ToArray();
+            deferredReads.Length.ShouldBe(3);
+            deferredReads[0].Offset.ShouldBe(0);
+            deferredReads[1].Offset.ShouldBe(0);
+            deferredReads[0].Handle.ShouldBeSameAs(deferredReads[1].Handle);
+            using JsonDocument document = JsonDocument.Parse(handler.Body);
+            Convert.FromBase64String(document.RootElement.GetProperty("_attachments")
+                .GetProperty("example.package-1.0.0.tgz").GetProperty("data").GetString()!).ShouldBe(archive);
+            source.CanRead.ShouldBeTrue();
+            AssertNoPublishWorkspaces();
+        }
+        finally
+        {
+            for (int index = 0; index < variables.Length; index++)
+                Environment.SetEnvironmentVariable(variables[index], originals[index]);
+        }
+    }
+
+    [Fact]
+    public async Task PublishAsync_TerminalCleanupFailureStopsFallbackAfterFailedHttpResult()
+    {
+        byte[] archive = CreateArchive("example.package", "1.0.0");
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        primitives.Set<bool>("DeleteEntry", call =>
+            ScriptedFileSystemPrimitives.NativeFailure<bool>(1117, "workspace cleanup", call.Path));
+        FileSystemContext context = primitives.CreateContext(retries: 1);
+        CaptureHandler handler = new(HttpStatusCode.InternalServerError);
+        using HttpClient http = CreateHttpClient(handler);
+        NpmRegistryClient first = CreateClient(http, context: context);
+        FhirNpmRegistryClient second = new(
+            PublicationTestSupport.Transport(http),
+            PublicationTestSupport.Endpoint("second"),
+            NullLogger<FhirNpmRegistryClient>.Instance,
+            context);
+        RedundantRegistryClient composite = new([first, second], 3, null, context);
+        using MemoryStream source = new(archive);
+
+        PublishResult result = await composite.PublishAsync(
+            new PackageReference("example.package", "1.0.0"), source, TestContext.Current.CancellationToken);
+
+        result.Success.ShouldBeFalse();
+        result.StatusCode.ShouldBe(HttpStatusCode.InternalServerError);
+        handler.RequestCount.ShouldBe(1);
+        primitives.Count("DeleteEntry").ShouldBe(2);
+        primitives.AsyncWaits.ShouldBe([10]);
+        primitives.Waits.ShouldBeEmpty();
+        FileSystemFailureContext.TryGetResult(result, out FileSystemFailureContext? failure).ShouldBeTrue();
+        failure!.Operation.ShouldBe("workspace cleanup");
+        failure.RetriesUsed.ShouldBe(1);
+        result.Message!.ShouldContain(failure.Format());
+        Directory.GetDirectories(_tempRoot).Length.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task PublishAsync_ExpectedMissingWorkspaceCleanupDoesNotWait()
+    {
+        byte[] archive = CreateArchive("example.package", "1.0.0");
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        string? removedWorkspace = null;
+        CaptureHandler handler = new(HttpStatusCode.InternalServerError)
+        {
+            AfterSerialization = () =>
+            {
+                removedWorkspace = Directory.GetDirectories(_tempRoot).Single();
+                Directory.Delete(removedWorkspace, recursive: true);
+            },
+        };
+        using HttpClient http = CreateHttpClient(handler);
+        NpmRegistryClient client = CreateClient(http, context: primitives.CreateContext(retries: 2));
+        using MemoryStream source = new(archive);
+
+        PublishResult result = await client.PublishAsync(
+            new PackageReference("example.package", "1.0.0"), source, TestContext.Current.CancellationToken);
+
+        result.Success.ShouldBeFalse();
+        FileSystemFailureContext.TryGetResult(result, out _).ShouldBeFalse();
+        handler.RequestCount.ShouldBe(1);
+        primitives.Calls.Count(call => call.Operation == "Probe"
+            && call.Path == removedWorkspace && call.Flags == 0).ShouldBe(1);
+        primitives.Count("DeleteEntry").ShouldBe(0);
+        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+        AssertNoPublishWorkspaces();
     }
 
     [Fact]
@@ -536,7 +806,8 @@ public sealed class NpmRegistryClientTests : IDisposable
 
     private NpmRegistryClient CreateClient(
         HttpClient httpClient,
-        PackageInstallLimits? limits = null)
+        PackageInstallLimits? limits = null,
+        FileSystemContext? context = null)
     {
         RegistryHttpTransport transport =
             RegistryHttpTransport.CreateRedirectControlled(
@@ -553,6 +824,7 @@ public sealed class NpmRegistryClientTests : IDisposable
             },
             NullLogger<NpmRegistryClient>.Instance,
             limits ?? new PackageInstallLimits(),
+            context ?? FileSystemContext.CreateDefault(),
             CreatePublishWorkspace);
     }
 
@@ -627,6 +899,10 @@ public sealed class NpmRegistryClientTests : IDisposable
 
         internal byte[] Body { get; private set; } = [];
 
+        internal Action? BeforeSerialization { get; init; }
+
+        internal Action? AfterSerialization { get; init; }
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
@@ -644,11 +920,13 @@ public sealed class NpmRegistryClientTests : IDisposable
                 request.Content?.Headers.ContentLength;
             TransferEncodingChunked =
                 request.Headers.TransferEncodingChunked;
+            BeforeSerialization?.Invoke();
             Body = request.Content is null
                 ? []
                 : await request.Content
                     .ReadAsByteArrayAsync(cancellationToken)
                     .ConfigureAwait(false);
+            AfterSerialization?.Invoke();
             return new HttpResponseMessage(statusCode)
             {
                 Content = new StringContent(
@@ -673,6 +951,8 @@ public sealed class NpmRegistryClientTests : IDisposable
         }
 
         internal long BytesRead { get; private set; }
+
+        internal int ReadCalls { get; private set; }
 
         internal bool WasDisposed { get; private set; }
 
@@ -713,6 +993,7 @@ public sealed class NpmRegistryClientTests : IDisposable
             int offset,
             int count)
         {
+            ReadCalls++;
             int read = _inner.Read(buffer, offset, count);
             BytesRead += read;
             return read;
@@ -722,6 +1003,7 @@ public sealed class NpmRegistryClientTests : IDisposable
             Memory<byte> buffer,
             CancellationToken cancellationToken = default)
         {
+            ReadCalls++;
             int read = await _inner.ReadAsync(
                     buffer,
                     cancellationToken)
