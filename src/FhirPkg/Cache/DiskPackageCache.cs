@@ -519,7 +519,7 @@ public class DiskPackageCache :
             long sizeBytes;
             try
             {
-                await using FileStream archiveStream =
+                await using Stream archiveStream =
                     acquiredContent.OpenArchiveRead();
                 ArchiveExtractionMetrics metrics =
                     await TarballExtractor.ExtractAsync(
@@ -724,7 +724,7 @@ public class DiskPackageCache :
             long sizeBytes;
             try
             {
-                await using FileStream archiveStream =
+                await using Stream archiveStream =
                     acquiredContent.OpenArchiveRead();
                 ArchiveExtractionMetrics metrics =
                     await TarballExtractor.ExtractAsync(

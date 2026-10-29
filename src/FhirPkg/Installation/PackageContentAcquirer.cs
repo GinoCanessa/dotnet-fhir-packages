@@ -2,6 +2,7 @@
 
 using System.Security.Cryptography;
 using FhirPkg.Cache;
+using FhirPkg.IO;
 
 namespace FhirPkg.Installation;
 
@@ -36,8 +37,37 @@ internal static class PackageContentAcquirer
                 verifyChecksums,
                 directive,
                 coordinator: null,
+                FileSystemContext.CreateDefault(),
                 cancellationToken)
             .ConfigureAwait(false);
+
+    internal static async Task<PackageContentAcquisition> AcquireAsync(
+        Stream source,
+        string cacheRoot,
+        PackageInstallLimits limits,
+        long? reportedContentLength,
+        string? expectedSha256,
+        string? expectedSha1,
+        bool verifyChecksums,
+        string? directive,
+        FileSystemContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return await AcquireCoreAsync(
+                source,
+                cacheRoot,
+                limits,
+                reportedContentLength,
+                expectedSha256,
+                expectedSha1,
+                verifyChecksums,
+                directive,
+                coordinator: null,
+                context,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 
     internal static async Task<PackageContentAcquisition> AcquireAsync(
         Stream source,
@@ -62,6 +92,37 @@ internal static class PackageContentAcquirer
                 verifyChecksums,
                 directive,
                 coordinator,
+                FileSystemContext.CreateDefault(),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal static async Task<PackageContentAcquisition> AcquireAsync(
+        Stream source,
+        string cacheRoot,
+        PackageInstallLimits limits,
+        long? reportedContentLength,
+        string? expectedSha256,
+        string? expectedSha1,
+        bool verifyChecksums,
+        string? directive,
+        PackageCacheCoordinator coordinator,
+        FileSystemContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(coordinator);
+        ArgumentNullException.ThrowIfNull(context);
+        return await AcquireCoreAsync(
+                source,
+                cacheRoot,
+                limits,
+                reportedContentLength,
+                expectedSha256,
+                expectedSha1,
+                verifyChecksums,
+                directive,
+                coordinator,
+                context,
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -76,6 +137,7 @@ internal static class PackageContentAcquirer
         bool verifyChecksums,
         string? directive,
         PackageCacheCoordinator? coordinator,
+        FileSystemContext context,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -115,7 +177,8 @@ internal static class PackageContentAcquirer
 
         try
         {
-            Directory.CreateDirectory(operationDirectory);
+            await context.FileSystem.CreateDirectoryAsync(operationDirectory, cancellationToken)
+                .ConfigureAwait(false);
 
             using IncrementalHash sha256 = IncrementalHash.CreateHash(
                 HashAlgorithmName.SHA256);
@@ -129,33 +192,49 @@ internal static class PackageContentAcquirer
 
             try
             {
-                await using FileStream destination = new FileStream(
-                    archivePath,
-                    FileMode.CreateNew,
-                    FileAccess.Write,
-                    FileShare.None,
-                    BufferSize,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-
-                while (true)
+                // An ordinary caller file is borrowed once; downloads and other
+                // opaque sources remain one-shot, unwrapped streams.
+                Stream input = FileSystemContext.ProtectRead(source, context);
+                try
                 {
-                    int bytesRead = await source.ReadAsync(
-                            buffer.AsMemory(),
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    if (bytesRead == 0)
-                        break;
+                    await using PositionedFileStream destination =
+                        await context.FileSystem.OpenPositionedFileAsync(
+                                archivePath,
+                                FileMode.CreateNew,
+                                FileAccess.Write,
+                                FileShare.None,
+                                FileOptions.Asynchronous | FileOptions.SequentialScan,
+                                cancellationToken)
+                            .ConfigureAwait(false);
 
-                    if (bytesRead > limits.MaxCompressedBytes - actualLength)
-                        throw CompressedLimitExceeded(directive, limits.MaxCompressedBytes);
+                    while (true)
+                    {
+                        int bytesRead = await input.ReadAsync(
+                                buffer.AsMemory(),
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        if (bytesRead == 0)
+                            break;
 
-                    actualLength += bytesRead;
-                    sha256.AppendData(buffer, 0, bytesRead);
-                    sha1?.AppendData(buffer, 0, bytesRead);
-                    await destination.WriteAsync(
-                            buffer.AsMemory(0, bytesRead),
-                            cancellationToken)
-                        .ConfigureAwait(false);
+                        if (bytesRead > limits.MaxCompressedBytes - actualLength)
+                            throw CompressedLimitExceeded(directive, limits.MaxCompressedBytes);
+
+                        // The destination retains its own copy of the block until the
+                        // write succeeds; length and hashes advance exactly once after.
+                        await destination.WriteAsync(
+                                buffer.AsMemory(0, bytesRead),
+                                cancellationToken)
+                            .ConfigureAwait(false);
+
+                        actualLength += bytesRead;
+                        sha256.AppendData(buffer, 0, bytesRead);
+                        sha1?.AppendData(buffer, 0, bytesRead);
+                    }
+                }
+                finally
+                {
+                    if (!ReferenceEquals(input, source))
+                        await input.DisposeAsync().ConfigureAwait(false);
                 }
             }
             catch (IOException exception)
@@ -192,7 +271,8 @@ internal static class PackageContentAcquirer
                 actualLength,
                 actualSha256,
                 actualSha1,
-                operationOwner);
+                operationOwner,
+                context);
             completed = true;
             return result;
         }
@@ -212,8 +292,17 @@ internal static class PackageContentAcquirer
         {
             if (!completed)
             {
-                PackageContentAcquisition.TryDeleteOperationDirectory(operationDirectory);
-                operationOwner?.Dispose();
+                try
+                {
+                    await PackageContentAcquisition.TryDeleteOperationDirectoryAsync(
+                            operationDirectory,
+                            context)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    operationOwner?.Dispose();
+                }
             }
         }
     }
@@ -302,7 +391,8 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
         long actualLength,
         string sha256,
         string? sha1,
-        PackageCacheLease? operationOwner = null)
+        PackageCacheLease? operationOwner = null,
+        FileSystemContext? context = null)
     {
         OperationId = operationId;
         OperationDirectory = operationDirectory;
@@ -311,9 +401,11 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
         Sha256 = sha256;
         Sha1 = sha1;
         _operationOwner = operationOwner;
+        _context = context ?? FileSystemContext.CreateDefault();
     }
 
     private readonly PackageCacheLease? _operationOwner;
+    private readonly FileSystemContext _context;
 
     internal string OperationId { get; }
 
@@ -327,52 +419,70 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
 
     internal string? Sha1 { get; }
 
-    internal FileStream OpenArchiveRead() =>
-        new FileStream(
-            ArchivePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            81_920,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
+    /// <summary>
+    /// Opens the staged archive with the acquisition's retained policy. Each
+    /// later read replays only its own block against the same open handle.
+    /// </summary>
+    internal Stream OpenArchiveRead() =>
+        _context.FileSystem.OpenProtectedRegularRead(ArchivePath);
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         try
         {
-            TryDeleteOperationDirectory(OperationDirectory);
+            await TryDeleteOperationDirectoryAsync(OperationDirectory, _context)
+                .ConfigureAwait(false);
         }
         finally
         {
             _operationOwner?.Dispose();
         }
-
-        return ValueTask.CompletedTask;
     }
 
-    internal static void TryDeleteOperationDirectory(string operationDirectory)
+    internal static void TryDeleteOperationDirectory(string operationDirectory) =>
+        TryDeleteOperationDirectory(operationDirectory, FileSystemContext.CreateDefault());
+
+    internal static void TryDeleteOperationDirectory(
+        string operationDirectory,
+        FileSystemContext context)
     {
+        ArgumentNullException.ThrowIfNull(context);
+        ResilientFileSystem fileSystem = context.FileSystem;
         try
         {
-            if (Directory.Exists(operationDirectory))
-                Directory.Delete(operationDirectory, recursive: true);
+            if (fileSystem.Probe(operationDirectory).Kind == FileSystemEntryKind.Directory)
+            {
+                fileSystem.Delete(
+                    operationDirectory,
+                    FileSystemEntryKind.Directory,
+                    recursive: true,
+                    missingAllowed: true);
+            }
 
             string? stagingRoot = Path.GetDirectoryName(operationDirectory);
             if (stagingRoot is not null
-                && Directory.Exists(stagingRoot)
-                && !Directory.EnumerateFileSystemEntries(stagingRoot).Any())
+                && fileSystem.Probe(stagingRoot).Kind == FileSystemEntryKind.Directory
+                && fileSystem.SnapshotDirectory(stagingRoot).Length == 0)
             {
-                Directory.Delete(stagingRoot);
+                fileSystem.Delete(
+                    stagingRoot,
+                    FileSystemEntryKind.Directory,
+                    recursive: false,
+                    missingAllowed: true);
             }
 
             string? operationsRoot = stagingRoot is null
                 ? null
                 : Path.GetDirectoryName(stagingRoot);
             if (operationsRoot is not null
-                && Directory.Exists(operationsRoot)
-                && !Directory.EnumerateFileSystemEntries(operationsRoot).Any())
+                && fileSystem.Probe(operationsRoot).Kind == FileSystemEntryKind.Directory
+                && fileSystem.SnapshotDirectory(operationsRoot).Length == 0)
             {
-                Directory.Delete(operationsRoot);
+                fileSystem.Delete(
+                    operationsRoot,
+                    FileSystemEntryKind.Directory,
+                    recursive: false,
+                    missingAllowed: true);
             }
         }
         catch (UnauthorizedAccessException)
@@ -384,4 +494,68 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
             // Cleanup must not replace the primary installation outcome.
         }
     }
+
+    internal static async ValueTask TryDeleteOperationDirectoryAsync(
+        string operationDirectory,
+        FileSystemContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ResilientFileSystem fileSystem = context.FileSystem;
+        try
+        {
+            // Cleanup is its own bounded operation and never observes the primary
+            // operation's cancellation.
+            if ((await fileSystem.ProbeAsync(operationDirectory).ConfigureAwait(false)).Kind
+                == FileSystemEntryKind.Directory)
+            {
+                await fileSystem.DeleteAsync(
+                        operationDirectory,
+                        FileSystemEntryKind.Directory,
+                        recursive: true,
+                        missingAllowed: true)
+                    .ConfigureAwait(false);
+            }
+
+            string? stagingRoot = Path.GetDirectoryName(operationDirectory);
+            if (stagingRoot is not null
+                && await IsEmptyDirectoryAsync(fileSystem, stagingRoot).ConfigureAwait(false))
+            {
+                await fileSystem.DeleteAsync(
+                        stagingRoot,
+                        FileSystemEntryKind.Directory,
+                        recursive: false,
+                        missingAllowed: true)
+                    .ConfigureAwait(false);
+            }
+
+            string? operationsRoot = stagingRoot is null
+                ? null
+                : Path.GetDirectoryName(stagingRoot);
+            if (operationsRoot is not null
+                && await IsEmptyDirectoryAsync(fileSystem, operationsRoot).ConfigureAwait(false))
+            {
+                await fileSystem.DeleteAsync(
+                        operationsRoot,
+                        FileSystemEntryKind.Directory,
+                        recursive: false,
+                        missingAllowed: true)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Cleanup must not replace the primary installation outcome.
+        }
+        catch (IOException)
+        {
+            // Cleanup must not replace the primary installation outcome.
+        }
+    }
+
+    private static async ValueTask<bool> IsEmptyDirectoryAsync(
+        ResilientFileSystem fileSystem,
+        string path) =>
+        (await fileSystem.ProbeAsync(path).ConfigureAwait(false)).Kind
+            == FileSystemEntryKind.Directory
+        && (await fileSystem.SnapshotDirectoryAsync(path).ConfigureAwait(false)).Length == 0;
 }

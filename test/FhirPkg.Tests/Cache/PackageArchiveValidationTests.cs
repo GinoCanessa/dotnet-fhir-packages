@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Tests.Support;
 using Shouldly;
@@ -723,6 +724,46 @@ public class PackageArchiveValidationTests : IDisposable
 
         AssertSameTree(normalized, await SnapshotTreeAsync(extractedPath));
         Directory.Exists(Path.Combine(extractedPath, "package", "package")).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Normalize_FaultAfterMoveDoesNotMoveCompletedEntryAgain()
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package.json", Manifest),
+            ArbitraryTarBuilder.File("README.md", "readme"));
+        string extractedPath = Path.Combine(_testRoot, "normalize-fault");
+        await TarballExtractor.ExtractAsync(
+            archive,
+            extractedPath,
+            TestContext.Current.CancellationToken);
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(
+            FileSystemPlatform.Linux);
+        primitives.UseSystemFiles();
+        primitives.EnableDirectorySynchronization();
+        primitives.Set<IEnumerator<string>>(
+            "CreateDirectoryEnumerator",
+            call => SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        // The rename commits, then the durability barrier fails once: replay must
+        // finish the barrier without renaming the completed entry again.
+        primitives.Enqueue<FileSystemDirectorySyncOutcome>("SynchronizeDescriptor", call =>
+            ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(
+                5, "fsync", call.Path));
+        FileSystemContext context = primitives.CreateContext();
+
+        PackageArchiveInventory inventory = PackageArchiveInventory.FromFileSystem(
+            extractedPath,
+            "example.package#1.0.0",
+            context);
+        TarballExtractor.ValidateAndNormalizePackageStructure(
+            extractedPath,
+            inventory,
+            "example.package#1.0.0",
+            context);
+
+        File.Exists(Path.Combine(extractedPath, "package", "package.json")).ShouldBeTrue();
+        File.Exists(Path.Combine(extractedPath, "package", "README.md")).ShouldBeTrue();
+        primitives.Count("MovePath").ShouldBe(2);
     }
 
     [Theory]

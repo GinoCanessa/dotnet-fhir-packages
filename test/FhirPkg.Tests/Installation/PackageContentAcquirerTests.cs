@@ -6,7 +6,9 @@ using System.Security.Cryptography;
 using System.Text;
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
+using FhirPkg.Tests.Support;
 using Shouldly;
 using Xunit;
 
@@ -335,6 +337,59 @@ public class PackageContentAcquirerTests : IDisposable
 
         exception.ErrorCode.ShouldBe(PackageInstallErrorCode.EntrySizeLimitExceeded);
         AssertNoStagingOperations();
+    }
+
+    [Fact]
+    public async Task Acquire_PartialStagingWriteDoesNotRereadSourceOrDoubleHash()
+    {
+        byte[] content = Encoding.UTF8.GetBytes("partially-written-staging-content");
+        using TrackingReadStream source = new TrackingReadStream(
+            new MemoryStream(content),
+            canSeek: false);
+        ScriptedFileSystemPrimitives primitives = SystemFiles();
+        primitives.Enqueue<bool>("WriteAtAsync", call =>
+        {
+            // A physical side effect followed by a safe failure: only the same
+            // retained bytes may be rewritten, never a fresh source read.
+            RandomAccess.Write(call.Handle!, call.Content.Span[..5], call.Offset!.Value);
+            return ScriptedFileSystemPrimitives.NativeFailure<bool>(1117, "WriteAtAsync", call.Path);
+        });
+
+        await using PackageContentAcquisition acquisition =
+            await PackageContentAcquirer.AcquireAsync(
+                source,
+                _cacheRoot,
+                CreateLimits(content.Length),
+                reportedContentLength: null,
+                expectedSha256: null,
+                expectedSha1: HashSha1(content),
+                verifyChecksums: true,
+                directive: "example.package#1.0.0",
+                primitives.CreateContext(),
+                TestContext.Current.CancellationToken);
+
+        acquisition.ActualLength.ShouldBe(content.Length);
+        acquisition.Sha256.ShouldBe(HashSha256(content));
+        acquisition.Sha1.ShouldBe(HashSha1(content));
+        source.BytesRead.ShouldBe(content.Length);
+        source.ReadCalls.ShouldBe(2);
+        primitives.Count("WriteAtAsync").ShouldBe(2);
+        primitives.AsyncWaits.ShouldBe([10]);
+        primitives.Waits.ShouldBeEmpty();
+        (await File.ReadAllBytesAsync(
+            acquisition.ArchivePath,
+            TestContext.Current.CancellationToken)).ShouldBe(content);
+    }
+
+    private static ScriptedFileSystemPrimitives SystemFiles()
+    {
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(
+            SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<IEnumerator<string>>(
+            "CreateDirectoryEnumerator",
+            call => SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        return primitives;
     }
 
     private static PackageInstallLimits CreateLimits(long maxCompressedBytes) =>

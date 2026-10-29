@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using FhirPkg.Installation;
+using FhirPkg.IO;
 
 namespace FhirPkg.Cache;
 
@@ -17,13 +18,20 @@ internal static class PackageStructureNormalizer
         ArgumentException.ThrowIfNullOrWhiteSpace(extractedPath);
         ArgumentNullException.ThrowIfNull(fileOperations);
 
-        string stagingPath = Path.GetFullPath(extractedPath);
+        // Only a relative path needs OS-backed resolution; a context-bound adapter
+        // resolves it under its own policy, other adapters keep pure resolution.
+        string stagingPath = !Path.IsPathFullyQualified(extractedPath)
+            && fileOperations is SystemPackageCacheFileOperations systemOperations
+                ? systemOperations.Context.FileSystem.GetFullPath(extractedPath, cancellationToken)
+                : Path.GetFullPath(extractedPath);
         string siblingPath = Path.Combine(
             Path.GetDirectoryName(stagingPath)!,
             $"legacy-{Guid.NewGuid():N}");
 
         // Keep the complete tree together, including any incidental package entry.
         // The final staging path must remain expanded for transaction recovery.
+        // Each step is its own protected operation; a later failure never repeats
+        // an earlier completed move.
         cancellationToken.ThrowIfCancellationRequested();
         fileOperations.MoveDirectory(stagingPath, siblingPath);
         cancellationToken.ThrowIfCancellationRequested();
@@ -38,10 +46,22 @@ internal static class PackageStructureNormalizer
     internal static PackageArchiveLayoutResult ValidateAndNormalize(
         string extractedPath,
         PackageArchiveInventory inventory,
-        string? directive)
+        string? directive) =>
+        ValidateAndNormalize(
+            extractedPath,
+            inventory,
+            directive,
+            FileSystemContext.CreateDefault());
+
+    internal static PackageArchiveLayoutResult ValidateAndNormalize(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive,
+        FileSystemContext context)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(extractedPath);
         ArgumentNullException.ThrowIfNull(inventory);
+        ArgumentNullException.ThrowIfNull(context);
 
         List<PackageArchiveInventoryNode> manifestNodes = inventory.Nodes
             .Where(node =>
@@ -111,7 +131,7 @@ internal static class PackageStructureNormalizer
             }
 
             string contentPath = ancillaryRoots.Count > 0
-                ? NormalizeRootEntries(extractedPath)
+                ? NormalizeRootEntries(extractedPath, context)
                 : Path.Combine(extractedPath, PackageDirectoryName);
             return new PackageArchiveLayoutResult(
                 PackageArchiveLayout.Standard,
@@ -129,7 +149,7 @@ internal static class PackageStructureNormalizer
                     "Legacy package archives must not contain a package/ subtree or second manifest.");
             }
 
-            string contentPath = NormalizeRootEntries(extractedPath);
+            string contentPath = NormalizeRootEntries(extractedPath, context);
             return new PackageArchiveLayoutResult(
                 PackageArchiveLayout.Legacy,
                 contentPath,
@@ -154,28 +174,34 @@ internal static class PackageStructureNormalizer
             ManifestFileName,
             StringComparison.Ordinal);
 
-    private static string NormalizeRootEntries(string extractedPath)
+    private static string NormalizeRootEntries(
+        string extractedPath,
+        FileSystemContext context)
     {
+        ResilientFileSystem fileSystem = context.FileSystem;
         string contentPath = Path.Combine(
             extractedPath,
             PackageDirectoryName);
-        Directory.CreateDirectory(contentPath);
+        fileSystem.CreateDirectory(contentPath);
 
-        foreach (string entryPath in Directory.EnumerateFileSystemEntries(extractedPath)
-            .Where(path => !string.Equals(
-                path,
-                contentPath,
-                StringComparison.OrdinalIgnoreCase))
-            .ToList())
+        // The snapshot is complete before the first move. Each move is then its own
+        // operation: a completed child is never revisited when a later one fails.
+        string[] entryPaths = fileSystem.SnapshotDirectory(extractedPath);
+        foreach (string entryPath in entryPaths)
         {
-            string destinationPath = Path.Combine(
-                contentPath,
-                Path.GetFileName(entryPath));
-            FileAttributes attributes = File.GetAttributes(entryPath);
-            if ((attributes & FileAttributes.Directory) != 0)
-                Directory.Move(entryPath, destinationPath);
-            else
-                File.Move(entryPath, destinationPath);
+            string entryName = Path.GetFileName(entryPath);
+            if (string.Equals(
+                entryName,
+                PackageDirectoryName,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string destinationPath = Path.Combine(contentPath, entryName);
+            // Directories and files share the one move operation, which rejects an
+            // occupied destination instead of merging.
+            fileSystem.MovePath(entryPath, destinationPath);
         }
 
         return contentPath;
