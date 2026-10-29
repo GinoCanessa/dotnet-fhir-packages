@@ -15,6 +15,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
   - [Archive Layout and Runtime Preservation](#archive-layout-and-runtime-preservation)
 - [Options](#options)
   - [FhirPackageManagerOptions](#fhirpackagemanageroptions)
+  - [FileSystemRetryOptions](#filesystemretryoptions)
   - [InstallOptions](#installoptions)
   - [PackageSourceInstallOptions](#packagesourceinstalloptions)
   - [RestoreOptions](#restoreoptions)
@@ -515,6 +516,7 @@ Top-level configuration for the SDK. See the
 ```csharp
 public class FhirPackageManagerOptions
 {
+    public FileSystemRetryOptions FileSystemRetry { get; set; }    // default: new unspecified options
     public PackageInstallLimits InstallLimits { get; set; }
     public CorruptCacheBehavior CorruptCacheBehavior { get; set; }  // default: Repair
     public bool Unmodified { get; set; }                           // default: false; runtime payload/index policy
@@ -551,6 +553,146 @@ constructor and the DI registration both build one, so both support it. The
 overload can only build an unverified transport and therefore throws
 `InvalidOperationException` when `GitHubToken` is set; use the
 `RegistryHttpTransport` overload instead.
+
+### FileSystemRetryOptions
+
+`FhirPackageManagerOptions.FileSystemRetry` configures bounded retries for
+safely replayable managed/native filesystem work in the manager-owned graph.
+It defaults to a new **unspecified** options object, not a fully assigned policy.
+
+```csharp
+public sealed class FileSystemRetryOptions
+{
+    public const int DefaultRetryCount = 5;
+    public const int DefaultMinimumDelayMilliseconds = 10;
+    public const int DefaultMaximumJitterMilliseconds = 10;
+
+    public const string RetryCountEnvironmentVariable = "FHIRPKG_FS_RETRY_COUNT";
+    public const string MinimumDelayMillisecondsEnvironmentVariable = "FHIRPKG_FS_MIN_DELAY_MS";
+    public const string MaximumJitterMillisecondsEnvironmentVariable = "FHIRPKG_FS_JITTER_MAX_MS";
+
+    public int RetryCount { get; set; }
+    public int MinimumDelayMilliseconds { get; set; }
+    public int MaximumJitterMilliseconds { get; set; }
+}
+```
+
+| Property | Default | Environment override |
+|---|---:|---|
+| `RetryCount` | 5 | `FHIRPKG_FS_RETRY_COUNT` |
+| `MinimumDelayMilliseconds` | 10 | `FHIRPKG_FS_MIN_DELAY_MS` |
+| `MaximumJitterMilliseconds` | 10 | `FHIRPKG_FS_JITTER_MAX_MS` |
+
+Resolve each value independently: **explicitly assigned property > environment
+> default**. Getters report defaults while nullable backing values distinguish
+unassigned from assigned properties. Assigning a default or zero is still
+explicit; an explicit value masks only its own lower-priority environment
+value, not invalid values for other settings.
+
+All effective values must be nonnegative `Int32` integers. Environment text
+uses invariant unsigned decimal syntax: empty, negative, malformed, and
+overflowing values fail validation. Minimum delay plus maximum jitter must be
+at most `Int32.MaxValue`; there is no smaller cap. Attempt totals and delay
+arithmetic use wider types, so `Int32.MaxValue` retries means up to
+2,147,483,648 executions. A null policy or invalid effective value throws
+`PackageInstallException` with `InvalidPolicy` / `PolicyValidation` before
+affected filesystem work.
+
+`RetryCount` counts retries **after** the initial execution. Zero gives one
+execution; defaults permit six executions with five waits. Before each
+eligible retry, sample a fresh uniform integer from zero through
+`MaximumJitterMilliseconds` **inclusive** and wait
+`MinimumDelayMilliseconds + sample`. No wait precedes the initial execution;
+success and exhaustion have no following wait. Default scheduled waits total
+50–100 ms at exhaustion, excluding OS-call execution time.
+
+```csharp
+using FhirPackageManager manager = new(new FhirPackageManagerOptions
+{
+    FileSystemRetry = new FileSystemRetryOptions
+    {
+        RetryCount = 3,
+        MinimumDelayMilliseconds = 10,
+        MaximumJitterMilliseconds = 10,
+    },
+});
+```
+
+#### Lifetime and Injected Collaborators
+
+Direct managers, DI graphs, and standalone components resolve immutable
+effective settings at construction. Later options/environment mutations do not
+reconfigure them. Fully populated option copies retain the **original
+explicitness separately**; copying does not turn environment-only settings
+into explicit manager configuration. Deferred file-backed HTTP content retains
+its originating context until serialization.
+
+Assigning **at least one manager retry property**, even its default or zero,
+requires matching effective values on injected built-ins. An untouched/empty
+options object, or environment-only configuration, does not enable that check.
+Validation follows actual held collaborators of built-in dependency/version
+resolvers and flattened composite registry leaves, with one shared
+reference-identity visited set. Matching top-level arguments cannot hide a
+different-policy cache or registry inside a resolver. Mismatches fail with
+`InvalidPolicy` / `PolicyValidation` before newly initiated manager-owned I/O.
+Already-constructed injected objects may have performed their own I/O.
+Third-party implementations are opaque and are neither inspected nor mutated.
+
+Standalone configured constructors and endpoint overloads are shown under
+[DiskPackageCache](#diskpackagecache), [Indexing](#ipackageindexer),
+[RegistryEndpoint](#registryendpoint), [Built-in Registry Clients](#built-in-registry-clients),
+and [RegistryClientBase](#registryclientbase). The composite uses a named
+factory to preserve existing `params`/null/default source bindings. Existing
+interfaces and old overloads remain unchanged.
+
+Static filesystem helpers resolve once per public invocation when a context is
+needed. Internal graph calls reuse the existing context; already-protected
+inputs are not rewrapped. Memory-only manifest/INI parsing and checksum
+byte-array/memory-stream operations do not resolve retry environment or start
+I/O. An empty expected checksum skips verification without preparing a stream.
+The existing manifest/checksum/INI/temp/archive/key helpers have no new public
+retry-options overload; internal context overloads are not public signatures.
+
+#### Safety and Compatibility
+
+Eligibility is based on filesystem origin and safe replay, **not a
+transient-error allowlist**. A block retains its handle, offset, and write bytes;
+compound mutations retain completed phases and pending durability barriers.
+Open, subsequent blocks, and cleanup have separate budgets, without nested
+executors or whole-parser/HTTP replay. Async domain companions await retry
+waits, including metadata, inspection/traversal, normalization, acquisition,
+lease release, and HTTP file preparation. Synchronous constructors/public
+compatibility boundaries remain synchronous.
+
+Ordinary readable/seekable `FileStream` inputs are borrowed from their current
+position and left open. Read/write files remain compatible, but establishing
+coherent read state may flush caller-owned buffered writes and is deliberately
+one-shot on failure. After preparation, replay requires a stable handle and
+quiescent caller use. Derived/opaque/nonseekable streams retain one-shot
+consumption; the SDK does not unwrap them. Owned writes require demonstrated
+write exclusion. Direct INI overwrite preserves `FileShare.Read`: Windows
+deny-write sharing establishes replay proof, whereas Unix shared flock does
+not, so failed mutations with that sharing remain unsafe one-shot. Exclusive
+durable writers retain retries. Close and ambiguous mutation are also
+deliberate one-shot safety boundaries, not missing supported-platform coverage.
+
+Expected absence/kind rejection, malformed content, checksum/identity/limit
+validation, cancellation, and observer callbacks are not fault retries.
+Disappearance of a required manifest after inventory selection is still a
+required-read fault with existing typed wrapping. Exhausted manifest I/O keeps
+existing Corrupt/Repair/Strict behavior; optional derivative-index fallback
+also remains. Final errors preserve original exception/native context, and
+existing reason/message-only results retain final operation/path/phase/attempt
+diagnostics. Terminal local failures cannot trigger another registry request,
+rewind-and-publish attempt, or renewed budget; ordinary network fallback is
+unchanged. Publication result fields/equality/serialization do not change.
+
+Normal cache-lock coordination remains unbounded and separate (10–250 ms
+backoff); contention consumes no fault retries and cannot replenish them.
+Finite retries provide **no OS-call or whole-operation timeout**, including
+deliberately uncancellable commit/recovery sections. See the
+[call-site inventory and actual platform evidence](filesystem-retry-coverage.md)
+for flush/close, native capability fallback, cleanup, and exclusion details.
 
 ### InstallOptions
 
@@ -749,6 +891,11 @@ public record PackageManifest
     public string Serialize();
 }
 ```
+
+`Deserialize(Stream)` protects ordinary file reads below JSON parsing, from
+the current position, without taking ownership or replaying malformed JSON.
+String/memory parsing remains pure. See
+[filesystem retry safety](#safety-and-compatibility) for borrowed-file preparation.
 
 `Repository` uses the `NpmRepository` record:
 
@@ -1557,6 +1704,24 @@ var cache = new DiskPackageCache();
 var cache = new DiskPackageCache("/my/cache");
 ```
 
+The original constructor remains; the configured overload adds a required
+fourth argument, without changing old null/default bindings:
+
+```csharp
+public DiskPackageCache(
+    string? cacheDirectory = null,
+    ILogger<DiskPackageCache>? logger = null,
+    TimeProvider? timeProvider = null);
+
+public DiskPackageCache(
+    string? cacheDirectory,
+    ILogger<DiskPackageCache>? logger,
+    TimeProvider? timeProvider,
+    FileSystemRetryOptions fileSystemRetry);
+```
+
+Retry settings are snapshotted before cache-root discovery or creation.
+
 Key behaviors:
 
 - **Validated reads** — a hit requires real selected directories, a real regular
@@ -1725,6 +1890,31 @@ must not use `HttpClient.DefaultRequestHeaders`; configure all request headers
 through `RegistryEndpoint`. POST and PUT helpers always require a
 redirect-controlled transport, even when no credentials are configured.
 
+Both existing `CreateClientForEndpoint` overload families retain their optional
+fourth `TimeProvider? timeProvider = null` argument. Their configured
+additional-arity overloads require that position and the new fifth argument:
+
+```csharp
+public static IRegistryClient CreateClientForEndpoint(
+    RegistryEndpoint endpoint,
+    HttpClient httpClient,
+    ILoggerFactory loggerFactory,
+    TimeProvider? timeProvider,
+    FileSystemRetryOptions fileSystemRetry);
+
+public static IRegistryClient CreateClientForEndpoint(
+    RegistryEndpoint endpoint,
+    RegistryHttpTransport transport,
+    ILoggerFactory loggerFactory,
+    TimeProvider? timeProvider,
+    FileSystemRetryOptions fileSystemRetry);
+```
+
+These are methods on `RegistryClientFactory`. Each snapshots once. The existing
+`BuildRegistryClient` overloads instead use `FhirPackageManagerOptions.FileSystemRetry`
+for the whole owned chain; no additional public context parameter is exposed.
+HTTP transport/header/redirect requirements are unchanged by retry options.
+
 **Well-known endpoints:**
 
 | Static Property | URL | Type |
@@ -1752,6 +1942,44 @@ redirect-controlled transport, even when no credentials are configured.
 | `NpmRegistryClient` | `Npm` | Standard NPM registries; packument publication |
 | `RedundantRegistryClient` | *(composite)* | Chains multiple clients with automatic fallback |
 
+The publishing clients retain their original three-argument constructors and
+add these required fourth-argument overloads:
+
+```csharp
+public FhirNpmRegistryClient(
+    HttpClient httpClient,
+    RegistryEndpoint endpoint,
+    ILogger<FhirNpmRegistryClient> logger,
+    FileSystemRetryOptions fileSystemRetry);
+
+public NpmRegistryClient(
+    HttpClient httpClient,
+    RegistryEndpoint endpoint,
+    ILogger<NpmRegistryClient> logger,
+    FileSystemRetryOptions fileSystemRetry);
+```
+
+`RedundantRegistryClient` retains its enumerable and expanded-params
+constructors. Configured construction uses a **named factory**, not a
+competing constructor:
+
+```csharp
+public RedundantRegistryClient(
+    IEnumerable<IRegistryClient> clients,
+    ILogger<RedundantRegistryClient>? logger = null);
+public RedundantRegistryClient(params IRegistryClient[] clients);
+
+public static RedundantRegistryClient CreateWithFileSystemRetry(
+    IEnumerable<IRegistryClient> clients,
+    FileSystemRetryOptions fileSystemRetry,
+    ILogger<RedundantRegistryClient>? logger = null);
+```
+
+The factory snapshots policy for composite-owned file preparation/rewinds; it
+does not mutate supplied clients. Terminal local exceptions or failed
+publication results stop fallback, while genuine network failures retain
+existing fallback. Deferred NPM attachment reads keep the client policy.
+
 ### RegistryClientBase
 
 The abstract base of every built-in client except the composite
@@ -1765,7 +1993,13 @@ public abstract class RegistryClientBase : IRegistryClient
     protected RegistryClientBase(
         HttpClient httpClient, RegistryEndpoint endpoint, ILogger logger);
     protected RegistryClientBase(
+        HttpClient httpClient, RegistryEndpoint endpoint, ILogger logger,
+        FileSystemRetryOptions fileSystemRetry);
+    protected RegistryClientBase(
         RegistryHttpTransport transport, RegistryEndpoint endpoint, ILogger logger);
+    protected RegistryClientBase(
+        RegistryHttpTransport transport, RegistryEndpoint endpoint, ILogger logger,
+        FileSystemRetryOptions fileSystemRetry);
 
     public RegistryEndpoint Endpoint { get; }
     public abstract IReadOnlyList<PackageNameType> SupportedNameTypes { get; }
@@ -1827,6 +2061,15 @@ otherwise throw `InvalidOperationException` before network access.
 `WithSourceProvenance` stamps the credential-free provenance described under
 [PackageListing & PackageVersionInfo](#packagelisting--packageversioninfo)
 onto a listing before it is returned.
+
+The additional-arity protected constructors snapshot filesystem settings for
+external derived callers without exposing internal context types.
+`PutStreamAsync` protects an ordinary caller file before its leave-open HTTP
+wrapper, prepares file position/length with async retry waits, and retries
+only safe source reads, never HTTP destination writes or a whole request.
+Opaque/derived streams remain one-shot. Existing transport-shaped
+exception-to-result behavior retains terminal local provenance so a composite
+cannot resend after local exhaustion.
 
 ---
 
@@ -1930,6 +2173,19 @@ public class IndexingOptions
 The low-level indexer reads existing `.index.json` files when available. If
 absent (or `ForceReindex` is true), it scans all `.json` files in the package
 and builds a new index. It does not own cache persistence.
+
+Standalone construction retains the original signature and adds a required
+second argument for a construction-time retry snapshot:
+
+```csharp
+public PackageIndexer(ILogger logger);
+public PackageIndexer(ILogger logger, FileSystemRetryOptions fileSystemRetry);
+```
+
+Directory snapshots, file metadata/reads, and referenced-file checks use that
+policy; JSON/resource parsing is not replayed. Existing linked content/index/
+resource reads and ordinal ordering remain compatible. Referenced-file
+validation retains its no-follow protection and derivative-index fallback.
 
 For managed package workflows, prefer `IFhirPackageResourceManager`. It
 validates indexes through `DiskPackageCache`, persists them atomically in
@@ -2052,6 +2308,12 @@ public static class CheckSum
 }
 ```
 
+Stream overloads protect ordinary files once and leave them open. Compute
+methods consume from the current position; `Verify*` defaults to restoring
+that original position, not seeking to zero. Hashing is not replayed, and
+null/empty/whitespace expected hashes skip verification. Byte-array and
+memory-only paths do not resolve filesystem retry environment settings.
+
 ### DirectiveParser
 
 Static helpers for parsing and classifying package directives.
@@ -2081,9 +2343,9 @@ Get-ChildItem src\FhirPkg -Recurse -Filter *.cs -File |
   Select-String -Pattern '^\s*public\s+(?:[a-z]+\s+)*(class|record\s+struct|record|struct|interface|enum|delegate)\s+(\w+)'
 ```
 
-The type name is capture group 2. The run behind this table returned **93**
-declarations across 61 files — 39 classes, 27 records, 17 enumerations, 9
-interfaces, and 1 record struct — with 93 distinct names, one per row below.
+The type name is capture group 2. The run behind this table returned **94**
+declarations across 62 files — 40 classes, 27 records, 17 enumerations, 9
+interfaces, and 1 record struct — with 94 distinct names, one per row below.
 
 | Type | Namespace/dir | Disposition |
 |------|---------------|-------------|
@@ -2112,6 +2374,7 @@ interfaces, and 1 record struct — with 93 distinct names, one per row below.
 | `FhirRelease` | `FhirPkg.Models` | Documented → [§FhirRelease](#fhirrelease) |
 | `FhirReleaseMapping` | `FhirPkg.Models` | Documented → [§FhirReleaseMapping](#fhirreleasemapping) |
 | `FhirSemVer` | `FhirPkg.Models` | Documented → [§FhirSemVer](#fhirsemver) |
+| `FileSystemRetryOptions` | `FhirPkg` | Documented → [§FileSystemRetryOptions](#filesystemretryoptions) |
 | `HardenedPackageCacheInspection` | `FhirPkg.Cache` | Documented → [§IHardenedPackageCache](#ihardenedpackagecache) |
 | `HardenedPackageCacheState` | `FhirPkg.Cache` | Documented → [§IHardenedPackageCache](#ihardenedpackagecache) |
 | `Hl7WebsiteClient` | `FhirPkg.Registry` | Documented → [§Built-in Registry Clients](#built-in-registry-clients) |
@@ -2138,7 +2401,7 @@ interfaces, and 1 record struct — with 93 distinct names, one per row below.
 | `PackageDownloadResult` | `FhirPkg.Models` | Intentionally undocumented — registry transport result returned only by `IRegistryClient.DownloadAsync` ([§IRegistryClient](#iregistryclient)); no `IFhirPackageManager` operation surfaces it |
 | `PackageFixups` | `FhirPkg.Utilities` | Intentionally undocumented — implementation detail, not part of the supported contract |
 | `PackageIndex` | `FhirPkg.Indexing` | Documented → [§PackageIndex & ResourceIndexEntry](#packageindex--resourceindexentry) |
-| `PackageIndexer` | `FhirPkg.Indexing` | Intentionally undocumented — the concrete indexer registered by `AddFhirPackageManagement`; the documented contract is the interface, [§IPackageIndexer](#ipackageindexer) |
+| `PackageIndexer` | `FhirPkg.Indexing` | Standalone retry constructors and interface contract documented → [§IPackageIndexer](#ipackageindexer) |
 | `PackageInstallationIdentity` | `FhirPkg.Models` | Documented → [§PackageInstallationIdentity](#packageinstallationidentity) |
 | `PackageInstallDisposition` | `FhirPkg.Models` | Documented → [§PackageInstallDisposition](#packageinstalldisposition) |
 | `PackageInstallErrorCode` | `FhirPkg.Installation` | Documented → [§PackageInstallErrorCode](#packageinstallerrorcode) |

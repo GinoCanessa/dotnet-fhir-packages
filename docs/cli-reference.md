@@ -9,6 +9,7 @@ For installation instructions and a quick-start guide, see the
 ## Table of Contents
 
 - [Global Options](#global-options)
+- [Filesystem Retries](#filesystem-retries)
 - [Unmodified Packages](#unmodified-packages)
 - [Commands](#commands)
   - [install](#install)
@@ -41,6 +42,9 @@ command-specific logic runs.
 | `--no-color` | — | `bool` | `NO_COLOR` env var | Disable ANSI colored output. |
 | `--json` | — | `bool` | `FHIR_PKG_JSON` env var | Emit machine-readable JSON instead of human-readable tables. |
 | `--github-token <token>` | — | `string` | `githubToken` config key, else unauthenticated | GitHub token used **only** for the `api.github.com` repository lookups behind canonical CI build repository selection. Never sent to a package registry, and never echoed in output. |
+| `--fs-retry-count <count>` | — | `int` | `FHIRPKG_FS_RETRY_COUNT`, else `5` | Filesystem retries after the first attempt; zero means one execution. |
+| `--fs-min-delay-ms <ms>` | — | `int` | `FHIRPKG_FS_MIN_DELAY_MS`, else `10` | Minimum filesystem retry delay, in milliseconds. |
+| `--fs-jitter-max-ms <ms>` | — | `int` | `FHIRPKG_FS_JITTER_MAX_MS`, else `10` | Inclusive maximum of fresh additive filesystem retry jitter, in milliseconds. |
 | `--help` | `-h` | — | — | Show help for the command. |
 | `--version` | — | — | — | Show the tool version. |
 
@@ -48,6 +52,51 @@ command-specific logic runs.
 or `--unmodified true` enables it; `--unmodified false` disables it. When
 omitted, the `unmodified` config key applies, with an effective default of
 `false`. There is no environment-variable equivalent.
+
+---
+
+## Filesystem Retries
+
+All three `--fs-*` options are recursive and work before or after any command:
+
+```bash
+fhir-pkg --fs-retry-count 3 --fs-min-delay-ms 10 --fs-jitter-max-ms 10 list
+fhir-pkg list --fs-retry-count 0
+```
+
+Each value resolves independently: **explicit flag > corresponding environment
+variable > default**. An explicit value masks only its own environment value.
+Defaults permit **5 retries after the first attempt** (6 executions), with a
+10 ms minimum plus fresh uniform integer jitter from **0 through 10 ms
+inclusive** before each eligible retry. No wait precedes the initial attempt
+or follows success/exhaustion. Default exhaustion schedules five waits totaling
+50–100 ms, excluding OS-call time. Zero retries permits exactly one execution.
+
+Effective values must be nonnegative `Int32` integers. Environment text uses
+invariant unsigned decimal syntax; empty, negative, malformed, or overflowing
+effective values are errors. Minimum delay plus maximum jitter must not exceed
+`Int32.MaxValue`; no smaller cap applies, and attempt totals use wide arithmetic.
+Invalid policy, including malformed/overflowing/missing retry-option values,
+returns **`2 InvalidArgs` before cwd/home discovery, `.fhir-pkg.json` reads,
+cache construction, or publish-tarball probing** on every command.
+
+One immutable policy snapshot covers the invocation's first config access,
+manager graph, local files, and deferred content. Retry settings are **not JSON
+configuration keys**. Config selection/warnings and all existing JSON keys
+remain unchanged; malformed JSON is not retried. Help does not bootstrap
+filesystem work.
+
+All safely replayable filesystem failures are eligible, not just a transient
+allowlist. Missing/kind/contention outcomes, cancellation, package parsing and
+validation, opaque streams, and HTTP body/destination writes are not blindly
+retried. Safe writes retain bytes/offsets and mutation progress; ambiguous
+mutation/close and unproved write sharing remain deliberate one-shot safety
+limits. Async command work awaits retry waits. Normal cache-lock coordination
+remains separate and unbounded. Finite retries are **not an OS-call or
+whole-command timeout**, including uncancellable commit/recovery work.
+
+See the [SDK safety contract](sdk-api-reference.md#filesystemretryoptions) and
+[coverage/platform evidence](filesystem-retry-coverage.md).
 
 ---
 
@@ -761,8 +810,11 @@ Notes on specific codes:
 
 - `2 InvalidArgs` is returned by explicit command validation — currently
   `restore` with a negative `--max-depth` or an unsupported `--fhir-version`.
-  Malformed parser input (a missing required option, an unknown flag, a bad
-  arity) is reported by the command-line parser and exits with `1`.
+  Invalid effective filesystem retry policy returns `2` on every command,
+  before discovery/config/tarball I/O. Malformed, overflowing, or missing
+  `--fs-*` option values also return `2` at the parser boundary. Unrelated
+  malformed parser input (a missing required option, an unknown flag, a bad
+  arity) retains the parser's exit code `1`.
 - `8 AuthError` is currently produced only by `publish` (on an
   `UnauthorizedAccessException`). Other commands surface registry auth or HTTP
   failures as `4 NetworkError`.
@@ -792,8 +844,9 @@ if ($LASTEXITCODE -ne 0) {
 ## Configuration File
 
 `fhir-pkg` reads an optional `.fhir-pkg.json` file for default settings. The
-tool checks two locations, in order, and uses the **first file that exists** —
-the two files are never merged:
+tool checks two locations, in order, preferring the current-directory file —
+the two files are never merged. A malformed or unreadable file warns and falls
+back to the next location after bounded physical I/O retries:
 
 1. The **current working directory** (project-level config)
 2. The **user's home directory** (user-level defaults)
@@ -804,6 +857,10 @@ the two files are never merged:
 2. Environment variables (for settings that have one — e.g. `PACKAGE_CACHE_FOLDER`)
 3. The first `.fhir-pkg.json` found (current directory, else home directory)
 4. Built-in defaults
+
+Filesystem retry settings are resolved **before** this discovery using only
+flags/environment/defaults; they have no JSON fields and do not participate in
+the file-based precedence step.
 
 ### Schema
 
@@ -853,6 +910,9 @@ not stored against installed packages.
 | `FHIR_PKG_VERBOSE` | Set to `1`, `true`, or `yes` (case-insensitive) to enable verbose logging. | `--verbose` |
 | `FHIR_PKG_JSON` | Set to `1`, `true`, or `yes` (case-insensitive) to default to JSON output. | `--json` |
 | `NO_COLOR` | Set to `1`, `true`, or `yes` (case-insensitive) to disable colored output. | `--no-color` |
+| `FHIRPKG_FS_RETRY_COUNT` | Retries after the first filesystem attempt (default 5; zero means one attempt). | `--fs-retry-count` |
+| `FHIRPKG_FS_MIN_DELAY_MS` | Minimum filesystem retry delay in milliseconds (default 10). | `--fs-min-delay-ms` |
+| `FHIRPKG_FS_JITTER_MAX_MS` | Inclusive maximum additive filesystem jitter in milliseconds (default 10). | `--fs-jitter-max-ms` |
 | `FHIRPKG_MAX_COMPRESSED_BYTES` | Max compressed (downloaded) archive size, in bytes (default 104857600). | — |
 | `FHIRPKG_MAX_EXPANDED_BYTES` | Max total expanded archive size, in bytes (default 1073741824). | — |
 | `FHIRPKG_MAX_ENTRY_BYTES` | Max expanded size of a single archive entry, in bytes (default 134217728). | — |
@@ -872,6 +932,11 @@ comes from `--github-token` or the `githubToken` config key only; `GITHUB_TOKEN`
 and `GH_TOKEN` are deliberately **not** read from the environment. Each
 `FHIRPKG_MAX_*` value must be a positive base-10 integer (invariant culture); a
 non-positive or non-numeric value aborts the operation.
+
+Unlike the positive-only archive limits, `FHIRPKG_FS_*` accepts zero. Its
+effective values and delay sum must satisfy the
+[filesystem retry validation rules](#filesystem-retries); errors exit `2`
+before any filesystem discovery.
 
 ---
 

@@ -10,6 +10,22 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+### Added
+- Added runtime-configurable bounded filesystem retries across the SDK and CLI,
+  with construction-time manager/component snapshots, standalone helper
+  coverage, and `--fs-retry-count`, `--fs-min-delay-ms`, and
+  `--fs-jitter-max-ms` flags plus their `FHIRPKG_FS_*` environment overrides.
+  Defaults allowed five retries after the first attempt with a 10 ms minimum
+  delay and fresh inclusive 0–10 ms additive jitter; zero allowed one attempt.
+
+### Changed
+- Unified safely replayable managed/native filesystem faults under one
+  scheduler, retaining file bytes, offsets, mutation/barrier progress, async
+  waits, and final diagnostics without replaying parsing or HTTP requests.
+  Preserved cache/journal formats, Corrupt/Repair outcomes, linked resource/index
+  reads, direct INI reader sharing, caller-stream ownership, and separate normal
+  cache-lock coordination.
+
 ## [2026.1020.1119] - 2026-10-20
 
 ### Added

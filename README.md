@@ -169,6 +169,26 @@ cache controlled by `ResourceCacheSize` and `ResourceCacheSafeMode`. Custom
 `IPackageCache` implementations without the SDK's generation-aware read
 capability bypass parsed-resource caching.
 
+### Filesystem Retries
+
+Safely replayable filesystem failures share one bounded policy: **5 retries
+after the first attempt** (6 executions), a **10 ms minimum delay**, and fresh
+inclusive **0–10 ms additive jitter**. Zero retries means one attempt.
+Configure `FhirPackageManagerOptions.FileSystemRetry`, standalone component
+overloads, or CLI flags:
+
+```bash
+fhir-pkg --fs-retry-count 5 --fs-min-delay-ms 10 --fs-jitter-max-ms 10 list
+```
+
+Each explicit property/flag overrides its corresponding environment variable,
+then the default. Managers/components snapshot settings at construction;
+static file helpers resolve once per invocation. Retries do not replay package
+parsing or HTTP requests, change normal cache-lock coordination, or guarantee an
+OS-call timeout. See the [SDK contract](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/sdk-api-reference.md#filesystemretryoptions),
+[CLI settings](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/cli-reference.md#filesystem-retries),
+and [coverage and verification](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/filesystem-retry-coverage.md).
+
 ### Archive Layout and Unmodified Mode
 
 Both `FhirPackageManagerOptions.Unmodified` and
