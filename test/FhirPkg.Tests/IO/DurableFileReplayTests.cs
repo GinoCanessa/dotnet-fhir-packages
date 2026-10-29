@@ -323,6 +323,98 @@ public sealed class DurableFileReplayTests : IDisposable
         primitives.AsyncWaits.ShouldBe([10, 10]);
     }
 
+    [Theory]
+    [InlineData("Windows", FileShare.None, false)]
+    [InlineData("Windows", FileShare.None, true)]
+    [InlineData("Windows", FileShare.Read, false)]
+    [InlineData("Windows", FileShare.Read, true)]
+    [InlineData("Linux", FileShare.None, false)]
+    [InlineData("Linux", FileShare.None, true)]
+    [InlineData("Linux", FileShare.Read, false)]
+    [InlineData("Linux", FileShare.Read, true)]
+    [InlineData("MacOS", FileShare.None, false)]
+    [InlineData("MacOS", FileShare.None, true)]
+    [InlineData("MacOS", FileShare.Read, false)]
+    [InlineData("MacOS", FileShare.Read, true)]
+    public async Task OwnedCreate_TruncationReplayRequiresConfiguredWriteExclusion(
+        string platform, FileShare share, bool asynchronous)
+    {
+        // Synthetic handles exercise each platform's ownership logic, not its OS.
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(Enum.Parse<FileSystemPlatform>(platform));
+        primitives.Set<SafeFileHandle>("OpenFileHandle", _ => FileSystemReplayOutcome<SafeFileHandle>.Complete(
+            new SafeFileHandle(new IntPtr(123), ownsHandle: false)));
+        primitives.Set("OpenOwnedDescriptor", FileSystemReplayOutcome<int>.Complete(123));
+        primitives.Set("ConfigureFileSharing", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set("AdviseFileAccess", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set("GetHandleLength", FileSystemReplayOutcome<long>.Complete(0));
+        primitives.Set<bool>("CloseFile", call =>
+        {
+            call.Handle!.SetHandleAsInvalid();
+            call.Handle.Dispose();
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        });
+        string path = Path.Combine(_root, "shared-truncate");
+        FileSystemReplayOutcome<bool> failure = ScriptedFileSystemPrimitives.NativeFailure<bool>(1117, "SetLength", path);
+        primitives.Enqueue("SetLength", failure);
+        primitives.Set("SetLength", FileSystemReplayOutcome<bool>.Complete(true));
+        FileSystemContext context = primitives.CreateContext(retries: 1);
+        FileOptions options = asynchronous ? FileOptions.Asynchronous : FileOptions.None;
+
+        async Task<PositionedFileStream> OpenFile()
+        {
+            return asynchronous
+                ? await context.FileSystem.OpenPositionedFileAsync(
+                    path, FileMode.Create, FileAccess.Write, share, options, TestContext.Current.CancellationToken)
+                : context.FileSystem.OpenPositionedFile(
+                    path, FileMode.Create, FileAccess.Write, share, options, TestContext.Current.CancellationToken);
+        }
+
+        bool writeExcluded = platform == "Windows" || share == FileShare.None;
+        if (writeExcluded)
+        {
+            await using (PositionedFileStream stream = await OpenFile())
+            {
+                stream.Position.ShouldBe(0);
+                primitives.Count("CloseFile").ShouldBe(0);
+            }
+            primitives.Count("SetLength").ShouldBe(2);
+            primitives.Count("GetHandleLength").ShouldBe(1);
+            (asynchronous ? primitives.AsyncWaits : primitives.Waits).ShouldBe([10]);
+            (asynchronous ? primitives.Waits : primitives.AsyncWaits).ShouldBeEmpty();
+        }
+        else
+        {
+            IOException final = await Should.ThrowAsync<IOException>(() => OpenFile());
+            final.ShouldBeSameAs(failure.PrimitiveFailure!.Exception);
+            primitives.Count("SetLength").ShouldBe(1);
+            primitives.Count("GetHandleLength").ShouldBe(0);
+            primitives.Waits.ShouldBeEmpty();
+            primitives.AsyncWaits.ShouldBeEmpty();
+            FileSystemFailureContext.TryGetTerminal(final, out FileSystemFailureContext? evidence).ShouldBeTrue();
+            evidence!.Termination.ShouldBe(FileSystemFailureTermination.Unsafe);
+            evidence.Phase.ShouldBe("TruncateOwnedFile");
+            evidence.NativeErrorCode.ShouldBe(1117);
+            evidence.RetriesUsed.ShouldBe(0);
+        }
+
+        string openOperation = platform == "Windows" ? "OpenFileHandle" : "OpenOwnedDescriptor";
+        FileSystemPrimitiveCall opened = primitives.Calls.Single(call => call.Operation == openOperation);
+        opened.Mode.ShouldBe(FileMode.Create);
+        opened.Access.ShouldBe(FileAccess.Write);
+        opened.Share.ShouldBe(share);
+        opened.Options.ShouldBe(options);
+        primitives.Calls.Where(call => call.Operation == "ConfigureFileSharing")
+            .Select(call => call.Share).ShouldBe(platform == "Windows" ? [] : [share]);
+        primitives.Calls.Where(call => call.Operation == "SetLength").Select(call => call.Handle)
+            .Distinct().Count().ShouldBe(1);
+        primitives.Calls.Where(call => call.Operation == "SetLength").Select(call => call.Length)
+            .ShouldAllBe(length => length == 0);
+        primitives.Count("CloseFile").ShouldBe(1);
+        primitives.Count("DeleteEntry").ShouldBe(0);
+        primitives.Count("WriteAt").ShouldBe(0);
+        primitives.Count("WriteAtAsync").ShouldBe(0);
+    }
+
     [Fact]
     public async Task OwnedCreate_FailedMetadataReleasesAndCleansOwnedPath()
     {

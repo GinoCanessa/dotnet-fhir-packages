@@ -15,6 +15,7 @@ internal sealed class PositionedFileStream : Stream
     private readonly FileSystemContext _context;
     private readonly FileAccess _access;
     private readonly string _path;
+    private readonly bool _writeExclusionEstablished;
     private SafeFileHandle? _handle;
     private long _position;
     private long _length;
@@ -22,13 +23,15 @@ internal sealed class PositionedFileStream : Stream
     private bool _hadFailure;
 
     internal PositionedFileStream(
-        FileSystemContext context, SafeFileHandle handle, string path, FileAccess access, long length)
+        FileSystemContext context, SafeFileHandle handle, string path, FileAccess access, long length,
+        bool writeExclusionEstablished = false)
     {
         _context = context;
         _handle = handle;
         _path = path;
         _access = access;
         _length = length;
+        _writeExclusionEstablished = writeExclusionEstablished;
     }
 
     internal FileSystemContext Context => _context;
@@ -120,7 +123,7 @@ internal sealed class PositionedFileStream : Stream
         BeginOperation();
         try
         {
-            _context.FileSystem.Execute("SetFileLength", () => _context.Primitives.SetLength(_handle!, value, _path));
+            _context.Executor.Execute(new SetLengthOperation(this, value));
             _length = value;
             if (_position > value)
                 _position = value;
@@ -371,6 +374,19 @@ internal sealed class PositionedFileStream : Stream
         ResilientFileSystem.ValueOrThrow(outcome);
     }
 
+    internal static FileSystemReplayOutcome<bool> CheckMutationReplaySafety(
+        FileSystemReplayOutcome<bool> outcome,
+        bool writeExclusionEstablished,
+        string phase,
+        long attemptCount,
+        long retriesUsed)
+    {
+        if (!writeExclusionEstablished && outcome.Kind == FileSystemReplayOutcomeKind.PrimitiveFailure)
+            outcome.PrimitiveFailure!.ThrowTerminal(
+                phase, attemptCount, retriesUsed, FileSystemFailureTermination.Unsafe);
+        return outcome;
+    }
+
     private long GetLengthCore()
     {
         long length = _context.FileSystem.Execute(
@@ -402,6 +418,26 @@ internal sealed class PositionedFileStream : Stream
         EnsureOpen();
         if (!CanWrite)
             throw new NotSupportedException("The file is not writable.");
+    }
+
+    private sealed class SetLengthOperation : FileSystemReplayOperation<bool>
+    {
+        private readonly PositionedFileStream _owner;
+        private readonly SafeFileHandle _handle;
+        private readonly long _length;
+
+        internal SetLengthOperation(PositionedFileStream owner, long length)
+            : base(owner._context.Policy, "SetFileLength")
+        {
+            _owner = owner;
+            _handle = owner._handle!;
+            _length = length;
+        }
+
+        internal override FileSystemReplayOutcome<bool> ExecuteStep(CancellationToken cancellationToken) =>
+            CheckMutationReplaySafety(
+                _owner._context.Primitives.SetLength(_handle, _length, _owner._path),
+                _owner._writeExclusionEstablished, Phase, AttemptCount, RetriesUsed);
     }
 
     private sealed class ReadOperation : FileSystemReplayOperation<int>
@@ -444,9 +480,16 @@ internal sealed class PositionedFileStream : Stream
         }
 
         internal override FileSystemReplayOutcome<bool> ExecuteStep(CancellationToken cancellationToken) =>
-            _owner._context.Primitives.WriteAt(_handle, _bytes, _offset, _owner._path);
+            CheckMutationReplaySafety(
+                _owner._context.Primitives.WriteAt(_handle, _bytes, _offset, _owner._path),
+                _owner._writeExclusionEstablished, Phase, AttemptCount, RetriesUsed);
 
-        internal override ValueTask<FileSystemReplayOutcome<bool>> ExecuteStepAsync(CancellationToken cancellationToken) =>
-            _owner._context.Primitives.WriteAtAsync(_handle, _bytes, _offset, _owner._path, cancellationToken);
+        internal override async ValueTask<FileSystemReplayOutcome<bool>> ExecuteStepAsync(CancellationToken cancellationToken)
+        {
+            FileSystemReplayOutcome<bool> outcome = await _owner._context.Primitives.WriteAtAsync(
+                _handle, _bytes, _offset, _owner._path, cancellationToken).ConfigureAwait(false);
+            return CheckMutationReplaySafety(
+                outcome, _owner._writeExclusionEstablished, Phase, AttemptCount, RetriesUsed);
+        }
     }
 }

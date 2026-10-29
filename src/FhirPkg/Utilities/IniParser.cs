@@ -208,7 +208,7 @@ public static class IniParser
 
         // Direct overwrite stays direct: no temporary file or replacement.
         PositionedFileStream stream = context.FileSystem.OpenPositionedFile(
-            filePath, FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.None);
+            filePath, FileMode.Create, FileAccess.Write, FileShare.Read, FileOptions.None);
         try
         {
             stream.Write(content);
@@ -315,7 +315,7 @@ public static class IniParser
 
         // Direct overwrite stays direct: no temporary file or replacement.
         PositionedFileStream stream = await context.FileSystem.OpenPositionedFileAsync(
-                filePath, FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.Asynchronous, ct)
+                filePath, FileMode.Create, FileAccess.Write, FileShare.Read, FileOptions.Asynchronous, ct)
             .ConfigureAwait(false);
         try
         {
@@ -369,4 +369,3 @@ public static class IniParser
             .ConfigureAwait(false);
     }
 }
-

@@ -1,5 +1,6 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
 using FhirPkg.IO;
@@ -73,6 +74,147 @@ public sealed class PositionedFileStreamTests : IDisposable
         File.ReadAllBytes(path).ShouldBe(new byte[5].Concat(expected).ToArray());
         primitives.Count("CloseFile").ShouldBe(1);
         primitives.Count("OpenFile").ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData("Windows", FileShare.None, false)]
+    [InlineData("Windows", FileShare.None, true)]
+    [InlineData("Windows", FileShare.Read, false)]
+    [InlineData("Windows", FileShare.Read, true)]
+    [InlineData("Linux", FileShare.None, false)]
+    [InlineData("Linux", FileShare.None, true)]
+    [InlineData("Linux", FileShare.Read, false)]
+    [InlineData("Linux", FileShare.Read, true)]
+    [InlineData("MacOS", FileShare.None, false)]
+    [InlineData("MacOS", FileShare.None, true)]
+    [InlineData("MacOS", FileShare.Read, false)]
+    [InlineData("MacOS", FileShare.Read, true)]
+    public async Task PartialWrite_SharingRequiresDemonstratedWriteExclusion(
+        string platform, FileShare share, bool asynchronous)
+    {
+        ScriptedFileSystemPrimitives primitives = ScriptedOwnedFile(Enum.Parse<FileSystemPlatform>(platform));
+        bool writeExcluded = platform == "Windows" || share == FileShare.None;
+        long nativeLength = 5;
+        primitives.Set<long>("GetHandleLength", _ => FileSystemReplayOutcome<long>.Complete(nativeLength));
+        FileSystemContext context = primitives.CreateContext();
+        string path = Path.Combine(_root, "sharing-proof");
+        FileOptions options = asynchronous ? FileOptions.Asynchronous : FileOptions.None;
+        PositionedFileStream stream = asynchronous
+            ? await context.FileSystem.OpenPositionedFileAsync(
+                path, FileMode.CreateNew, FileAccess.ReadWrite, share, options, TestContext.Current.CancellationToken)
+            : context.FileSystem.OpenPositionedFile(
+                path, FileMode.CreateNew, FileAccess.ReadWrite, share, options, TestContext.Current.CancellationToken);
+        stream.Position = 5;
+        byte[] input = "retained bytes"u8.ToArray();
+        byte[] expected = input.ToArray();
+        byte[] stored = new byte[5 + expected.Length];
+        IOException failure = CapturedWriteFailure();
+        string operation = asynchronous ? "WriteAtAsync" : "WriteAt";
+        int completedBlocks = 0;
+        primitives.Enqueue<bool>(operation, call =>
+        {
+            call.Content.Span[..3].CopyTo(stored.AsSpan((int)call.Offset!.Value));
+            nativeLength = call.Offset.Value + 3;
+            return FileSystemReplayOutcome<bool>.Failed(FileSystemFailureContext.CapturePrimitiveFailure(
+                failure, FileSystemReplaySafety.Safe, operation, call.Path,
+                nativeErrorCode: 1117, nativeFlags: 0x55));
+        });
+        primitives.Set<bool>(operation, call =>
+        {
+            stream.Position.ShouldBe(5);
+            completedBlocks.ShouldBe(0);
+            call.Content.Span.CopyTo(stored.AsSpan((int)call.Offset!.Value));
+            nativeLength = call.Offset.Value + call.Content.Length;
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        });
+        primitives.OnWait = () =>
+        {
+            stream.Position.ShouldBe(5);
+            completedBlocks.ShouldBe(0);
+            input.AsSpan().Fill(0xFF);
+        };
+        if (!writeExcluded)
+        {
+            primitives.Enqueue<bool>("CloseFile", call =>
+            {
+                call.Handle!.SetHandleAsInvalid();
+                call.Handle.Dispose();
+                return ScriptedFileSystemPrimitives.NativeFailure<bool>(
+                    5, "cleanup", call.Path, FileSystemReplaySafety.Unsafe);
+            });
+        }
+
+        async Task WriteBlock()
+        {
+            if (asynchronous)
+                await stream.WriteAsync(input.AsMemory(), TestContext.Current.CancellationToken);
+            else
+                stream.Write(input, 0, input.Length);
+            completedBlocks++;
+        }
+
+        try
+        {
+            if (writeExcluded)
+            {
+                await WriteBlock();
+                stream.Position.ShouldBe(5 + expected.Length);
+                stream.Length.ShouldBe(5 + expected.Length);
+                stored.ShouldBe(new byte[5].Concat(expected).ToArray());
+                completedBlocks.ShouldBe(1);
+                (asynchronous ? primitives.AsyncWaits : primitives.Waits).ShouldBe([10]);
+                (asynchronous ? primitives.Waits : primitives.AsyncWaits).ShouldBeEmpty();
+            }
+            else
+            {
+                IOException final = await Should.ThrowAsync<IOException>(WriteBlock);
+                final.ShouldBeSameAs(failure);
+                final.InnerException.ShouldBeSameAs(failure.InnerException);
+                final.StackTrace.ShouldNotBeNull().ShouldContain(nameof(CapturedWriteFailure));
+                ((Win32Exception)final.InnerException!).NativeErrorCode.ShouldBe(1117);
+                stream.Position.ShouldBe(5);
+                stream.Length.ShouldBe(8);
+                completedBlocks.ShouldBe(0);
+                stored.AsSpan(5, 3).ToArray().ShouldBe(expected[..3]);
+                stored.AsSpan(8).ToArray().ShouldBe(new byte[expected.Length - 3]);
+                primitives.Waits.ShouldBeEmpty();
+                primitives.AsyncWaits.ShouldBeEmpty();
+                FileSystemFailureContext.TryGetTerminal(final, out FileSystemFailureContext? evidence).ShouldBeTrue();
+                evidence!.Termination.ShouldBe(FileSystemFailureTermination.Unsafe);
+                evidence.Phase.ShouldBe("WriteFileBlock");
+                evidence.Operation.ShouldBe(operation);
+                evidence.Path.ShouldBe(path);
+                evidence.NativeErrorCode.ShouldBe(1117);
+                evidence.NativeFlags.ShouldBe(0x55);
+                evidence.AttemptCount.ShouldBe(1);
+                evidence.RetriesUsed.ShouldBe(0);
+            }
+
+            FileSystemPrimitiveCall[] writes = primitives.Calls.Where(call => call.Operation == operation).ToArray();
+            writes.Length.ShouldBe(writeExcluded ? 2 : 1);
+            writes.Select(call => call.Offset).ShouldAllBe(offset => offset == 5);
+            foreach (FileSystemPrimitiveCall write in writes)
+            {
+                write.Handle.ShouldBeSameAs(writes[0].Handle);
+                write.Content.Equals(writes[0].Content).ShouldBeTrue();
+                write.Content.ToArray().ShouldBe(expected);
+            }
+        }
+        finally
+        {
+            await stream.DisposeAsync();
+            stream.Dispose();
+        }
+
+        string openOperation = platform == "Windows" ? "OpenFileHandle" : "OpenOwnedDescriptor";
+        FileSystemPrimitiveCall opened = primitives.Calls.Single(call => call.Operation == openOperation);
+        opened.Share.ShouldBe(share);
+        opened.Options.ShouldBe(options);
+        primitives.Calls.Where(call => call.Operation == "ConfigureFileSharing")
+            .Select(call => call.Share).ShouldBe(platform == "Windows" ? [] : [share]);
+        primitives.Count("CloseFile").ShouldBe(1);
+        primitives.Count("FlushFile").ShouldBe(0);
+        primitives.Count("SetLength").ShouldBe(0);
     }
 
     [Theory]
@@ -161,6 +303,65 @@ public sealed class PositionedFileStreamTests : IDisposable
         primitives.Count("SetLength").ShouldBe(2);
         primitives.Calls.Where(call => call.Operation == "SetLength").Select(call => call.Length).ShouldBe([2L, 2L]);
         primitives.Waits.ShouldBe([10]);
+    }
+
+    [Theory]
+    [InlineData("Windows")]
+    [InlineData("Linux")]
+    [InlineData("MacOS")]
+    public void SetLength_ReaderSharingRequiresWriteExclusion(string platform)
+    {
+        ScriptedFileSystemPrimitives primitives = ScriptedOwnedFile(Enum.Parse<FileSystemPlatform>(platform));
+        long nativeLength = 6;
+        primitives.Set<long>("GetHandleLength", _ => FileSystemReplayOutcome<long>.Complete(nativeLength));
+        PositionedFileStream stream = primitives.CreateContext().FileSystem.OpenPositionedFile(
+            Path.Combine(_root, "shared-length"), FileMode.Open, FileAccess.ReadWrite, FileShare.Read, FileOptions.None,
+            TestContext.Current.CancellationToken);
+        stream.Position = 5;
+        FileSystemReplayOutcome<bool> failure = ScriptedFileSystemPrimitives.NativeFailure<bool>(1117, "SetLength");
+        primitives.Enqueue<bool>("SetLength", _ =>
+        {
+            nativeLength = 2;
+            return failure;
+        });
+        primitives.Set("SetLength", FileSystemReplayOutcome<bool>.Complete(true));
+
+        try
+        {
+            if (platform == "Windows")
+            {
+                stream.SetLength(2);
+                stream.Position.ShouldBe(2);
+                primitives.Count("SetLength").ShouldBe(2);
+                primitives.Waits.ShouldBe([10]);
+            }
+            else
+            {
+                Should.Throw<IOException>(() => stream.SetLength(2)).ShouldBeSameAs(failure.PrimitiveFailure!.Exception);
+                stream.Position.ShouldBe(5);
+                primitives.Count("SetLength").ShouldBe(1);
+                primitives.Waits.ShouldBeEmpty();
+                FileSystemFailureContext.TryGetTerminal(
+                    failure.PrimitiveFailure!.Exception, out FileSystemFailureContext? evidence).ShouldBeTrue();
+                evidence!.Termination.ShouldBe(FileSystemFailureTermination.Unsafe);
+                evidence.Phase.ShouldBe("SetFileLength");
+                evidence.AttemptCount.ShouldBe(1);
+                evidence.RetriesUsed.ShouldBe(0);
+            }
+            stream.Length.ShouldBe(2);
+            primitives.Calls.Where(call => call.Operation == "SetLength").Select(call => call.Handle)
+                .Distinct().Count().ShouldBe(1);
+            primitives.Calls.Where(call => call.Operation == "SetLength").Select(call => call.Length)
+                .ShouldAllBe(length => length == 2);
+            primitives.AsyncWaits.ShouldBeEmpty();
+        }
+        finally
+        {
+            stream.Dispose();
+        }
+        primitives.Count("OpenFileHandle").ShouldBe(1);
+        primitives.Count("OpenOwnedDescriptor").ShouldBe(0);
+        primitives.Count("CloseFile").ShouldBe(1);
     }
 
     [Theory]
@@ -343,6 +544,37 @@ public sealed class PositionedFileStreamTests : IDisposable
         ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(SystemFileSystemPrimitives.Instance.Platform);
         primitives.UseSystemFiles();
         return primitives;
+    }
+
+    private static ScriptedFileSystemPrimitives ScriptedOwnedFile(FileSystemPlatform platform)
+    {
+        // All handle operations are injected: Unix cases do not execute native
+        // Unix calls on another host.
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(platform);
+        primitives.Set<SafeFileHandle>("OpenFileHandle", _ => FileSystemReplayOutcome<SafeFileHandle>.Complete(
+            new SafeFileHandle(new IntPtr(123), ownsHandle: false)));
+        primitives.Set("OpenOwnedDescriptor", FileSystemReplayOutcome<int>.Complete(123));
+        primitives.Set("ConfigureFileSharing", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set("AdviseFileAccess", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set<bool>("CloseFile", call =>
+        {
+            call.Handle!.SetHandleAsInvalid();
+            call.Handle.Dispose();
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        });
+        return primitives;
+    }
+
+    private static IOException CapturedWriteFailure()
+    {
+        try
+        {
+            throw new IOException("partial native write", new Win32Exception(1117));
+        }
+        catch (IOException exception)
+        {
+            return exception;
+        }
     }
 
     private sealed class CountingSource : Stream

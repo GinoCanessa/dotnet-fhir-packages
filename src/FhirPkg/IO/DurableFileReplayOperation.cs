@@ -402,6 +402,7 @@ internal sealed class OwnedFileOpenReplayOperation : FileSystemReplayOperation<P
     private int? _descriptor;
     private int? _duplicate;
     private bool _sharingConfigured;
+    private bool _writeExclusionEstablished;
     private bool _advised;
     private bool _truncated;
 
@@ -416,8 +417,8 @@ internal sealed class OwnedFileOpenReplayOperation : FileSystemReplayOperation<P
             throw new ArgumentOutOfRangeException(nameof(access));
         if ((share & ~(FileShare.ReadWrite | FileShare.Delete | FileShare.Inheritable)) != 0)
             throw new ArgumentOutOfRangeException(nameof(share));
-        if ((access & FileAccess.Write) != 0 && (share & ~FileShare.Inheritable) != FileShare.None)
-            throw new ArgumentException("Positioned writes require an exclusive file.", nameof(share));
+        if ((access & FileAccess.Write) != 0 && (share & FileShare.Write) != 0)
+            throw new ArgumentException("Positioned writes cannot share write access.", nameof(share));
         if ((mode is FileMode.Create or FileMode.CreateNew or FileMode.Truncate) && access == FileAccess.Read)
             throw new ArgumentException("This file mode requires write access.", nameof(access));
         const FileOptions supportedOptions = FileOptions.Asynchronous | FileOptions.WriteThrough
@@ -461,6 +462,7 @@ internal sealed class OwnedFileOpenReplayOperation : FileSystemReplayOperation<P
                 if (opened.Kind != FileSystemReplayOutcomeKind.Completed)
                     return ResilientFileSystem.Failure<SafeFileHandle, PositionedFileStream>(opened);
                 _handle = opened.Value;
+                CompleteSharingConfiguration();
                 if (_mode == FileMode.CreateNew)
                     CreatedPath = _fullPath;
                 return FileSystemReplayOutcome<PositionedFileStream>.Continue();
@@ -523,7 +525,7 @@ internal sealed class OwnedFileOpenReplayOperation : FileSystemReplayOperation<P
             FileSystemReplayOutcome<bool> configured = primitives.ConfigureFileSharing(_handle, _share, _fullPath);
             if (configured.Kind != FileSystemReplayOutcomeKind.Completed)
                 return ResilientFileSystem.Failure<bool, PositionedFileStream>(configured);
-            _sharingConfigured = true;
+            CompleteSharingConfiguration();
             return FileSystemReplayOutcome<PositionedFileStream>.Continue();
         }
         if (!_advised)
@@ -538,7 +540,9 @@ internal sealed class OwnedFileOpenReplayOperation : FileSystemReplayOperation<P
         if (!_truncated)
         {
             SetPhase("TruncateOwnedFile");
-            FileSystemReplayOutcome<bool> truncated = primitives.SetLength(_handle, 0, _fullPath);
+            FileSystemReplayOutcome<bool> truncated = PositionedFileStream.CheckMutationReplaySafety(
+                primitives.SetLength(_handle, 0, _fullPath),
+                _writeExclusionEstablished, Phase, AttemptCount, RetriesUsed);
             if (truncated.Kind != FileSystemReplayOutcomeKind.Completed)
                 return ResilientFileSystem.Failure<bool, PositionedFileStream>(truncated);
             _truncated = true;
@@ -549,9 +553,22 @@ internal sealed class OwnedFileOpenReplayOperation : FileSystemReplayOperation<P
         FileSystemReplayOutcome<long> length = primitives.GetLength(_handle, _fullPath);
         if (length.Kind != FileSystemReplayOutcomeKind.Completed)
             return ResilientFileSystem.Failure<long, PositionedFileStream>(length);
-        PositionedFileStream stream = new PositionedFileStream(_context, _handle, _fullPath, _access, length.Value);
+        PositionedFileStream stream = new PositionedFileStream(
+            _context, _handle, _fullPath, _access, length.Value, _writeExclusionEstablished);
         _handle = null;
         return FileSystemReplayOutcome<PositionedFileStream>.Complete(stream);
+    }
+
+    private void CompleteSharingConfiguration()
+    {
+        _sharingConfigured = true;
+        // Windows denies writers independently of reader sharing. Unix takes an
+        // exclusive flock only for FileShare.None, not for reader-sharing opens.
+        _writeExclusionEstablished = (_access & FileAccess.Write) != 0
+            && (_context.Primitives.Platform == FileSystemPlatform.Windows
+                ? (_share & FileShare.Write) == 0
+                : _context.Primitives.Platform is FileSystemPlatform.Linux or FileSystemPlatform.MacOS
+                    && (_share & ~FileShare.Inheritable) == FileShare.None);
     }
 
     internal void ReleaseAfterFailure()

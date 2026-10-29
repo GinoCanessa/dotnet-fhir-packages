@@ -1,9 +1,11 @@
 // Copyright (c) Gino Canessa. All rights reserved.
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
+using System.Text;
 using FhirPkg.IO;
 using FhirPkg.Tests.Support;
 using FhirPkg.Utilities;
+using Microsoft.Win32.SafeHandles;
 using Shouldly;
 using Xunit;
 
@@ -201,6 +203,77 @@ public class IniParserTests
 
         parsed["s"]["k"].ShouldBe("v");
         primitives.Count("MovePath").ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WriteFile_ReaderSharingPreservesDirectOverwrite(bool asynchronous)
+    {
+        using TestDirectory directory = new TestDirectory();
+        string path = Path.Combine(directory.Path, "shared.ini");
+        File.WriteAllText(path, new string('x', 512));
+        using SafeFileHandle retainedReader = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        ScriptedFileSystemPrimitives primitives = NewPrimitives();
+        int sharingChecks = 0;
+        primitives.Enqueue<long>("GetHandleLength", call =>
+        {
+            RandomAccess.GetLength(retainedReader).ShouldBe(0);
+            using SafeFileHandle concurrentReader = File.OpenHandle(
+                path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            concurrentReader.IsInvalid.ShouldBeFalse();
+            if (OperatingSystem.IsWindows())
+            {
+                IOException failure = Should.Throw<IOException>(() =>
+                {
+                    using SafeFileHandle competingWriter = File.OpenHandle(
+                        path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+                });
+                (failure.HResult & 0xFFFF).ShouldBe(32);
+            }
+            else
+            {
+                // Unix shared flock permits another writer; it is not replay proof.
+                using SafeFileHandle competingWriter = File.OpenHandle(
+                    path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+                competingWriter.IsInvalid.ShouldBeFalse();
+            }
+            sharingChecks++;
+            return SystemFileSystemPrimitives.Instance.GetLength(call.Handle!, call.Path!);
+        });
+        Dictionary<string, IReadOnlyDictionary<string, string>> sections = new Dictionary<string, IReadOnlyDictionary<string, string>>
+        {
+            ["packages"] = new Dictionary<string, string> { ["a#1"] = "café ☕" },
+        };
+        FileSystemContext context = primitives.CreateContext();
+
+        if (asynchronous)
+            await IniParser.WriteFileAsync(path, sections, context, TestContext.Current.CancellationToken);
+        else
+            IniParser.WriteFile(path, sections, context);
+
+        byte[] expected = Encoding.UTF8.GetBytes(
+            $"[packages]{Environment.NewLine}a#1 = café ☕{Environment.NewLine}{Environment.NewLine}");
+        byte[] retainedContent = new byte[expected.Length];
+        RandomAccess.Read(retainedReader, retainedContent, 0).ShouldBe(expected.Length);
+        retainedContent.ShouldBe(expected);
+        RandomAccess.GetLength(retainedReader).ShouldBe(expected.Length);
+        File.ReadAllBytes(path).ShouldBe(expected);
+        sharingChecks.ShouldBe(1);
+        string openOperation = OperatingSystem.IsWindows() ? "OpenFileHandle" : "OpenOwnedDescriptor";
+        FileSystemPrimitiveCall opened = primitives.Calls.Single(call => call.Operation == openOperation);
+        opened.Mode.ShouldBe(FileMode.Create);
+        opened.Access.ShouldBe(FileAccess.Write);
+        opened.Share.ShouldBe(FileShare.Read);
+        opened.Options.ShouldBe(asynchronous ? FileOptions.Asynchronous : FileOptions.None);
+        primitives.Calls.Where(call => call.Operation == "ConfigureFileSharing")
+            .Select(call => call.Share).ShouldBe(OperatingSystem.IsWindows() ? [] : [FileShare.Read]);
+        primitives.Count(asynchronous ? "WriteAtAsync" : "WriteAt").ShouldBe(1);
+        primitives.Count("CloseFile").ShouldBe(1);
+        primitives.Count("MovePath").ShouldBe(0);
+        Directory.GetFiles(directory.Path).ShouldBe([path]);
+        primitives.Waits.ShouldBeEmpty();
+        primitives.AsyncWaits.ShouldBeEmpty();
     }
 
     [Fact]
