@@ -319,8 +319,13 @@ public class PackageIndexer :
         try
         {
             // An absent optional index is explicit and must not consume retry budget.
-            FileSystemProbeResult probe = await _context.FileSystem
-                .ProbeAsync(indexPath, cancellationToken)
+            string fullIndexPath = await _context.FileSystem
+                .GetFullPathAsync(indexPath, cancellationToken)
+                .ConfigureAwait(false);
+            FileSystemProbeResult probe = await _context.FileSystem.ExecuteAsync(
+                    "ProbeFollowing",
+                    () => _context.Primitives.Probe(fullIndexPath, followLinks: true),
+                    cancellationToken)
                 .ConfigureAwait(false);
             if (probe.Kind is FileSystemEntryKind.Missing
                 or FileSystemEntryKind.Directory
@@ -330,7 +335,13 @@ public class PackageIndexer :
             }
 
             await using Stream stream = await _context.FileSystem
-                .OpenProtectedRegularReadAsync(indexPath, cancellationToken)
+                .OpenPositionedFileAsync(
+                    fullIndexPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    FileOptions.None,
+                    cancellationToken)
                 .ConfigureAwait(false);
             PackageIndex? index = await JsonSerializer.DeserializeAsync<PackageIndex>(stream, s_readOptions, cancellationToken)
                 .ConfigureAwait(false);
@@ -379,15 +390,19 @@ public class PackageIndexer :
         if (string.IsNullOrWhiteSpace(path))
             return false;
 
-        FileSystemProbeResult probe = await _context.FileSystem
-            .ProbeAsync(path, cancellationToken)
+        string fullPath = await _context.FileSystem.GetFullPathAsync(path, cancellationToken)
+            .ConfigureAwait(false);
+        FileSystemProbeResult probe = await _context.FileSystem.ExecuteAsync(
+                "ProbeFollowing",
+                () => _context.Primitives.Probe(fullPath, followLinks: true),
+                cancellationToken)
             .ConfigureAwait(false);
         return probe.Kind is FileSystemEntryKind.Directory
             or FileSystemEntryKind.DirectorySymbolicLink;
     }
 
     /// <summary>
-    /// Determines whether a snapshot entry may be a regular JSON candidate. Only a
+    /// Determines whether a snapshot entry may be a JSON file candidate. Only a
     /// confirmed directory or vanished entry is excluded; an exhausted probe falls
     /// through to the file read so no new failure path is introduced.
     /// </summary>
@@ -397,8 +412,12 @@ public class PackageIndexer :
     {
         try
         {
-            FileSystemProbeResult probe = await _context.FileSystem
-                .ProbeAsync(filePath, cancellationToken)
+            string fullPath = await _context.FileSystem.GetFullPathAsync(filePath, cancellationToken)
+                .ConfigureAwait(false);
+            FileSystemProbeResult probe = await _context.FileSystem.ExecuteAsync(
+                    "ProbeFollowing",
+                    () => _context.Primitives.Probe(fullPath, followLinks: true),
+                    cancellationToken)
                 .ConfigureAwait(false);
             return probe.Kind is not (FileSystemEntryKind.Missing
                 or FileSystemEntryKind.Directory
@@ -477,7 +496,13 @@ public class PackageIndexer :
         try
         {
             await using Stream stream = await _context.FileSystem
-                .OpenProtectedRegularReadAsync(filePath, cancellationToken)
+                .OpenPositionedFileAsync(
+                    filePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    FileOptions.None,
+                    cancellationToken)
                 .ConfigureAwait(false);
             using JsonDocument doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);

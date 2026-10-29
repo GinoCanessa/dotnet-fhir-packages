@@ -2,6 +2,7 @@
 
 using System.CommandLine;
 using FhirPkg.Cli.Formatting;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using Spectre.Console;
 
@@ -85,7 +86,7 @@ internal static class ListCommand
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, $"Cache error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Cache error: {FileSystemFailureContext.FormatMessage(ex)}");
                 return ExitCodes.CacheError;
             }
             catch (Exception ex)

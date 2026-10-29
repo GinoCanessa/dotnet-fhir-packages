@@ -2,6 +2,7 @@
 
 using System.CommandLine;
 using FhirPkg.Cli.Formatting;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using Spectre.Console;
 
@@ -130,7 +131,7 @@ internal static class RestoreCommand
             }
             catch (FileNotFoundException ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, $"Manifest not found: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Manifest not found: {FileSystemFailureContext.FormatMessage(ex)}");
                 return ExitCodes.NotFound;
             }
             catch (HttpRequestException ex)

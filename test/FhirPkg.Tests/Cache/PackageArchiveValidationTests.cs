@@ -766,6 +766,89 @@ public class PackageArchiveValidationTests : IDisposable
         primitives.Count("MovePath").ShouldBe(2);
     }
 
+    [Fact]
+    public async Task Inventory_RelativeRootIsResolvedOnceThroughRetainedContext()
+    {
+        string extractedPath = Path.Combine(_testRoot, "relative-inventory");
+        Directory.CreateDirectory(Path.Combine(extractedPath, "package"));
+        Directory.CreateDirectory(Path.Combine(extractedPath, "other", "empty"));
+        await File.WriteAllTextAsync(
+            Path.Combine(extractedPath, "package", "package.json"),
+            Manifest,
+            TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(extractedPath, "other", "Mixed.Name.json"),
+            OtherResource,
+            TestContext.Current.CancellationToken);
+        const string relativeRoot = "relative-inventory";
+        ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<IEnumerator<string>>("CreateDirectoryEnumerator",
+            call => SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        primitives.Set<string>("GetFullPath", call =>
+        {
+            call.Path.ShouldBe(relativeRoot);
+            return FileSystemReplayOutcome<string>.Complete(extractedPath);
+        });
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            primitives.Enqueue("GetFullPath",
+                ScriptedFileSystemPrimitives.NativeFailure<string>(5, "GetFullPath", relativeRoot));
+        }
+        FileSystemContext context = primitives.CreateContext(retries: 2);
+
+        PackageArchiveInventory inventory = PackageArchiveInventory.FromFileSystem(
+            relativeRoot, "example.package#1.0.0", context);
+
+        inventory.Nodes.Select(node => node.ExactSegment)
+            .OrderBy(segment => segment, StringComparer.Ordinal)
+            .ShouldBe(["Mixed.Name.json", "empty", "other", "package", "package.json"]);
+        PackageArchiveLayoutResult layout = PackageArchiveContentLocator.Locate(
+            relativeRoot, inventory, "example.package#1.0.0");
+        layout.Layout.ShouldBe(PackageArchiveLayout.Standard);
+        layout.ContentPath.ShouldBe(Path.Combine(relativeRoot, "package"));
+        primitives.Count("GetFullPath").ShouldBe(3);
+        string[] expectedDirectories =
+        [
+            extractedPath,
+            Path.Combine(extractedPath, "other"),
+            Path.Combine(extractedPath, "other", "empty"),
+            Path.Combine(extractedPath, "package"),
+        ];
+        primitives.Calls.Where(call => call.Operation == "CreateDirectoryEnumerator")
+            .Select(call => call.Path!)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ShouldBe(expectedDirectories.OrderBy(path => path, StringComparer.Ordinal));
+        primitives.Waits.ShouldBe([10, 10]);
+        primitives.AsyncWaits.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Inventory_RelativeRootExhaustionDoesNotEnumerate()
+    {
+        const string relativeRoot = "relative-inventory";
+        ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);
+        IOException[] failures = Enumerable.Range(0, 3)
+            .Select(attempt => new IOException($"Inventory root failure {attempt}."))
+            .ToArray();
+        foreach (IOException failure in failures)
+        {
+            primitives.Enqueue("GetFullPath",
+                ScriptedFileSystemPrimitives.Fail<string>(failure, "GetFullPath", relativeRoot));
+        }
+        FileSystemContext context = primitives.CreateContext(retries: 2);
+
+        IOException exception = Should.Throw<IOException>(() =>
+            PackageArchiveInventory.FromFileSystem(relativeRoot, "example.package#1.0.0", context));
+
+        exception.ShouldBeSameAs(failures[2]);
+        FileSystemFailureContext.FormatMessage(exception).ShouldContain("attempts 3, retries 2, termination Exhausted");
+        primitives.Count("GetFullPath").ShouldBe(3);
+        primitives.Count("CreateDirectoryEnumerator").ShouldBe(0);
+        primitives.Waits.ShouldBe([10, 10]);
+        primitives.AsyncWaits.ShouldBeEmpty();
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

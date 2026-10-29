@@ -1431,7 +1431,7 @@ public class DiskPackageCache :
                 () => _context.Primitives.Probe(filePath, followLinks: true),
                 cancellationToken)
             .ConfigureAwait(false);
-        if (fileProbe.Kind != FileSystemEntryKind.File)
+        if (fileProbe.Kind is not (FileSystemEntryKind.File or FileSystemEntryKind.SymbolicLink))
             return null;
 
         string content;

@@ -99,7 +99,7 @@ internal static class PackageIndexValidation
             return false;
 
         PackageIndex validatedIndex = index!;
-        string fullContentPath = Path.GetFullPath(packageContentPath);
+        string fullContentPath = context.FileSystem.GetFullPath(packageContentPath);
         foreach (ResourceIndexEntry entry in validatedIndex.Files)
         {
             PortableArchivePath portablePath;
@@ -179,12 +179,12 @@ internal static class PackageIndexValidation
             }
             catch (UnauthorizedAccessException exception)
             {
-                failureReason = exception.Message;
+                failureReason = FileSystemFailureContext.FormatMessage(exception);
                 return false;
             }
             catch (IOException exception)
             {
-                failureReason = exception.Message;
+                failureReason = FileSystemFailureContext.FormatMessage(exception);
                 return false;
             }
         }

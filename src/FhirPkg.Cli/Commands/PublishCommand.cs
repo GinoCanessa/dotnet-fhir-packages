@@ -2,6 +2,7 @@
 
 using System.CommandLine;
 using FhirPkg.Cli.Formatting;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using Spectre.Console;
@@ -107,7 +108,7 @@ internal static class PublishCommand
             }
             catch (UnauthorizedAccessException ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, $"Authentication error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Authentication error: {FileSystemFailureContext.FormatMessage(ex)}");
                 return ExitCodes.AuthError;
             }
             catch (OperationCanceledException)

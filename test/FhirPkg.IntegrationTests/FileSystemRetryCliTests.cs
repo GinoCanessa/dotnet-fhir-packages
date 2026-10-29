@@ -567,6 +567,129 @@ public sealed class FileSystemRetryCliTests : IDisposable
         AssertAsyncWaits([7, 7], 0);
     }
 
+    public static TheoryData<string, string, bool> PhysicalErrorCases
+    {
+        get
+        {
+            TheoryData<string, string, bool> cases = [];
+            string[] handlers = ["clean", "list", "remove", "publish", "restore"];
+            foreach (string handler in handlers)
+            {
+                string[] exceptions = handler switch
+                {
+                    "publish" => ["access"],
+                    "restore" => ["missing"],
+                    _ => ["io", "access"],
+                };
+                foreach (string exception in exceptions)
+                {
+                    cases.Add(handler, exception, false);
+                    cases.Add(handler, exception, true);
+                }
+            }
+            return cases;
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(PhysicalErrorCases))]
+    public async Task PhysicalErrorCatches_PreserveFinalContextAndExitCode(
+        string handler,
+        string exceptionKind,
+        bool json)
+    {
+        GlobalOptions.ConfigLoaderOverride = () => null;
+        string[] arguments = HandlerArguments(handler);
+        bool cacheFailure = handler is "clean" or "list" or "remove";
+        string operation = handler == "restore" ? "ReadAtAsync" : "Probe";
+        string path = cacheFailure
+            ? CachePath
+            : handler == "restore"
+                ? Path.Combine(arguments[1], "package.json")
+                : arguments[1];
+        if (handler == "restore")
+        {
+            Directory.CreateDirectory(arguments[1]);
+            await File.WriteAllTextAsync(
+                path,
+                """{"name":"retry.project","version":"1.0.0","dependencies":{}}""",
+                TestContext.Current.CancellationToken);
+        }
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (operation == "Probe")
+                _files.Enqueue(operation, path, Failure<FileSystemProbeResult>(operation, path, attempt, exceptionKind));
+            else
+                _files.Enqueue(operation, path, Failure<int>(operation, path, attempt, exceptionKind));
+        }
+
+        InvocationOutput output = await RunMainAsync([.. arguments, .. RetryFlags(2, 7, 0)], json);
+
+        int expectedExitCode = handler switch
+        {
+            "publish" => ExitCodes.AuthError,
+            "restore" => ExitCodes.NotFound,
+            _ => ExitCodes.CacheError,
+        };
+        string prefix = handler switch
+        {
+            "publish" => "Authentication error: ",
+            "restore" => "Manifest not found: ",
+            _ => "Cache error: ",
+        };
+        output.ExitCode.ShouldBe(expectedExitCode, output.StandardOutput + output.StandardError);
+        output.StandardError.ShouldBeEmpty();
+        string message;
+        if (json)
+        {
+            using JsonDocument document = JsonDocument.Parse(output.StandardOutput);
+            document.RootElement.EnumerateObject().Select(property => property.Name).ShouldBe(["error"]);
+            message = document.RootElement.GetProperty("error").GetString().ShouldNotBeNull();
+            message.ShouldStartWith(prefix);
+        }
+        else
+        {
+            output.StandardOutput.ShouldStartWith($"✗ {prefix}");
+            message = output.StandardOutput.Replace("\r", string.Empty, StringComparison.Ordinal)
+                .Replace("\n", string.Empty, StringComparison.Ordinal);
+        }
+        message.ShouldContain("Scripted physical failure 2.");
+        message.ShouldNotContain("Scripted physical failure 0.");
+        message.ShouldNotContain("Scripted physical failure 1.");
+        string phase = cacheFailure
+            ? "InspectDirectoryAncestors"
+            : handler == "restore" ? "ReadFileBlock" : "ProbeFollowing";
+        message.ShouldContain($"Filesystem operation '{operation}', phase '{phase}'");
+        int attempts = cacheFailure ? 4 : 3;
+        message.ShouldContain($"attempts {attempts}, retries 2, termination Exhausted");
+        message.ShouldContain($"path '{path}'");
+        message.ShouldContain("native error 5, native flags 0x123");
+        _files.Count(operation, path).ShouldBe(3);
+        _contexts.ShouldHaveSingleItem().Policy.RetryCount.ShouldBe(2);
+        if (cacheFailure)
+        {
+            // Manager construction is a synchronous compatibility boundary.
+            _files.SyncWaits.ShouldBe([7, 7]);
+            _files.AsyncWaits.ShouldBeEmpty();
+            _files.JitterBounds.ShouldBe([1L, 1L]);
+            Directory.Exists(CachePath).ShouldBeFalse();
+        }
+        else
+        {
+            AssertAsyncWaits([7, 7], 0);
+            if (handler == "restore")
+            {
+                _files.OpenCount(path).ShouldBe(1);
+                _files.Count("CloseFile", path).ShouldBe(1);
+            }
+            else
+            {
+                _factoryCalls.ShouldBe(0);
+                Directory.Exists(CachePath).ShouldBeFalse();
+            }
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -759,14 +882,27 @@ public sealed class FileSystemRetryCliTests : IDisposable
         _files.JitterBounds.ShouldBe(Enumerable.Repeat((long)jitter + 1, expected.Length).ToArray());
     }
 
-    private static FileSystemReplayOutcome<T> Failure<T>(string operation, string? path, int attempt) =>
-        FileSystemReplayOutcome<T>.Failed(FileSystemFailureContext.CapturePrimitiveFailure(
-            new IOException($"Scripted physical failure {attempt}.", new Win32Exception(5)),
+    private static FileSystemReplayOutcome<T> Failure<T>(
+        string operation,
+        string? path,
+        int attempt,
+        string exceptionKind = "io")
+    {
+        string message = $"Scripted physical failure {attempt}.";
+        Exception exception = exceptionKind switch
+        {
+            "access" => new UnauthorizedAccessException(message, new Win32Exception(5)),
+            "missing" => new FileNotFoundException(message, path, new Win32Exception(5)),
+            _ => new IOException(message, new Win32Exception(5)),
+        };
+        return FileSystemReplayOutcome<T>.Failed(FileSystemFailureContext.CapturePrimitiveFailure(
+            exception,
             FileSystemReplaySafety.Safe,
             operation,
             path,
             nativeErrorCode: 5,
             nativeFlags: 0x123));
+    }
 
     private Task<InvocationOutput> RunMainAsync(string[] arguments, bool json = true, bool verbose = false) =>
         CaptureAsync(() => Program.Main(WithGlobalOptions(arguments, json, verbose)));

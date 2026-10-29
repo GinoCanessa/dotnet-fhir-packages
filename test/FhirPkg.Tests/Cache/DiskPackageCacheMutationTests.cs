@@ -2,8 +2,10 @@
 
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Tests.Support;
+using Microsoft.Win32.SafeHandles;
 using Shouldly;
 using Xunit;
 
@@ -162,6 +164,179 @@ public sealed class DiskPackageCacheMutationTests : IDisposable
         packagesGoneAtClear.ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReadFile_LinkedResourceUsesFollowingProtectedRead(bool resourceStore)
+    {
+        string contentPath = CreateCachedContent(s_reference);
+        string targetPath = Path.Combine(_cacheRoot, "external-resource.json");
+        const string expected = """{"resourceType":"Patient","id":"linked"}""";
+        await File.WriteAllTextAsync(targetPath, expected, TestContext.Current.CancellationToken);
+        string resourcePath = Path.Combine(contentPath, "linked.json");
+        CreateSymbolicLink(resourcePath, targetPath, isDirectory: false);
+        ScriptedFileSystemPrimitives primitives = CompositionTestSupport.SystemFiles(_cacheRoot);
+        int resourceOpens = 0;
+        primitives.Set<SafeFileHandle>("OpenFileHandle", call =>
+        {
+            if (call.Path == resourcePath && resourceOpens++ < 2)
+                return ScriptedFileSystemPrimitives.NativeFailure<SafeFileHandle>(5, "OpenFileHandle", call.Path);
+
+            return SystemFileSystemPrimitives.Instance.OpenFileHandle(
+                call.Path!, call.Mode!.Value, call.Access!.Value, call.Share!.Value, call.Options!.Value);
+        });
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), primitives.CreateContext(retries: 2));
+        primitives.Calls.Clear();
+
+        string? content = resourceStore
+            ? await ((IPackageCacheResourceStore)cache).ReadFileAsync<string>(
+                s_reference, "linked.json", _ => null, (_, text) => text, TestContext.Current.CancellationToken)
+            : await cache.GetFileContentAsync(s_reference, "linked.json", TestContext.Current.CancellationToken);
+
+        content.ShouldBe(expected);
+        resourceOpens.ShouldBe(3);
+        primitives.Calls.Single(call => call.Operation == "Probe" && call.Path == resourcePath)
+            .Flags.ShouldBe(1);
+        FileSystemPrimitiveCall[] opens = primitives.Calls
+            .Where(call => call.Operation == "OpenFileHandle" && call.Path == resourcePath)
+            .ToArray();
+        opens.Length.ShouldBe(3);
+        opens.ShouldAllBe(call => call.Mode == FileMode.Open
+            && call.Access == FileAccess.Read
+            && call.Share == FileShare.Read
+            && call.Options == (FileOptions.Asynchronous | FileOptions.SequentialScan));
+        primitives.Calls.Count(call => call.Operation == "CloseFile" && call.Path == resourcePath).ShouldBe(1);
+        primitives.AsyncWaits.ShouldBe([10, 10]);
+        primitives.Waits.ShouldBeEmpty();
+        File.ReadAllText(targetPath).ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task ReadFile_MissingResourceRemainsAbsentWithoutOpenOrRetry()
+    {
+        string contentPath = CreateCachedContent(s_reference);
+        string resourcePath = Path.Combine(contentPath, "missing.json");
+        ScriptedFileSystemPrimitives primitives = CompositionTestSupport.SystemFiles(_cacheRoot);
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), primitives.CreateContext(retries: 2));
+        bool materialized = false;
+        primitives.Calls.Clear();
+
+        string? content = await ((IPackageCacheResourceStore)cache).ReadFileAsync<string>(
+            s_reference,
+            "missing.json",
+            _ => null,
+            (_, text) =>
+            {
+                materialized = true;
+                return text;
+            },
+            TestContext.Current.CancellationToken);
+
+        content.ShouldBeNull();
+        materialized.ShouldBeFalse();
+        primitives.Calls.Single(call => call.Operation == "Probe" && call.Path == resourcePath)
+            .Flags.ShouldBe(1);
+        primitives.Calls.ShouldNotContain(call => call.Operation == "OpenFileHandle" && call.Path == resourcePath);
+        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReadFile_JsonNamedDirectoryIsNotAResource(bool linked)
+    {
+        string contentPath = CreateCachedContent(s_reference);
+        string resourcePath = Path.Combine(contentPath, "directory.json");
+        if (linked)
+        {
+            string directoryPath = Path.Combine(_cacheRoot, "directory-target");
+            Directory.CreateDirectory(directoryPath);
+            CreateSymbolicLink(resourcePath, directoryPath, isDirectory: true);
+        }
+        else
+        {
+            Directory.CreateDirectory(resourcePath);
+        }
+        ScriptedFileSystemPrimitives primitives = CompositionTestSupport.SystemFiles(_cacheRoot);
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), primitives.CreateContext(retries: 2));
+        primitives.Calls.Clear();
+
+        string? content = await cache.GetFileContentAsync(
+            s_reference, "directory.json", TestContext.Current.CancellationToken);
+
+        content.ShouldBeNull();
+        primitives.Calls.Single(call => call.Operation == "Probe" && call.Path == resourcePath)
+            .Flags.ShouldBe(1);
+        primitives.Calls.ShouldNotContain(call => call.Operation == "OpenFileHandle" && call.Path == resourcePath);
+        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData("manifest")]
+    [InlineData("content-directory")]
+    [InlineData("scope-ancestor")]
+    public async Task ReadFile_LinkCompatibilityDoesNotRelaxCacheValidation(string shape)
+    {
+        PackageReference reference = shape == "scope-ancestor"
+            ? new PackageReference("@example/package", "1.0.0")
+            : s_reference;
+        string targetPath = PackageCacheKey.Create(reference).GetPackageDirectoryPath(_cacheRoot);
+        string contentPath = Path.Combine(targetPath, "package");
+        string linkPath;
+        if (shape == "scope-ancestor")
+        {
+            string actualScopePath = Path.Combine(_cacheRoot, "scope-target");
+            CreateCachedContent(reference, Path.Combine(actualScopePath, Path.GetFileName(targetPath), "package"));
+            linkPath = Path.Combine(_cacheRoot, "@example");
+            CreateSymbolicLink(linkPath, actualScopePath, isDirectory: true);
+        }
+        else if (shape == "content-directory")
+        {
+            string actualContentPath = CreateCachedContent(reference, Path.Combine(_cacheRoot, "content-target"));
+            Directory.CreateDirectory(targetPath);
+            linkPath = contentPath;
+            CreateSymbolicLink(linkPath, actualContentPath, isDirectory: true);
+        }
+        else
+        {
+            CreateCachedContent(reference);
+            linkPath = Path.Combine(contentPath, "package.json");
+            string manifestTarget = Path.Combine(_cacheRoot, "manifest-target.json");
+            File.Move(linkPath, manifestTarget);
+            CreateSymbolicLink(linkPath, manifestTarget, isDirectory: false);
+        }
+        ScriptedFileSystemPrimitives primitives = CompositionTestSupport.SystemFiles(_cacheRoot);
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), primitives.CreateContext(retries: 2));
+        primitives.Calls.Clear();
+
+        PackageCacheInspection inspection = await cache.InspectAsync(
+            reference, TestContext.Current.CancellationToken);
+        string? content = await cache.GetFileContentAsync(
+            reference, "patient.json", TestContext.Current.CancellationToken);
+
+        inspection.State.ShouldBe(PackageCacheInspectionState.Corrupt);
+        inspection.CorruptionReason.ShouldNotBeNullOrWhiteSpace();
+        if (shape == "scope-ancestor")
+            inspection.IsRepairable.ShouldBeFalse();
+        content.ShouldBeNull();
+        FileSystemPrimitiveCall[] linkProbes = primitives.Calls
+            .Where(call => call.Operation == "Probe" && call.Path == linkPath)
+            .ToArray();
+        linkProbes.ShouldNotBeEmpty();
+        linkProbes.ShouldAllBe(call => call.Flags == 0);
+        primitives.Calls.ShouldNotContain(
+            call => call.Operation == "Probe" && call.Path == Path.Combine(contentPath, "patient.json"));
+        File.Exists(Path.Combine(contentPath, "patient.json")).ShouldBeTrue();
+        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_cacheRoot))
@@ -177,6 +352,37 @@ public sealed class DiskPackageCacheMutationTests : IDisposable
             new PackageInstallLimits(),
             SystemPackageCacheFileOperations.Instance,
             observer ?? NullPackageCacheFaultObserver.Instance);
+
+    private string CreateCachedContent(PackageReference reference, string? contentPath = null)
+    {
+        contentPath ??= Path.Combine(
+            PackageCacheKey.Create(reference).GetPackageDirectoryPath(_cacheRoot), "package");
+        Directory.CreateDirectory(contentPath);
+        File.WriteAllText(
+            Path.Combine(contentPath, "package.json"),
+            $$"""{"name":"{{reference.Name}}","version":"{{reference.Version}}"}""");
+        File.WriteAllText(
+            Path.Combine(contentPath, "patient.json"),
+            """{"resourceType":"Patient","id":"original"}""");
+        return contentPath;
+    }
+
+    private static void CreateSymbolicLink(string linkPath, string targetPath, bool isDirectory)
+    {
+        try
+        {
+            if (isDirectory)
+                Directory.CreateSymbolicLink(linkPath, targetPath);
+            else
+                File.CreateSymbolicLink(linkPath, targetPath);
+        }
+        catch (Exception exception) when (
+            exception is UnauthorizedAccessException or PlatformNotSupportedException
+            || (exception is IOException && (exception.HResult & 0xFFFF) is 50 or 95 or 1314))
+        {
+            Assert.Skip($"Symbolic links are unavailable on this host: {exception.Message}");
+        }
+    }
 
     private static async Task InstallAsync(
         DiskPackageCache cache,

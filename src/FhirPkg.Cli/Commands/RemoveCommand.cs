@@ -2,6 +2,7 @@
 
 using System.CommandLine;
 using FhirPkg.Cli.Formatting;
+using FhirPkg.IO;
 using Spectre.Console;
 
 namespace FhirPkg.Cli.Commands;
@@ -100,7 +101,7 @@ internal static class RemoveCommand
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, $"Cache error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Cache error: {FileSystemFailureContext.FormatMessage(ex)}");
                 return ExitCodes.CacheError;
             }
             catch (OperationCanceledException)

@@ -267,10 +267,11 @@ internal sealed class PackageArchiveInventory
     {
         ArgumentNullException.ThrowIfNull(context);
         ResilientFileSystem fileSystem = context.FileSystem;
+        string fullExtractedPath = fileSystem.GetFullPath(extractedPath);
         PackageInstallLimits limits = new PackageInstallLimits();
         PackageArchiveInventory inventory = new PackageArchiveInventory(limits);
         Stack<string> pendingDirectories = new Stack<string>();
-        pendingDirectories.Push(extractedPath);
+        pendingDirectories.Push(fullExtractedPath);
 
         while (pendingDirectories.Count > 0)
         {
@@ -289,7 +290,7 @@ internal sealed class PackageArchiveInventory
                 }
 
                 bool isDirectory = (attributes & FileAttributes.Directory) != 0;
-                string relativePath = Path.GetRelativePath(extractedPath, entryPath);
+                string relativePath = Path.GetRelativePath(fullExtractedPath, entryPath);
                 PortableArchivePath portablePath = PortableArchivePath.Create(
                     relativePath,
                     isDirectory,

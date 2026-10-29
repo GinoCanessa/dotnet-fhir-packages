@@ -328,7 +328,237 @@ public sealed class PackageIndexerTests : IDisposable
     }
 
     [Fact]
-    public void ReferencedFile_UsesSamePolicyWithoutRewrapping()
+    public async Task ReadExistingIndex_LinkedIndexUsesFollowingPositionedReads()
+    {
+        string contentPath = CreatePackageContent(
+            "example.package",
+            "1.0.0",
+            ("patient.json", """{"resourceType":"Patient","id":"fresh"}"""));
+        string targetPath = Path.Combine(_testRoot, "existing-index.json");
+        await File.WriteAllTextAsync(
+            targetPath,
+            """{"index-version":2,"files":[{"filename":"patient.json","resourceType":"Patient","id":"stored"}]}""",
+            TestContext.Current.CancellationToken);
+        string indexPath = Path.Combine(contentPath, ".index.json");
+        CreateSymbolicLink(indexPath, targetPath, isDirectory: false);
+        ScriptedFileSystemPrimitives primitives = CreateFilePrimitives();
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            primitives.Enqueue<int>("ReadAtAsync", call =>
+            {
+                call.Path.ShouldBe(indexPath);
+                return ScriptedFileSystemPrimitives.NativeFailure<int>(5, "ReadAtAsync", call.Path);
+            });
+        }
+        CountingLogger logger = new();
+        PackageIndexer indexer = new(logger, primitives.CreateContext(retries: 2));
+
+        PackageIndex index = await indexer.IndexPackageAsync(
+            contentPath,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        index.Files.Single().Id.ShouldBe("stored");
+        indexer.FindByResourceType("Patient").Single().Id.ShouldBe("stored");
+        FileSystemPrimitiveCall opened = primitives.Calls.Single(
+            call => call.Operation == "OpenFileHandle" && call.Path == indexPath);
+        opened.Mode.ShouldBe(FileMode.Open);
+        opened.Access.ShouldBe(FileAccess.Read);
+        opened.Share.ShouldBe(FileShare.Read);
+        opened.Options.ShouldBe(FileOptions.None);
+        primitives.Calls.Single(call => call.Operation == "Probe" && call.Path == indexPath)
+            .Flags.ShouldBe(1);
+        primitives.Count("CreateDirectoryEnumerator").ShouldBe(0);
+        primitives.AsyncWaits.ShouldBe([10, 10]);
+        primitives.Waits.ShouldBeEmpty();
+        logger.Warnings.ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BuildIndex_LinkedContentAndResourcesExcludeDirectoriesInOrdinalOrder(bool managed)
+    {
+        string contentPath = CreatePackageContent(
+            "physical.package",
+            "1.0.0",
+            ("a.json", """{"resourceType":"Patient","id":"a"}"""),
+            ("Z.json", """{"resourceType":"Patient","id":"z"}"""));
+        string directoryPath = Path.Combine(contentPath, "B-directory.json");
+        Directory.CreateDirectory(directoryPath);
+        await File.WriteAllTextAsync(
+            Path.Combine(directoryPath, "nested.json"),
+            """{"resourceType":"Patient","id":"nested"}""",
+            TestContext.Current.CancellationToken);
+        string resourceTarget = Path.Combine(_testRoot, "resource-target.json");
+        await File.WriteAllTextAsync(
+            resourceTarget,
+            """{"resourceType":"Patient","id":"linked"}""",
+            TestContext.Current.CancellationToken);
+        CreateSymbolicLink(
+            Path.Combine(contentPath, "M-linked.json"), resourceTarget, isDirectory: false);
+        CreateSymbolicLink(
+            Path.Combine(contentPath, "C-directory-link.json"), directoryPath, isDirectory: true);
+        string linkedContentPath = Path.Combine(_testRoot, "alias.package#2.0.0", "package");
+        Directory.CreateDirectory(Path.GetDirectoryName(linkedContentPath)!);
+        CreateSymbolicLink(linkedContentPath, contentPath, isDirectory: true);
+        ScriptedFileSystemPrimitives primitives = CreateFilePrimitives();
+        primitives.Enqueue<int>("ReadAtAsync", call =>
+        {
+            Path.GetFileName(call.Path).ShouldBe("M-linked.json");
+            return ScriptedFileSystemPrimitives.NativeFailure<int>(5, "ReadAtAsync", call.Path);
+        });
+        CountingLogger logger = new();
+        PackageIndexer indexer = new(logger, primitives.CreateContext(retries: 1));
+
+        PackageIndex index = managed
+            ? await ((IManagedPackageIndexer)indexer).BuildIndexAsync(
+                CreateRecord(new PackageReference("alias.package", "2.0.0"), linkedContentPath),
+                TestContext.Current.CancellationToken)
+            : await indexer.IndexPackageAsync(
+                linkedContentPath,
+                new IndexingOptions { ForceReindex = true },
+                TestContext.Current.CancellationToken);
+
+        index.Files.Select(file => file.Filename).ShouldBe(["M-linked.json", "Z.json", "a.json"]);
+        index.Files.Select(file => file.Id).ShouldBe(["linked", "z", "a"]);
+        primitives.Calls.Where(call => call.Operation == "OpenFileHandle")
+            .Select(call => Path.GetFileName(call.Path))
+            .ShouldBe(["M-linked.json", "Z.json", "a.json"]);
+        foreach (FileSystemPrimitiveCall opened in primitives.Calls.Where(call => call.Operation == "OpenFileHandle"))
+        {
+            opened.Mode.ShouldBe(FileMode.Open);
+            opened.Access.ShouldBe(FileAccess.Read);
+            opened.Share.ShouldBe(FileShare.Read);
+            opened.Options.ShouldBe(FileOptions.None);
+        }
+        primitives.Calls.Where(call => call.Operation == "Probe").ShouldAllBe(call => call.Flags == 1);
+        primitives.AsyncWaits.ShouldBe([10]);
+        primitives.Waits.ShouldBeEmpty();
+        logger.Warnings.ShouldBe(0);
+        if (!managed)
+        {
+            indexer.FindByResourceType("Patient").Select(resource => resource.FilePath)
+                .ShouldBe(["M-linked.json", "Z.json", "a.json"]);
+            indexer.FindByResourceType("Patient").ShouldAllBe(
+                resource => resource.PackageName == "alias.package" && resource.PackageVersion == "2.0.0");
+        }
+    }
+
+    [Fact]
+    public async Task ReadExistingIndex_ReferencedFileLinkIsStillRejectedAndRegenerated()
+    {
+        string contentPath = CreatePackageContent("example.package", "1.0.0");
+        string targetPath = Path.Combine(_testRoot, "patient-target.json");
+        await File.WriteAllTextAsync(
+            targetPath,
+            """{"resourceType":"Patient","id":"fresh"}""",
+            TestContext.Current.CancellationToken);
+        string resourcePath = Path.Combine(contentPath, "patient.json");
+        CreateSymbolicLink(resourcePath, targetPath, isDirectory: false);
+        await File.WriteAllTextAsync(
+            Path.Combine(contentPath, ".index.json"),
+            """{"index-version":2,"files":[{"filename":"patient.json","resourceType":"Patient","id":"stale"}]}""",
+            TestContext.Current.CancellationToken);
+        ScriptedFileSystemPrimitives primitives = CreateFilePrimitives();
+        CountingLogger logger = new();
+        PackageIndexer indexer = new(logger, primitives.CreateContext(retries: 0));
+
+        PackageIndex index = await indexer.IndexPackageAsync(
+            contentPath,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        index.Files.Single().Id.ShouldBe("fresh");
+        logger.WarningMessages.ShouldHaveSingleItem().ShouldContain("Ignoring invalid .index.json");
+        primitives.Calls.ShouldContain(
+            call => call.Operation == "Probe" && call.Path == resourcePath && call.Flags == 0);
+        primitives.Calls.ShouldContain(
+            call => call.Operation == "Probe" && call.Path == resourcePath && call.Flags == 1);
+        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+        File.ReadAllText(targetPath).ShouldContain("\"id\":\"fresh\"");
+    }
+
+    [Fact]
+    public async Task ReadExistingIndex_RelativeRootUsesRetainedContextAndOriginalRegistrationSpelling()
+    {
+        string contentPath = CreatePackageContent(
+            "physical.package",
+            "1.0.0",
+            ("patient.json", """{"resourceType":"Patient","id":"fresh"}"""));
+        await File.WriteAllTextAsync(
+            Path.Combine(contentPath, ".index.json"),
+            """{"index-version":2,"files":[{"filename":"patient.json","resourceType":"Patient","id":"stored"}]}""",
+            TestContext.Current.CancellationToken);
+        string relativeRoot = Path.Combine("Alias.Package#2.0.0", "package");
+        ScriptedFileSystemPrimitives primitives = CreateFilePrimitives();
+        int rootAttempts = 0;
+        primitives.Set<string>("GetFullPath", call =>
+        {
+            if (call.Path == relativeRoot)
+            {
+                int attempt = rootAttempts++;
+                // Directory discovery succeeds; the later validation root resolution
+                // fails twice and must retain the indexer's context and budget.
+                return attempt is 1 or 2
+                    ? ScriptedFileSystemPrimitives.NativeFailure<string>(5, "GetFullPath", call.Path)
+                    : FileSystemReplayOutcome<string>.Complete(contentPath);
+            }
+
+            call.Path.ShouldBe(Path.Combine(relativeRoot, ".index.json"));
+            return FileSystemReplayOutcome<string>.Complete(Path.Combine(contentPath, ".index.json"));
+        });
+        PackageIndexer indexer = new(NullLogger.Instance, primitives.CreateContext(retries: 2));
+
+        PackageIndex index = await indexer.IndexPackageAsync(
+            relativeRoot,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        index.Files.Single().Id.ShouldBe("stored");
+        ResourceInfo resource = indexer.FindByResourceType("Patient").Single();
+        resource.PackageName.ShouldBe("Alias.Package");
+        resource.PackageVersion.ShouldBe("2.0.0");
+        rootAttempts.ShouldBe(4);
+        primitives.Count("GetFullPath").ShouldBe(5);
+        primitives.Count("CreateDirectoryEnumerator").ShouldBe(0);
+        primitives.Waits.ShouldBe([10, 10]);
+        primitives.AsyncWaits.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void ReferencedFiles_RelativeRootExhaustionUsesOnlyRetainedBudget()
+    {
+        string relativeRoot = Path.Combine("relative.package#1.0.0", "package");
+        ScriptedFileSystemPrimitives primitives = CreateFilePrimitives();
+        IOException[] failures = Enumerable.Range(0, 3)
+            .Select(attempt => new IOException($"Root resolution failure {attempt}."))
+            .ToArray();
+        foreach (IOException failure in failures)
+        {
+            primitives.Enqueue("GetFullPath",
+                ScriptedFileSystemPrimitives.Fail<string>(failure, "GetFullPath", relativeRoot));
+        }
+        FileSystemContext context = primitives.CreateContext(retries: 2);
+
+        IOException exception = Should.Throw<IOException>(() =>
+            PackageIndexValidation.TryValidateReferencedFiles(
+                CreateIndex(("patient.json", "Patient", "one")),
+                relativeRoot,
+                context,
+                out _));
+
+        exception.ShouldBeSameAs(failures[2]);
+        FileSystemFailureContext.FormatMessage(exception).ShouldContain("attempts 3, retries 2, termination Exhausted");
+        primitives.Count("GetFullPath").ShouldBe(3);
+        primitives.Count("Probe").ShouldBe(0);
+        primitives.Count("OpenFileHandle").ShouldBe(0);
+        primitives.Waits.ShouldBe([10, 10]);
+        primitives.AsyncWaits.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReferencedFile_UsesSamePolicyWithoutRewrapping(bool unauthorized)
     {
         string contentPath = CreatePackageContent(
             "example.package",
@@ -336,10 +566,22 @@ public sealed class PackageIndexerTests : IDisposable
             ("patient.json", """{"resourceType":"Patient","id":"one"}"""));
         ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);
         primitives.UseSystemFiles();
+        int attempts = 0;
         primitives.Set<FileSystemProbeResult>("Probe", call =>
-            call.Path!.EndsWith("patient.json", StringComparison.Ordinal)
-                ? ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "Probe", call.Path)
-                : SystemFileSystemPrimitives.Instance.Probe(call.Path!));
+        {
+            string message = $"Reference failure {attempts++}.";
+            Exception exception = unauthorized
+                ? new UnauthorizedAccessException(message)
+                : new IOException(message);
+            return FileSystemReplayOutcome<FileSystemProbeResult>.Failed(
+                FileSystemFailureContext.CapturePrimitiveFailure(
+                    exception,
+                    FileSystemReplaySafety.Safe,
+                    "Probe",
+                    call.Path,
+                    nativeErrorCode: 5,
+                    nativeFlags: 0x123));
+        });
         FileSystemContext context = primitives.CreateContext();
 
         bool valid = PackageIndexValidation.TryValidateReferencedFiles(
@@ -349,10 +591,17 @@ public sealed class PackageIndexerTests : IDisposable
             out string? failureReason);
 
         valid.ShouldBeFalse();
-        failureReason.ShouldNotBeNullOrEmpty();
+        failureReason.ShouldNotBeNull().ShouldStartWith("Reference failure 5.");
+        failureReason.ShouldContain("Filesystem operation 'Probe', phase 'Probe'");
+        failureReason.ShouldContain("attempts 6, retries 5, termination Exhausted");
+        failureReason.ShouldContain($"path '{Path.Combine(contentPath, "patient.json")}'");
+        failureReason.ShouldContain("native error 5, native flags 0x123");
+        for (int attempt = 0; attempt < 5; attempt++)
+            failureReason.ShouldNotContain($"Reference failure {attempt}.");
         // One budget for the probe: six executions and five waits, no nested loop.
         primitives.Count("Probe").ShouldBe(6);
         primitives.Waits.ShouldBe([10, 10, 10, 10, 10]);
+        primitives.AsyncWaits.ShouldBeEmpty();
     }
 
     [Fact]
@@ -383,6 +632,34 @@ public sealed class PackageIndexerTests : IDisposable
             Directory.Delete(_testRoot, recursive: true);
     }
 
+    private static ScriptedFileSystemPrimitives CreateFilePrimitives()
+    {
+        ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<IEnumerator<string>>("CreateDirectoryEnumerator",
+            call => SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        primitives.Set<FileStream>("OpenFile", call => SystemFileSystemPrimitives.Instance.OpenFile(
+            call.Path!, FileMode.Open, FileAccess.Read, FileShare.Read, 16_384, FileOptions.SequentialScan));
+        return primitives;
+    }
+
+    private static void CreateSymbolicLink(string linkPath, string targetPath, bool isDirectory)
+    {
+        try
+        {
+            if (isDirectory)
+                Directory.CreateSymbolicLink(linkPath, targetPath);
+            else
+                File.CreateSymbolicLink(linkPath, targetPath);
+        }
+        catch (Exception exception) when (
+            exception is UnauthorizedAccessException or PlatformNotSupportedException
+            || (exception is IOException && (exception.HResult & 0xFFFF) is 50 or 95 or 1314))
+        {
+            Assert.Skip($"Symbolic links are unavailable on this host: {exception.Message}");
+        }
+    }
+
     private sealed class FailingEnumerator(IEnumerator<string> inner, int failAfter) : IEnumerator<string>
     {
         private int _moves;
@@ -407,6 +684,8 @@ public sealed class PackageIndexerTests : IDisposable
     {
         internal int Warnings { get; private set; }
 
+        internal List<string> WarningMessages { get; } = [];
+
         public IDisposable? BeginScope<TState>(TState state)
             where TState : notnull => null;
 
@@ -420,7 +699,10 @@ public sealed class PackageIndexerTests : IDisposable
             Func<TState, Exception?, string> formatter)
         {
             if (logLevel == LogLevel.Warning)
+            {
                 Warnings++;
+                WarningMessages.Add(formatter(state, exception));
+            }
         }
     }
 
