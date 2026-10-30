@@ -49,6 +49,7 @@ public class DiskPackageCache :
     private readonly PackageCacheMetadataStore _metadataStore;
     private readonly PackageCacheCommitter _committer;
     private readonly PackageCacheCoordinator _coordinator;
+    private readonly PackageCacheStagingArea _stagingArea;
     private readonly IPackageCacheFileOperations _fileOperations;
     private readonly object _mutationSubscriptionsLock = new();
     private readonly Dictionary<long, MutationSubscriptionCallbacks>
@@ -242,6 +243,7 @@ public class DiskPackageCache :
             CacheDirectory,
             context,
             contentionObserver);
+        _stagingArea = new PackageCacheStagingArea(CacheDirectory, _context);
     }
 
     private static FileSystemContext DeriveContext(
@@ -1781,63 +1783,14 @@ public class DiskPackageCache :
         }
     }
 
-    private async Task CleanupAbandonedStagingNoLockAsync(
+    private Task CleanupAbandonedStagingNoLockAsync(
         CancellationToken cancellationToken,
-        string? protectedOperationId = null)
-    {
-        string stagingRoot = Path.Combine(
-            CacheDirectory,
-            ".fhirpkg",
-            "staging");
-        if ((await _context.FileSystem.ProbeAsync(stagingRoot, cancellationToken)
-                .ConfigureAwait(false)).Kind != FileSystemEntryKind.Directory)
-            return;
-
-        IReadOnlyList<PackageCacheTransactionJournal> journals =
-            await _committer.GetPendingTransactionsAsync(cancellationToken)
-                .ConfigureAwait(false);
-        HashSet<string> journalOperationIds = journals
-            .Select(journal => journal.OperationId)
-            .ToHashSet(StringComparer.Ordinal);
-        string[] operationDirectories =
-            await _context.FileSystem.SnapshotDirectoryAsync(
-                    stagingRoot,
-                    cancellationToken)
-                .ConfigureAwait(false);
-        Array.Sort(operationDirectories, StringComparer.Ordinal);
-        foreach (string operationDirectory in operationDirectories)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            string operationId = Path.GetFileName(operationDirectory);
-            if (journalOperationIds.Contains(operationId)
-                || string.Equals(
-                    operationId,
-                    protectedOperationId,
-                    StringComparison.Ordinal)
-                || !Guid.TryParseExact(operationId, "N", out Guid _)
-                || (await _context.FileSystem.ProbeAsync(
-                        operationDirectory,
-                        cancellationToken)
-                    .ConfigureAwait(false)).Kind != FileSystemEntryKind.Directory)
-            {
-                continue;
-            }
-
-            PackageCacheLease? ownerLease =
-                await _coordinator.TryAcquireOperationOwnerAsync(operationId, cancellationToken)
-                    .ConfigureAwait(false);
-            if (ownerLease is null)
-                continue;
-
-            await using (ownerLease.ConfigureAwait(false))
-            {
-                await PackageContentAcquisition.TryDeleteOperationDirectoryAsync(
-                        operationDirectory,
-                        _context)
-                    .ConfigureAwait(false);
-            }
-        }
-    }
+        string? protectedOperationId = null) =>
+        _stagingArea.CleanupAbandonedAsync(
+            _coordinator,
+            _committer,
+            cancellationToken,
+            protectedOperationId);
 
     private async Task<IReadOnlyList<(PackageCacheKey Key, string Path)>>
         EnumeratePackageTargetsAsync(CancellationToken cancellationToken)

@@ -428,6 +428,8 @@ public class PackageContentAcquirerTests : IDisposable
         try
         {
             await using Stream archive = await acquisition.OpenArchiveReadAsync(TestContext.Current.CancellationToken);
+            files.Enqueue("ReadAtAsync", ScriptedFileSystemPrimitives.NativeFailure<int>(
+                5, "retained archive read", acquisition.ArchivePath));
             byte[] result = new byte[content.Length];
             await archive.ReadExactlyAsync(result, TestContext.Current.CancellationToken);
             result.ShouldBe(content);
@@ -444,10 +446,174 @@ public class PackageContentAcquirerTests : IDisposable
         ownerStream.ShouldNotBeNull().CanRead.ShouldBeFalse();
         files.Count("Unlock").ShouldBe(2);
         files.Count("CloseFile").ShouldBe(2);
-        files.AsyncWaits.ShouldBe([10, 10, 10]);
+        files.Count("ReadAtAsync").ShouldBe(2);
+        files.AsyncWaits.ShouldBe([10, 10, 10, 10]);
         files.Waits.ShouldBeEmpty();
         source.CanRead.ShouldBeTrue();
         source.Position.ShouldBe(content.Length);
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Acquisition_DisposalCleansBeforeReleasingOwner()
+    {
+        byte[] content = "owned acquisition"u8.ToArray();
+        using TrackingReadStream source = new(new MemoryStream(content), canSeek: false);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 1);
+        PackageCacheCoordinator coordinator = new(
+            _cacheRoot, context, NullPackageCacheContentionObserver.Instance);
+        FileStream? ownerStream = null;
+        files.Set<FileStream>("OpenFile", call =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = SystemFileSystemPrimitives.Instance.OpenFile(
+                call.Path!, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                OperatingSystem.IsMacOS() ? FileShare.None : FileShare.ReadWrite, 1, FileOptions.None);
+            ownerStream = opened.Value;
+            return opened;
+        });
+        await using PackageContentAcquisition acquisition = await PackageContentAcquirer.AcquireAsync(
+            source, _cacheRoot, CreateLimits(content.Length), null, null, null, false, "archive",
+            coordinator, context, TestContext.Current.CancellationToken);
+        int ownerAcquired = files.Calls.FindIndex(call => call.Operation == "TryLock");
+        int operationCreated = files.Calls.FindIndex(call =>
+            call.Operation == "CreateDirectory" && call.Path == acquisition.OperationDirectory);
+        int archiveOpened = files.Calls.FindIndex(call =>
+            call.Operation is "OpenOwnedDescriptor" or "OpenFileHandle"
+            && call.Path == acquisition.ArchivePath);
+        ownerAcquired.ShouldBeGreaterThanOrEqualTo(0);
+        operationCreated.ShouldBeGreaterThan(ownerAcquired);
+        archiveOpened.ShouldBeGreaterThan(operationCreated);
+        acquisition.ActualLength.ShouldBe(content.Length);
+        acquisition.Sha256.ShouldBe(HashSha256(content));
+        int cleanupAttempts = 0;
+        files.Set<bool>("DeleteEntry", call =>
+        {
+            ownerStream.ShouldNotBeNull().CanRead.ShouldBeTrue();
+            PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(1);
+            using PackageCacheLease? contender = coordinator.TryAcquireOperationOwner(acquisition.OperationId);
+            contender.ShouldBeNull();
+            if (cleanupAttempts++ == 0)
+                return ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "DeleteEntry", call.Path);
+            return SystemFileSystemPrimitives.Instance.DeleteEntry(call.Path!, call.Kind!.Value);
+        });
+        files.Set<bool>("Unlock", _ =>
+        {
+            Directory.Exists(acquisition.OperationDirectory).ShouldBeFalse();
+            ownerStream.ShouldNotBeNull().CanRead.ShouldBeTrue();
+            PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(1);
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        });
+
+        await acquisition.DisposeAsync();
+        await acquisition.DisposeAsync();
+
+        int lastCleanup = files.Calls.FindLastIndex(call => call.Operation == "DeleteEntry");
+        int ownerReleased = files.Calls.FindIndex(call => call.Operation == "Unlock");
+        ownerReleased.ShouldBeGreaterThan(lastCleanup);
+        Directory.Exists(acquisition.OperationDirectory).ShouldBeFalse();
+        ownerStream.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        File.Exists(Path.Combine(
+            _cacheRoot, ".fhirpkg", "locks", "operations", $"{acquisition.OperationId}.lock"))
+            .ShouldBeTrue();
+        files.Count("Unlock").ShouldBe(1);
+        files.Count("TryLock").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10]);
+        files.Waits.ShouldBeEmpty();
+        source.BytesRead.ShouldBe(content.Length);
+        source.ReadCalls.ShouldBe(2);
+        source.WasDisposed.ShouldBeFalse();
+        source.PositionWasRead.ShouldBeFalse();
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Acquisition_CleanupUsesIndependentBudgetAfterPrimaryCancellation(
+        bool cleanupAndUnlockExhaust)
+    {
+        byte[] content = "cancelled acquisition"u8.ToArray();
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        using CancelOnReadStream source = new(new MemoryStream(content), cancellation);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 2);
+        PackageCacheCoordinator coordinator = new(
+            _cacheRoot, context, NullPackageCacheContentionObserver.Instance);
+        FileStream? ownerStream = null;
+        files.Set<FileStream>("OpenFile", call =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = SystemFileSystemPrimitives.Instance.OpenFile(
+                call.Path!, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                OperatingSystem.IsMacOS() ? FileShare.None : FileShare.ReadWrite, 1, FileOptions.None);
+            ownerStream = opened.Value;
+            return opened;
+        });
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                files.Enqueue("OpenFileHandle",
+                    ScriptedFileSystemPrimitives.NativeFailure<SafeFileHandle>(5, "acquisition open"));
+            }
+            else
+            {
+                files.Enqueue("OpenOwnedDescriptor",
+                    ScriptedFileSystemPrimitives.NativeFailure<int>(5, "acquisition open"));
+            }
+        }
+        int cleanupAttempts = 0;
+        string? cleanupPath = null;
+        files.Set<bool>("DeleteEntry", call =>
+        {
+            cancellation.IsCancellationRequested.ShouldBeTrue();
+            if (call.Kind == FileSystemEntryKind.File)
+            {
+                cleanupPath = call.Path;
+                cleanupAttempts++;
+                if (cleanupAndUnlockExhaust || cleanupAttempts <= 2)
+                    return ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "DeleteEntry", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.DeleteEntry(call.Path!, call.Kind!.Value);
+        });
+        for (int attempt = 0; attempt < (cleanupAndUnlockExhaust ? 3 : 2); attempt++)
+            files.Enqueue("Unlock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "owner unlock"));
+        int primaryWaits = 0;
+        int independentWaits = 0;
+        files.OnWait = () =>
+        {
+            ownerStream.ShouldNotBeNull().CanRead.ShouldBeTrue();
+            PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(1);
+            if (cancellation.IsCancellationRequested)
+                independentWaits++;
+            else
+                primaryWaits++;
+        };
+
+        OperationCanceledException exception = await Should.ThrowAsync<OperationCanceledException>(() =>
+            PackageContentAcquirer.AcquireAsync(
+                source, _cacheRoot, CreateLimits(content.Length), null, null, null, false, "archive",
+                coordinator, context, cancellation.Token));
+
+        exception.CancellationToken.ShouldBe(cancellation.Token);
+        primaryWaits.ShouldBe(2);
+        independentWaits.ShouldBe(4);
+        cleanupAttempts.ShouldBe(3);
+        cleanupPath.ShouldNotBeNull();
+        File.Exists(cleanupPath).ShouldBe(cleanupAndUnlockExhaust);
+        Directory.Exists(Path.GetDirectoryName(cleanupPath)).ShouldBe(cleanupAndUnlockExhaust);
+        if (!cleanupAndUnlockExhaust)
+            AssertNoStagingOperations();
+        files.Count(OperatingSystem.IsWindows() ? "OpenFileHandle" : "OpenOwnedDescriptor").ShouldBe(3);
+        files.Count("WriteAtAsync").ShouldBe(0);
+        files.Count("CloseFile").ShouldBe(1);
+        files.Count("Unlock").ShouldBe(3);
+        files.AsyncWaits.ShouldBe([10, 10, 10, 10, 10, 10]);
+        files.Waits.ShouldBeEmpty();
+        ownerStream.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        source.WasDisposed.ShouldBeFalse();
+        source.PositionWasRead.ShouldBeFalse();
         PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
     }
 

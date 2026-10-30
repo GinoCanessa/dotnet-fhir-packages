@@ -12,9 +12,6 @@ namespace FhirPkg.Installation;
 /// </summary>
 internal static class PackageContentAcquirer
 {
-    private const string OperationsDirectoryName = ".fhirpkg";
-    private const string StagingDirectoryName = "staging";
-    private const string ArchiveFileName = "archive.tgz";
     private const int BufferSize = 81_920;
 
     internal static async Task<PackageContentAcquisition> AcquireAsync(
@@ -160,13 +157,10 @@ internal static class PackageContentAcquirer
         if (reportedContentLength > limits.MaxCompressedBytes)
             throw CompressedLimitExceeded(directive, limits.MaxCompressedBytes);
 
+        PackageCacheStagingArea stagingArea = new(cacheRoot, context);
         string operationId = Guid.NewGuid().ToString("N");
-        string stagingRoot = Path.Combine(
-            cacheRoot,
-            OperationsDirectoryName,
-            StagingDirectoryName);
-        string operationDirectory = Path.Combine(stagingRoot, operationId);
-        string archivePath = Path.Combine(operationDirectory, ArchiveFileName);
+        string operationDirectory = stagingArea.GetOperationDirectory(operationId);
+        string archivePath = stagingArea.GetArchivePath(operationId);
         PackageCacheLease? operationOwner = coordinator is null
             ? null
             : await coordinator.AcquireOperationOwnerAsync(
@@ -271,8 +265,8 @@ internal static class PackageContentAcquirer
                 actualLength,
                 actualSha256,
                 actualSha1,
-                operationOwner,
-                context);
+                stagingArea,
+                operationOwner);
             completed = true;
             return result;
         }
@@ -294,9 +288,7 @@ internal static class PackageContentAcquirer
             {
                 try
                 {
-                    await PackageContentAcquisition.TryDeleteOperationDirectoryAsync(
-                            operationDirectory,
-                            context)
+                    await stagingArea.CleanupOwnedAsync(operationDirectory)
                         .ConfigureAwait(false);
                 }
                 catch
@@ -405,19 +397,22 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
         long actualLength,
         string sha256,
         string? sha1,
-        PackageCacheLease? operationOwner = null,
-        FileSystemContext? context = null)
+        PackageCacheStagingArea stagingArea,
+        PackageCacheLease? operationOwner = null)
     {
+        ArgumentNullException.ThrowIfNull(stagingArea);
         OperationId = operationId;
         OperationDirectory = operationDirectory;
         ArchivePath = archivePath;
         ActualLength = actualLength;
         Sha256 = sha256;
         Sha1 = sha1;
+        _stagingArea = stagingArea;
         _operationOwner = operationOwner;
-        _context = context ?? FileSystemContext.CreateDefault();
+        _context = stagingArea.Context;
     }
 
+    private readonly PackageCacheStagingArea _stagingArea;
     private readonly PackageCacheLease? _operationOwner;
     private readonly FileSystemContext _context;
 
@@ -448,7 +443,7 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
         bool cleaned = false;
         try
         {
-            await TryDeleteOperationDirectoryAsync(OperationDirectory, _context)
+            await _stagingArea.CleanupOwnedAsync(OperationDirectory)
                 .ConfigureAwait(false);
             cleaned = true;
         }
@@ -467,124 +462,4 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
             }
         }
     }
-
-    internal static void TryDeleteOperationDirectory(string operationDirectory) =>
-        TryDeleteOperationDirectory(operationDirectory, FileSystemContext.CreateDefault());
-
-    internal static void TryDeleteOperationDirectory(
-        string operationDirectory,
-        FileSystemContext context)
-    {
-        ArgumentNullException.ThrowIfNull(context);
-        ResilientFileSystem fileSystem = context.FileSystem;
-        try
-        {
-            if (fileSystem.Probe(operationDirectory).Kind == FileSystemEntryKind.Directory)
-            {
-                fileSystem.Delete(
-                    operationDirectory,
-                    FileSystemEntryKind.Directory,
-                    recursive: true,
-                    missingAllowed: true);
-            }
-
-            string? stagingRoot = Path.GetDirectoryName(operationDirectory);
-            if (stagingRoot is not null
-                && fileSystem.Probe(stagingRoot).Kind == FileSystemEntryKind.Directory
-                && fileSystem.SnapshotDirectory(stagingRoot).Length == 0)
-            {
-                fileSystem.Delete(
-                    stagingRoot,
-                    FileSystemEntryKind.Directory,
-                    recursive: false,
-                    missingAllowed: true);
-            }
-
-            string? operationsRoot = stagingRoot is null
-                ? null
-                : Path.GetDirectoryName(stagingRoot);
-            if (operationsRoot is not null
-                && fileSystem.Probe(operationsRoot).Kind == FileSystemEntryKind.Directory
-                && fileSystem.SnapshotDirectory(operationsRoot).Length == 0)
-            {
-                fileSystem.Delete(
-                    operationsRoot,
-                    FileSystemEntryKind.Directory,
-                    recursive: false,
-                    missingAllowed: true);
-            }
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // Cleanup must not replace the primary installation outcome.
-        }
-        catch (IOException)
-        {
-            // Cleanup must not replace the primary installation outcome.
-        }
-    }
-
-    internal static async ValueTask TryDeleteOperationDirectoryAsync(
-        string operationDirectory,
-        FileSystemContext context)
-    {
-        ArgumentNullException.ThrowIfNull(context);
-        ResilientFileSystem fileSystem = context.FileSystem;
-        try
-        {
-            // Cleanup is its own bounded operation and never observes the primary
-            // operation's cancellation.
-            if ((await fileSystem.ProbeAsync(operationDirectory).ConfigureAwait(false)).Kind
-                == FileSystemEntryKind.Directory)
-            {
-                await fileSystem.DeleteAsync(
-                        operationDirectory,
-                        FileSystemEntryKind.Directory,
-                        recursive: true,
-                        missingAllowed: true)
-                    .ConfigureAwait(false);
-            }
-
-            string? stagingRoot = Path.GetDirectoryName(operationDirectory);
-            if (stagingRoot is not null
-                && await IsEmptyDirectoryAsync(fileSystem, stagingRoot).ConfigureAwait(false))
-            {
-                await fileSystem.DeleteAsync(
-                        stagingRoot,
-                        FileSystemEntryKind.Directory,
-                        recursive: false,
-                        missingAllowed: true)
-                    .ConfigureAwait(false);
-            }
-
-            string? operationsRoot = stagingRoot is null
-                ? null
-                : Path.GetDirectoryName(stagingRoot);
-            if (operationsRoot is not null
-                && await IsEmptyDirectoryAsync(fileSystem, operationsRoot).ConfigureAwait(false))
-            {
-                await fileSystem.DeleteAsync(
-                        operationsRoot,
-                        FileSystemEntryKind.Directory,
-                        recursive: false,
-                        missingAllowed: true)
-                    .ConfigureAwait(false);
-            }
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // Cleanup must not replace the primary installation outcome.
-        }
-        catch (IOException)
-        {
-            // Cleanup must not replace the primary installation outcome.
-        }
-    }
-
-    private static async ValueTask<bool> IsEmptyDirectoryAsync(
-        ResilientFileSystem fileSystem,
-        string path) =>
-        (await fileSystem.ProbeAsync(path).ConfigureAwait(false)).Kind
-            == FileSystemEntryKind.Directory
-        && (await fileSystem.SnapshotDirectoryAsync(path).ConfigureAwait(false)).Length == 0;
 }
