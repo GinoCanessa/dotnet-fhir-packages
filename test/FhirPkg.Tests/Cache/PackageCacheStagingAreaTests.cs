@@ -249,6 +249,525 @@ public sealed class PackageCacheStagingAreaTests : IDisposable
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public async Task CleanupAbandoned_RootDisappearsAtEnumeratorCreation_HasNoCandidates(int retries)
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        PackageCacheStagingArea stagingArea = CreateAbandonedDiscovery(
+            files, retries, out PackageCacheCoordinator coordinator, out PackageCacheCommitter committer);
+        List<TrackingEnumerator> enumerators = [];
+        List<DirectoryNotFoundException> failures = [];
+        ScriptMissingStagingSnapshots(
+            files, stagingArea.StagingRoot, null, enumerators, failures,
+            onFailure: attempt =>
+            {
+                if (attempt == 1)
+                    Directory.Delete(stagingArea.StagingRoot);
+                Directory.Exists(stagingArea.StagingRoot).ShouldBeFalse();
+            });
+
+        await stagingArea.CleanupAbandonedAsync(
+            coordinator, committer, TestContext.Current.CancellationToken);
+
+        AssertDiscoveryOrder(files, stagingArea.StagingRoot);
+        AssertSnapshotCalls(
+            files, stagingArea.StagingRoot, retries + 1, advances: 0, currents: 0, disposals: 0);
+        enumerators.ShouldBeEmpty();
+        failures.Count.ShouldBe(retries + 1);
+        AssertTerminalSnapshotFailure(
+            failures[^1], "EnumerateDirectory", stagingArea.StagingRoot, retries, nativeError: 2);
+        foreach (DirectoryNotFoundException earlier in failures.Take(retries))
+            FileSystemFailureContext.TryGetTerminal(earlier, out _).ShouldBeFalse();
+        files.Calls.Where(call => call.Operation == "Probe").Select(call => call.Path)
+            .ShouldBe([stagingArea.StagingRoot, GetTransactionDirectory()]);
+        files.AsyncWaits.ShouldBe(Enumerable.Repeat(10, retries).ToArray());
+        files.Waits.ShouldBeEmpty();
+        AssertNoOwnerOrDelete(files);
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(2, false)]
+    [InlineData(0, true)]
+    [InlineData(2, true)]
+    public async Task CleanupAbandoned_RootDisappearsDuringMoveNext_DiscardsPartialSnapshot(
+        int retries,
+        bool secondaryDisposalFailure)
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        PackageCacheStagingArea stagingArea = CreateAbandonedDiscovery(
+            files, retries, out PackageCacheCoordinator coordinator, out PackageCacheCommitter committer);
+        string operationDirectory = stagingArea.GetOperationDirectory(new string('1', 32));
+        Directory.CreateDirectory(operationDirectory);
+        string payload = Path.Combine(operationDirectory, "keep.txt");
+        File.WriteAllText(payload, "eligible partial candidate");
+        List<TrackingEnumerator> enumerators = [];
+        List<DirectoryNotFoundException> failures = [];
+        List<DirectoryNotFoundException> disposalFailures = [];
+        ScriptMissingStagingSnapshots(
+            files, stagingArea.StagingRoot, operationDirectory, enumerators, failures,
+            disposalFailures: secondaryDisposalFailure ? disposalFailures : null);
+
+        await stagingArea.CleanupAbandonedAsync(
+            coordinator, committer, TestContext.Current.CancellationToken);
+
+        AssertDiscoveryOrder(files, stagingArea.StagingRoot);
+        AssertSnapshotCalls(
+            files, stagingArea.StagingRoot, retries + 1,
+            advances: 2 * (retries + 1), currents: retries + 1, disposals: retries + 1);
+        enumerators.Count.ShouldBe(retries + 1);
+        foreach (TrackingEnumerator enumerator in enumerators)
+            enumerator.DisposeCount.ShouldBe(1);
+        failures.Count.ShouldBe(retries + 1);
+        AssertTerminalSnapshotFailure(
+            failures[^1], "DirectoryEnumerator.MoveNext", stagingArea.StagingRoot, retries, nativeError: 2);
+        foreach (DirectoryNotFoundException earlier in failures.Take(retries))
+            FileSystemFailureContext.TryGetTerminal(earlier, out _).ShouldBeFalse();
+        disposalFailures.Count.ShouldBe(secondaryDisposalFailure ? retries + 1 : 0);
+        foreach (DirectoryNotFoundException secondary in disposalFailures)
+        {
+            FileSystemFailureContext.TryGetOrigin(
+                secondary, out FileSystemFailureContext? failure).ShouldBeTrue();
+            failure!.Operation.ShouldBe("DirectoryEnumerator.Dispose");
+            failure.Path.ShouldBe(stagingArea.StagingRoot);
+            FileSystemFailureContext.TryGetTerminal(secondary, out _).ShouldBeFalse();
+        }
+        files.Calls.Where(call => call.Operation == "GetCurrent").Select(call => call.Path)
+            .ShouldBe(Enumerable.Repeat(stagingArea.StagingRoot, retries + 1).ToArray());
+        files.Calls.Where(call => call.Operation == "Probe").Select(call => call.Path)
+            .ShouldBe([stagingArea.StagingRoot, GetTransactionDirectory()]);
+        File.ReadAllText(payload).ShouldBe("eligible partial candidate");
+        Directory.Exists(operationDirectory).ShouldBeTrue();
+        files.AsyncWaits.ShouldBe(Enumerable.Repeat(10, retries).ToArray());
+        files.Waits.ShouldBeEmpty();
+        AssertNoOwnerOrDelete(files);
+    }
+
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    public async Task CleanupAbandoned_RootReappearsWithinBudget_UsesOnlyCompleteSnapshot(
+        int retries,
+        bool failDuringMoveNext)
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        PackageCacheStagingArea stagingArea = CreateAbandonedDiscovery(
+            files, retries, out PackageCacheCoordinator coordinator, out PackageCacheCommitter committer);
+        string partialId = new('1', 32);
+        string completeId = new('2', 32);
+        string partialDirectory = stagingArea.GetOperationDirectory(partialId);
+        string completeDirectory = stagingArea.GetOperationDirectory(completeId);
+        Directory.CreateDirectory(partialDirectory);
+        Directory.CreateDirectory(completeDirectory);
+        string payload = Path.Combine(partialDirectory, "keep.txt");
+        File.WriteAllText(payload, "discarded snapshot");
+        int discoveryAttempts = 0;
+        int parentSnapshotDisposals = 0;
+        List<TrackingEnumerator> enumerators = [];
+        List<DirectoryNotFoundException> failures = [];
+        files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+        {
+            if (call.Path != stagingArea.StagingRoot)
+                return SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!);
+            if (discoveryAttempts == retries + 1)
+            {
+                FileSystemReplayOutcome<IEnumerator<string>> opened =
+                    SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!);
+                return FileSystemReplayOutcome<IEnumerator<string>>.Complete(
+                    new AfterDisposeEnumerator(opened.Value, () => parentSnapshotDisposals++));
+            }
+
+            discoveryAttempts++;
+            if (discoveryAttempts <= retries)
+            {
+                DirectoryNotFoundException failure = new("The staging root disappeared.");
+                failures.Add(failure);
+                if (!failDuringMoveNext)
+                {
+                    return ScriptedFileSystemPrimitives.Fail<IEnumerator<string>>(
+                        failure, "EnumerateDirectory", call.Path, nativeError: 2);
+                }
+
+                TrackingEnumerator partial = new([partialDirectory]);
+                enumerators.Add(partial);
+                files.Enqueue<bool>("MoveNext", advance =>
+                {
+                    advance.Path.ShouldBe(stagingArea.StagingRoot);
+                    return SystemFileSystemPrimitives.Instance.MoveNext(partial, advance.Path!);
+                });
+                files.Enqueue<bool>("MoveNext", advance =>
+                {
+                    advance.Path.ShouldBe(stagingArea.StagingRoot);
+                    return ScriptedFileSystemPrimitives.Fail<bool>(
+                        failure, "DirectoryEnumerator.MoveNext", advance.Path, nativeError: 2);
+                });
+                return FileSystemReplayOutcome<IEnumerator<string>>.Complete(partial);
+            }
+
+            TrackingEnumerator complete = new([completeDirectory]);
+            enumerators.Add(complete);
+            return FileSystemReplayOutcome<IEnumerator<string>>.Complete(complete);
+        });
+
+        await stagingArea.CleanupAbandonedAsync(
+            coordinator, committer, TestContext.Current.CancellationToken);
+
+        AssertDiscoveryOrder(files, stagingArea.StagingRoot);
+        discoveryAttempts.ShouldBe(retries + 1);
+        AssertSnapshotCalls(
+            files, stagingArea.StagingRoot, retries + 2,
+            advances: (failDuringMoveNext ? 2 * retries : 0) + 4,
+            currents: (failDuringMoveNext ? retries : 0) + 2,
+            disposals: (failDuringMoveNext ? retries : 0) + 2);
+        enumerators.Count.ShouldBe(failDuringMoveNext ? retries + 1 : 1);
+        foreach (TrackingEnumerator enumerator in enumerators)
+            enumerator.DisposeCount.ShouldBe(1);
+        parentSnapshotDisposals.ShouldBe(1);
+        failures.Count.ShouldBe(retries);
+        foreach (DirectoryNotFoundException failure in failures)
+        {
+            FileSystemFailureContext.TryGetOrigin(
+                failure, out FileSystemFailureContext? origin).ShouldBeTrue();
+            origin!.Operation.ShouldBe(failDuringMoveNext
+                ? "DirectoryEnumerator.MoveNext"
+                : "EnumerateDirectory");
+            origin.Path.ShouldBe(stagingArea.StagingRoot);
+            origin.NativeErrorCode.ShouldBe(2);
+            FileSystemFailureContext.TryGetTerminal(failure, out _).ShouldBeFalse();
+        }
+        files.Calls.Where(call => call.Operation == "OpenFile").Select(call => call.Path)
+            .ShouldBe([GetOwnerLockPath(completeId)]);
+        files.Calls.Where(call => call.Operation == "DeleteEntry").Select(call => call.Path)
+            .ShouldBe([completeDirectory]);
+        files.Calls.ShouldNotContain(call => call.Path == partialDirectory
+            || call.Path == payload || call.Path == GetOwnerLockPath(partialId));
+        files.Count("TryLock").ShouldBe(1);
+        files.Count("Unlock").ShouldBe(1);
+        Directory.Exists(completeDirectory).ShouldBeFalse();
+        File.ReadAllText(payload).ShouldBe("discarded snapshot");
+        files.AsyncWaits.ShouldBe(Enumerable.Repeat(10, retries).ToArray());
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData("access", 0)]
+    [InlineData("access", 2)]
+    [InlineData("io", 0)]
+    [InlineData("io", 2)]
+    [InlineData("wrong-path", 0)]
+    [InlineData("wrong-path", 2)]
+    [InlineData("wrong-operation", 0)]
+    [InlineData("wrong-operation", 2)]
+    [InlineData("untagged-callback", 0)]
+    [InlineData("untagged-callback", 2)]
+    [InlineData("origin-only-callback", 2)]
+    [InlineData("unsafe", 2)]
+    [InlineData("dispose-only", 0)]
+    [InlineData("dispose-only", 2)]
+    [InlineData("primary-and-disposal", 0)]
+    [InlineData("primary-and-disposal", 2)]
+    [InlineData("journal", 0)]
+    [InlineData("journal", 2)]
+    [InlineData("cancel-before", 0)]
+    [InlineData("cancel-before", 2)]
+    [InlineData("cancel-during-retry", 2)]
+    public async Task CleanupAbandoned_UnrelatedFailuresPropagate(string failurePoint, int retries)
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        PackageCacheStagingArea stagingArea = CreateAbandonedDiscovery(
+            files, retries, out PackageCacheCoordinator coordinator, out PackageCacheCommitter committer);
+        string operationDirectory = stagingArea.GetOperationDirectory(new string('1', 32));
+        Directory.CreateDirectory(operationDirectory);
+        string payload = Path.Combine(operationDirectory, "keep.txt");
+        File.WriteAllText(payload, "unrelated failure");
+        string failedPath = failurePoint == "journal"
+            ? GetTransactionDirectory()
+            : stagingArea.StagingRoot;
+        string evidencePath = failurePoint == "wrong-path"
+            ? Path.Combine(stagingArea.StagingRoot, "another-directory")
+            : failedPath;
+        string operation = failurePoint switch
+        {
+            "wrong-operation" => "DirectoryEnumerator.Current",
+            "dispose-only" => "DirectoryEnumerator.Dispose",
+            "primary-and-disposal" => "DirectoryEnumerator.MoveNext",
+            _ => "EnumerateDirectory"
+        };
+        Exception original = failurePoint switch
+        {
+            "access" or "primary-and-disposal" => new UnauthorizedAccessException("Access denied."),
+            "io" or "journal" => new IOException("Unrelated physical failure."),
+            _ => new DirectoryNotFoundException("Missing directory is not sufficient evidence.")
+        };
+        int? nativeError = failurePoint == "dispose-only"
+            ? original.HResult & 0xFFFF
+            : original is UnauthorizedAccessException ? 13 : original is DirectoryNotFoundException ? 2 : 5;
+        DirectoryNotFoundException secondary = new("Secondary disposal failure.");
+        List<TrackingEnumerator> enumerators = [];
+        int failureAttempts = 0;
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        if (failurePoint == "cancel-before")
+            cancellation.Cancel();
+        if (failurePoint == "cancel-during-retry")
+            files.OnWait = cancellation.Cancel;
+        files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+        {
+            if (call.Path != failedPath)
+                return SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!);
+
+            failureAttempts++;
+            if (failurePoint == "untagged-callback")
+                throw original;
+            if (failurePoint == "origin-only-callback")
+            {
+                ScriptedFileSystemPrimitives.Fail<IEnumerator<string>>(
+                    original, operation, evidencePath, nativeError: nativeError);
+                throw original;
+            }
+            if (failurePoint is "dispose-only" or "primary-and-disposal")
+            {
+                TrackingEnumerator enumerator = new(
+                    [operationDirectory], failurePoint == "dispose-only" ? original : secondary);
+                enumerators.Add(enumerator);
+                if (failurePoint == "primary-and-disposal")
+                {
+                    files.Enqueue<bool>("MoveNext", advance =>
+                    {
+                        advance.Path.ShouldBe(stagingArea.StagingRoot);
+                        return ScriptedFileSystemPrimitives.Fail<bool>(
+                            original, operation, evidencePath, nativeError: nativeError);
+                    });
+                }
+                return FileSystemReplayOutcome<IEnumerator<string>>.Complete(enumerator);
+            }
+
+            return ScriptedFileSystemPrimitives.Fail<IEnumerator<string>>(
+                original, operation, evidencePath,
+                failurePoint == "unsafe" ? FileSystemReplaySafety.Unsafe : FileSystemReplaySafety.Safe,
+                nativeError);
+        });
+
+        bool cancelled = failurePoint is "cancel-before" or "cancel-during-retry";
+        if (cancelled)
+        {
+            OperationCanceledException exception = await Should.ThrowAsync<OperationCanceledException>(() =>
+                stagingArea.CleanupAbandonedAsync(coordinator, committer, cancellation.Token));
+
+            exception.CancellationToken.ShouldBe(cancellation.Token);
+            FileSystemFailureContext.TryGetTerminal(original, out _).ShouldBeFalse();
+            FileSystemFailureContext.TryGetOrigin(original, out FileSystemFailureContext? origin)
+                .ShouldBe(failurePoint == "cancel-during-retry");
+            if (origin is not null)
+            {
+                origin.Operation.ShouldBe(operation);
+                origin.Path.ShouldBe(evidencePath);
+                origin.Termination.ShouldBe(FileSystemFailureTermination.None);
+            }
+        }
+        else
+        {
+            Exception exception = await Should.ThrowAsync<Exception>(() =>
+                stagingArea.CleanupAbandonedAsync(coordinator, committer, cancellation.Token));
+
+            exception.ShouldBeSameAs(original);
+            if (failurePoint is "untagged-callback" or "origin-only-callback")
+            {
+                FileSystemFailureContext.TryGetTerminal(exception, out _).ShouldBeFalse();
+                FileSystemFailureContext.TryGetOrigin(exception, out FileSystemFailureContext? origin)
+                    .ShouldBe(failurePoint == "origin-only-callback");
+                if (origin is not null)
+                {
+                    origin.Operation.ShouldBe(operation);
+                    origin.Path.ShouldBe(evidencePath);
+                    origin.Termination.ShouldBe(FileSystemFailureTermination.None);
+                }
+            }
+            else
+            {
+                AssertTerminalSnapshotFailure(
+                    exception, operation, evidencePath, failurePoint == "unsafe" ? 0 : retries,
+                    nativeError, failurePoint == "unsafe"
+                        ? FileSystemFailureTermination.Unsafe
+                        : FileSystemFailureTermination.Exhausted);
+                FileSystemFailureContext.TryGetTerminal(
+                    exception, out FileSystemFailureContext? actual).ShouldBeTrue();
+                FileSystemFailureContext.TryGetTerminal(
+                    original, out FileSystemFailureContext? expected).ShouldBeTrue();
+                actual.ShouldBeSameAs(expected);
+            }
+        }
+
+        int attempts = failurePoint switch
+        {
+            "cancel-before" => 0,
+            "untagged-callback" or "origin-only-callback" or "unsafe" or "cancel-during-retry" => 1,
+            _ => retries + 1
+        };
+        failureAttempts.ShouldBe(attempts);
+        bool createsEnumerator = failurePoint is "dispose-only" or "primary-and-disposal";
+        AssertSnapshotCalls(
+            files, stagingArea.StagingRoot, failurePoint == "journal" ? 0 : attempts,
+            advances: failurePoint == "dispose-only" ? attempts * 2 : createsEnumerator ? attempts : 0,
+            currents: failurePoint == "dispose-only" ? attempts : 0,
+            disposals: createsEnumerator ? attempts : 0);
+        enumerators.Count.ShouldBe(createsEnumerator ? attempts : 0);
+        foreach (TrackingEnumerator enumerator in enumerators)
+            enumerator.DisposeCount.ShouldBe(1);
+        if (failurePoint == "primary-and-disposal")
+        {
+            FileSystemFailureContext.TryGetOrigin(
+                secondary, out FileSystemFailureContext? disposal).ShouldBeTrue();
+            disposal!.Operation.ShouldBe("DirectoryEnumerator.Dispose");
+            disposal.Path.ShouldBe(stagingArea.StagingRoot);
+            FileSystemFailureContext.TryGetTerminal(secondary, out _).ShouldBeFalse();
+        }
+        if (failurePoint == "cancel-before")
+        {
+            files.Calls.ShouldBeEmpty();
+        }
+        else if (failurePoint == "journal")
+        {
+            AssertSnapshotCalls(files, failedPath, attempts, advances: 0, currents: 0, disposals: 0);
+        }
+        else
+        {
+            AssertDiscoveryOrder(files, stagingArea.StagingRoot);
+        }
+        int waits = failurePoint == "cancel-during-retry" ? 1 : Math.Max(0, attempts - 1);
+        files.AsyncWaits.ShouldBe(Enumerable.Repeat(10, waits).ToArray());
+        files.Waits.ShouldBeEmpty();
+        File.ReadAllText(payload).ShouldBe("unrelated failure");
+        AssertNoOwnerOrDelete(files);
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(2, false)]
+    [InlineData(0, true)]
+    [InlineData(2, true)]
+    public async Task CleanupAbandoned_CancellationDuringFinalMissingAttemptPropagates(
+        int retries,
+        bool failDuringMoveNext)
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        PackageCacheStagingArea stagingArea = CreateAbandonedDiscovery(
+            files, retries, out PackageCacheCoordinator coordinator, out PackageCacheCommitter committer);
+        string operationDirectory = stagingArea.GetOperationDirectory(new string('1', 32));
+        Directory.CreateDirectory(operationDirectory);
+        string payload = Path.Combine(operationDirectory, "keep.txt");
+        File.WriteAllText(payload, "cancelled discovery");
+        List<TrackingEnumerator> enumerators = [];
+        List<DirectoryNotFoundException> failures = [];
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        ScriptMissingStagingSnapshots(
+            files, stagingArea.StagingRoot, failDuringMoveNext ? operationDirectory : null,
+            enumerators, failures,
+            onFailure: attempt =>
+            {
+                if (attempt == retries + 1)
+                    cancellation.Cancel();
+            });
+
+        OperationCanceledException exception = await Should.ThrowAsync<OperationCanceledException>(() =>
+            stagingArea.CleanupAbandonedAsync(coordinator, committer, cancellation.Token));
+
+        exception.CancellationToken.ShouldBe(cancellation.Token);
+        AssertDiscoveryOrder(files, stagingArea.StagingRoot);
+        failures.Count.ShouldBe(retries + 1);
+        AssertTerminalSnapshotFailure(
+            failures[^1], failDuringMoveNext ? "DirectoryEnumerator.MoveNext" : "EnumerateDirectory",
+            stagingArea.StagingRoot, retries, nativeError: 2);
+        AssertSnapshotCalls(
+            files, stagingArea.StagingRoot, retries + 1,
+            advances: failDuringMoveNext ? 2 * (retries + 1) : 0,
+            currents: failDuringMoveNext ? retries + 1 : 0,
+            disposals: failDuringMoveNext ? retries + 1 : 0);
+        enumerators.Count.ShouldBe(failDuringMoveNext ? retries + 1 : 0);
+        foreach (TrackingEnumerator enumerator in enumerators)
+            enumerator.DisposeCount.ShouldBe(1);
+        files.Calls.Where(call => call.Operation == "Probe").Select(call => call.Path)
+            .ShouldBe([stagingArea.StagingRoot, GetTransactionDirectory()]);
+        files.AsyncWaits.ShouldBe(Enumerable.Repeat(10, retries).ToArray());
+        files.Waits.ShouldBeEmpty();
+        File.ReadAllText(payload).ShouldBe("cancelled discovery");
+        AssertNoOwnerOrDelete(files);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task CleanupAbandoned_ReplacementLinkIsNotTraversed(
+        bool replaceRoot,
+        bool directoryLink)
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        PackageCacheStagingArea stagingArea = CreateAbandonedDiscovery(
+            files, retries: 2, out PackageCacheCoordinator coordinator, out PackageCacheCommitter committer);
+        string operationDirectory = stagingArea.GetOperationDirectory(new string('1', 32));
+        Directory.CreateDirectory(operationDirectory);
+        string foreignDirectory = Path.Combine(_cacheRoot, "foreign", new string('2', 32));
+        Directory.CreateDirectory(foreignDirectory);
+        string payload = Path.Combine(foreignDirectory, "keep.txt");
+        File.WriteAllText(payload, "link target");
+        string linkPath = replaceRoot ? stagingArea.StagingRoot : operationDirectory;
+        bool replaced = replaceRoot;
+        TrackingEnumerator enumerator = new([operationDirectory]);
+        files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+        {
+            if (call.Path != stagingArea.StagingRoot)
+                return SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!);
+            replaced = true;
+            return FileSystemReplayOutcome<IEnumerator<string>>.Complete(enumerator);
+        });
+        files.Set<FileSystemProbeResult>("Probe", call =>
+        {
+            call.Flags.ShouldBe(0);
+            // Replacement is before the existing no-follow probe, not an atomic traversal guarantee.
+            if (call.Path == linkPath && replaced)
+            {
+                return ScriptedFileSystemPrimitives.Entry(directoryLink
+                    ? FileSystemEntryKind.DirectorySymbolicLink
+                    : FileSystemEntryKind.SymbolicLink);
+            }
+            return SystemFileSystemPrimitives.Instance.Probe(call.Path!, followLinks: false);
+        });
+
+        await stagingArea.CleanupAbandonedAsync(
+            coordinator, committer, TestContext.Current.CancellationToken);
+
+        AssertSnapshotCalls(
+            files, stagingArea.StagingRoot, replaceRoot ? 0 : 1,
+            advances: replaceRoot ? 0 : 2, currents: replaceRoot ? 0 : 1, disposals: replaceRoot ? 0 : 1);
+        enumerator.DisposeCount.ShouldBe(replaceRoot ? 0 : 1);
+        if (replaceRoot)
+        {
+            files.Calls.ShouldHaveSingleItem().Operation.ShouldBe("Probe");
+            files.Calls[0].Path.ShouldBe(stagingArea.StagingRoot);
+        }
+        else
+        {
+            AssertDiscoveryOrder(files, stagingArea.StagingRoot);
+            files.Calls.Where(call => call.Operation == "Probe").Select(call => call.Path)
+                .ShouldBe([stagingArea.StagingRoot, GetTransactionDirectory(), operationDirectory]);
+        }
+        files.Calls.ShouldNotContain(call => call.Path != null
+            && call.Path.StartsWith(Path.Combine(_cacheRoot, "foreign"), StringComparison.Ordinal));
+        File.ReadAllText(payload).ShouldBe("link target");
+        Directory.Exists(operationDirectory).ShouldBeTrue();
+        files.AsyncWaits.ShouldBeEmpty();
+        files.Waits.ShouldBeEmpty();
+        AssertNoOwnerOrDelete(files);
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]
@@ -313,6 +832,137 @@ public sealed class PackageCacheStagingAreaTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    private PackageCacheStagingArea CreateAbandonedDiscovery(
+        ScriptedFileSystemPrimitives files,
+        int retries,
+        out PackageCacheCoordinator coordinator,
+        out PackageCacheCommitter committer)
+    {
+        FileSystemContext context = files.CreateContext(retries);
+        PackageCacheStagingArea stagingArea = new(_cacheRoot, context);
+        Directory.CreateDirectory(stagingArea.StagingRoot);
+        Directory.CreateDirectory(GetTransactionDirectory());
+        coordinator = new PackageCacheCoordinator(
+            _cacheRoot, context, NullPackageCacheContentionObserver.Instance);
+        committer = CreateCommitter(context, out PackageCacheJournalStore _);
+        files.Calls.Clear();
+        return stagingArea;
+    }
+
+    private static void ScriptMissingStagingSnapshots(
+        ScriptedFileSystemPrimitives files,
+        string stagingRoot,
+        string? partialDirectory,
+        List<TrackingEnumerator> enumerators,
+        List<DirectoryNotFoundException> failures,
+        Action<int>? onFailure = null,
+        List<DirectoryNotFoundException>? disposalFailures = null)
+    {
+        files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+        {
+            if (call.Path != stagingRoot)
+                return SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!);
+            if (partialDirectory is null)
+                return Missing<IEnumerator<string>>("EnumerateDirectory");
+
+            DirectoryNotFoundException? secondary = null;
+            if (disposalFailures is not null)
+            {
+                secondary = new DirectoryNotFoundException("Secondary disposal failure.");
+                disposalFailures.Add(secondary);
+            }
+            TrackingEnumerator enumerator = new([partialDirectory], secondary);
+            enumerators.Add(enumerator);
+            files.Enqueue<bool>("MoveNext", advance =>
+            {
+                advance.Path.ShouldBe(stagingRoot);
+                return SystemFileSystemPrimitives.Instance.MoveNext(enumerator, stagingRoot);
+            });
+            files.Enqueue<bool>("MoveNext", advance =>
+            {
+                advance.Path.ShouldBe(stagingRoot);
+                return Missing<bool>("DirectoryEnumerator.MoveNext");
+            });
+            return FileSystemReplayOutcome<IEnumerator<string>>.Complete(enumerator);
+        });
+
+        FileSystemReplayOutcome<T> Missing<T>(string operation)
+        {
+            DirectoryNotFoundException failure = new("The staging root disappeared.");
+            failures.Add(failure);
+            FileSystemReplayOutcome<T> outcome = ScriptedFileSystemPrimitives.Fail<T>(
+                failure, operation, stagingRoot, nativeError: 2);
+            onFailure?.Invoke(failures.Count);
+            return outcome;
+        }
+    }
+
+    private void AssertDiscoveryOrder(ScriptedFileSystemPrimitives files, string stagingRoot)
+    {
+        files.Calls[0].Operation.ShouldBe("Probe");
+        files.Calls[0].Path.ShouldBe(stagingRoot);
+        string transactionDirectory = GetTransactionDirectory();
+        int journalSnapshot = files.Calls.FindIndex(call =>
+            call.Operation == "CreateDirectoryEnumerator" && call.Path == transactionDirectory);
+        int journalDisposal = files.Calls.FindIndex(call =>
+            call.Operation == "DisposeEnumerator" && call.Path == transactionDirectory);
+        int stagingSnapshot = files.Calls.FindIndex(call =>
+            call.Operation == "CreateDirectoryEnumerator" && call.Path == stagingRoot);
+        journalSnapshot.ShouldBeGreaterThan(0);
+        journalDisposal.ShouldBeGreaterThan(journalSnapshot);
+        stagingSnapshot.ShouldBeGreaterThan(journalDisposal);
+        AssertSnapshotCalls(files, transactionDirectory, 1, advances: 1, currents: 0, disposals: 1);
+    }
+
+    private static void AssertSnapshotCalls(
+        ScriptedFileSystemPrimitives files,
+        string path,
+        int creations,
+        int advances,
+        int currents,
+        int disposals)
+    {
+        files.Calls.Count(call => call.Operation == "CreateDirectoryEnumerator" && call.Path == path)
+            .ShouldBe(creations);
+        files.Calls.Count(call => call.Operation == "MoveNext" && call.Path == path).ShouldBe(advances);
+        files.Calls.Count(call => call.Operation == "GetCurrent" && call.Path == path).ShouldBe(currents);
+        files.Calls.Count(call => call.Operation == "DisposeEnumerator" && call.Path == path).ShouldBe(disposals);
+    }
+
+    private static void AssertTerminalSnapshotFailure(
+        Exception exception,
+        string operation,
+        string path,
+        int retries,
+        int? nativeError,
+        FileSystemFailureTermination termination = FileSystemFailureTermination.Exhausted)
+    {
+        FileSystemFailureContext.TryGetTerminal(
+            exception, out FileSystemFailureContext? failure).ShouldBeTrue();
+        failure!.Operation.ShouldBe(operation);
+        failure.Path.ShouldBe(path);
+        failure.DestinationPath.ShouldBeNull();
+        failure.Phase.ShouldBe("SnapshotDirectory");
+        failure.AttemptCount.ShouldBe((long)retries + 1);
+        failure.RetriesUsed.ShouldBe((long)retries);
+        failure.Termination.ShouldBe(termination);
+        failure.NativeErrorCode.ShouldBe(nativeError);
+        failure.NativeFlags.ShouldBeNull();
+    }
+
+    private void AssertNoOwnerOrDelete(ScriptedFileSystemPrimitives files)
+    {
+        files.Count("OpenFile").ShouldBe(0);
+        files.Count("TryLock").ShouldBe(0);
+        files.Count("Unlock").ShouldBe(0);
+        files.Count("DeleteEntry").ShouldBe(0);
+        files.Calls.ShouldNotContain(call => call.Operation == "Probe" && call.Flags != 0);
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+    }
+
+    private string GetTransactionDirectory() =>
+        Path.Combine(_cacheRoot, ".fhirpkg", "transactions");
+
     private PackageCacheCommitter CreateCommitter(
         FileSystemContext context,
         out PackageCacheJournalStore journalStore)
@@ -364,6 +1014,36 @@ public sealed class PackageCacheStagingAreaTests : IDisposable
         SystemFileSystemPrimitives.Instance.OpenFile(
             path, FileMode.OpenOrCreate, FileAccess.ReadWrite,
             OperatingSystem.IsMacOS() ? FileShare.None : FileShare.ReadWrite, 1, FileOptions.None);
+
+    private sealed class TrackingEnumerator : IEnumerator<string>
+    {
+        private readonly IEnumerator<string> _inner;
+        private readonly Exception? _disposalFailure;
+
+        internal TrackingEnumerator(IEnumerable<string> entries, Exception? disposalFailure = null)
+        {
+            _inner = entries.GetEnumerator();
+            _disposalFailure = disposalFailure;
+        }
+
+        internal int DisposeCount { get; private set; }
+
+        public string Current => _inner.Current;
+
+        object System.Collections.IEnumerator.Current => Current;
+
+        public bool MoveNext() => _inner.MoveNext();
+
+        public void Reset() => throw new NotSupportedException();
+
+        public void Dispose()
+        {
+            DisposeCount++;
+            _inner.Dispose();
+            if (_disposalFailure is not null)
+                throw _disposalFailure;
+        }
+    }
 
     private sealed class AfterDisposeEnumerator : IEnumerator<string>
     {

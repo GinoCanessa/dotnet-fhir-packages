@@ -132,6 +132,135 @@ public sealed class PackageCacheCoordinatorTests
             directory.Path).ShouldBe(0);
     }
 
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 0)]
+    [InlineData(false, 2)]
+    [InlineData(true, 2)]
+    public async Task IdentityRecovery_StagingRootDisappearsAfterProbe_DoesNotAbort(
+        bool asynchronous,
+        int retries)
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(directory.Path);
+        FileSystemContext context = files.CreateContext(retries);
+        using DiskPackageCache cache = new(
+            directory.Path, null, null, new PackageInstallLimits(), context);
+        cache.FileSystemContext.ShouldBeSameAs(context);
+        PackageReference reference = new("recovery.package", "1.0.0");
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        string contentPath = Path.Combine(cacheKey.GetPackageDirectoryPath(cache.CacheDirectory), "package");
+        Directory.CreateDirectory(contentPath);
+        File.WriteAllText(
+            Path.Combine(contentPath, "package.json"),
+            """{"name":"recovery.package","version":"1.0.0"}""");
+        string stagingRoot = Path.Combine(cache.CacheDirectory, ".fhirpkg", "staging");
+        string transactionDirectory = Path.Combine(cache.CacheDirectory, ".fhirpkg", "transactions");
+        string identityLockPath = Path.Combine(cache.CacheDirectory, ".fhirpkg", "locks", $"{cacheKey.LockHash}.lock");
+        Directory.CreateDirectory(stagingRoot);
+        Directory.CreateDirectory(transactionDirectory);
+        int baseline = PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory);
+        baseline.ShouldBe(0);
+        List<FileStream> lockStreams = [];
+        files.Set<FileStream>("OpenFile", call =>
+        {
+            call.Path.ShouldBe(identityLockPath);
+            FileSystemReplayOutcome<FileStream> opened = SystemFileSystemPrimitives.Instance.OpenFile(
+                call.Path!, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                OperatingSystem.IsMacOS() ? FileShare.None : FileShare.ReadWrite, 1, FileOptions.None);
+            lockStreams.Add(opened.Value);
+            return opened;
+        });
+        List<DirectoryNotFoundException> failures = [];
+        files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+        {
+            if (call.Path != stagingRoot)
+                return SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!);
+
+            PackageCacheCoordinator.GetIdentityReferenceCount(cache.CacheDirectory, cacheKey).ShouldBe(1);
+            PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory).ShouldBe(baseline + 1);
+            if (failures.Count == 0)
+                Directory.Delete(stagingRoot);
+            Directory.Exists(stagingRoot).ShouldBeFalse();
+            DirectoryNotFoundException failure = new("The staging root disappeared after journal discovery.");
+            failures.Add(failure);
+            return ScriptedFileSystemPrimitives.Fail<IEnumerator<string>>(
+                failure, "EnumerateDirectory", call.Path, nativeError: 2);
+        });
+        files.Calls.Clear();
+
+        if (asynchronous)
+            (await cache.IsInstalledAsync(reference, TestContext.Current.CancellationToken)).ShouldBeTrue();
+        else
+            cache.GetPackageContentPath(reference).ShouldBe(contentPath);
+
+        int stagingProbe = files.Calls.FindIndex(call => call.Operation == "Probe" && call.Path == stagingRoot);
+        int journalSnapshot = files.Calls.FindIndex(call =>
+            call.Operation == "CreateDirectoryEnumerator" && call.Path == transactionDirectory);
+        int journalDisposal = files.Calls.FindIndex(call =>
+            call.Operation == "DisposeEnumerator" && call.Path == transactionDirectory);
+        int stagingSnapshot = files.Calls.FindIndex(call =>
+            call.Operation == "CreateDirectoryEnumerator" && call.Path == stagingRoot);
+        stagingProbe.ShouldBeGreaterThan(0);
+        journalSnapshot.ShouldBeGreaterThan(stagingProbe);
+        journalDisposal.ShouldBeGreaterThan(journalSnapshot);
+        stagingSnapshot.ShouldBeGreaterThan(journalDisposal);
+        files.Calls.Count(call => call.Operation == "Probe" && call.Path == stagingRoot).ShouldBe(1);
+        files.Calls.Count(call => call.Operation == "CreateDirectoryEnumerator" && call.Path == transactionDirectory)
+            .ShouldBe(1);
+        files.Calls.Count(call => call.Operation == "DisposeEnumerator" && call.Path == transactionDirectory)
+            .ShouldBe(1);
+        files.Calls.Count(call => call.Operation == "CreateDirectoryEnumerator" && call.Path == stagingRoot)
+            .ShouldBe(retries + 1);
+        files.Calls.ShouldNotContain(call => call.Path == stagingRoot
+            && (call.Operation == "MoveNext" || call.Operation == "DisposeEnumerator"));
+        failures.Count.ShouldBe(retries + 1);
+        FileSystemFailureContext.TryGetTerminal(
+            failures[^1], out FileSystemFailureContext? failureContext).ShouldBeTrue();
+        failureContext!.Operation.ShouldBe("EnumerateDirectory");
+        failureContext.Path.ShouldBe(stagingRoot);
+        failureContext.Phase.ShouldBe("SnapshotDirectory");
+        failureContext.AttemptCount.ShouldBe((long)retries + 1);
+        failureContext.RetriesUsed.ShouldBe((long)retries);
+        failureContext.Termination.ShouldBe(FileSystemFailureTermination.Exhausted);
+        failureContext.NativeErrorCode.ShouldBe(2);
+        foreach (DirectoryNotFoundException earlier in failures.Take(retries))
+            FileSystemFailureContext.TryGetTerminal(earlier, out _).ShouldBeFalse();
+        files.Calls.Where(call => call.Operation == "OpenFile").Select(call => call.Path)
+            .ShouldBe([identityLockPath]);
+        files.Count("TryLock").ShouldBe(1);
+        files.Count("Unlock").ShouldBe(1);
+        lockStreams.ShouldHaveSingleItem().CanRead.ShouldBeFalse();
+        files.Count("DeleteEntry").ShouldBe(0);
+        files.Calls.ShouldNotContain(call => call.Operation == "Probe"
+            && call.Path == stagingRoot && call.Flags != 0);
+        files.AsyncWaits.ShouldBe(Enumerable.Repeat(10, retries).ToArray());
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetIdentityReferenceCount(cache.CacheDirectory, cacheKey).ShouldBe(0);
+        PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory).ShouldBe(baseline);
+
+        PackageCacheCoordinator coordinator = new(
+            cache.CacheDirectory, context, NullPackageCacheContentionObserver.Instance);
+        using CancellationTokenSource subsequent = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        subsequent.CancelAfter(TimeSpan.FromSeconds(5));
+        await using (PackageCacheLease successor = await coordinator.AcquireIdentityAsync(cacheKey, subsequent.Token))
+        {
+            PackageCacheCoordinator.GetIdentityReferenceCount(cache.CacheDirectory, cacheKey).ShouldBe(1);
+            PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory).ShouldBe(baseline + 1);
+            lockStreams.Count.ShouldBe(2);
+            lockStreams[1].CanRead.ShouldBeTrue();
+        }
+
+        files.Calls.Where(call => call.Operation == "OpenFile").Select(call => call.Path)
+            .ShouldBe([identityLockPath, identityLockPath]);
+        files.Count("TryLock").ShouldBe(2);
+        files.Count("Unlock").ShouldBe(2);
+        lockStreams[1].CanRead.ShouldBeFalse();
+        PackageCacheCoordinator.GetIdentityReferenceCount(cache.CacheDirectory, cacheKey).ShouldBe(0);
+        PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory).ShouldBe(baseline);
+    }
+
     [Fact]
     public async Task IdentityAndGlobalLockFilesRemainPersistent()
     {

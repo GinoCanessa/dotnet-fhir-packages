@@ -52,11 +52,27 @@ internal sealed class PackageCacheStagingArea
         HashSet<string> journalOperationIds = journals
             .Select(journal => journal.OperationId)
             .ToHashSet(StringComparer.Ordinal);
-        string[] operationDirectories =
-            await _context.FileSystem.SnapshotDirectoryAsync(
-                    stagingRoot,
-                    cancellationToken)
-                .ConfigureAwait(false);
+        string[] operationDirectories;
+        try
+        {
+            operationDirectories =
+                await _context.FileSystem.SnapshotDirectoryAsync(
+                        stagingRoot,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+        }
+        catch (DirectoryNotFoundException exception) when (
+            FileSystemFailureContext.TryGetTerminal(
+                exception, out FileSystemFailureContext? failure)
+            && failure.Termination == FileSystemFailureTermination.Exhausted
+            && string.Equals(failure.Path, stagingRoot, StringComparison.Ordinal)
+            && failure.Operation is "EnumerateDirectory" or "DirectoryEnumerator.MoveNext")
+        {
+            // Exhaustion can precede observing cancellation in the final attempt.
+            cancellationToken.ThrowIfCancellationRequested();
+            return;
+        }
+
         Array.Sort(operationDirectories, StringComparer.Ordinal);
         foreach (string operationDirectory in operationDirectories)
         {

@@ -14,6 +14,13 @@ qualification evidence) lives alongside this file under
 
 ### Changed
 
+### Fixed
+- Corrected Unix native creation and descriptor-control argument delivery on
+  macOS arm64, preserving requested file permissions and descriptor options.
+- Allowed abandoned-staging cleanup to finish when the staging parent
+  disappeared during its bounded directory snapshot, while preserving unrelated
+  filesystem failures and cancellation.
+
 ## [2026.1029.15100] - 2026-10-29
 
 ### Added
