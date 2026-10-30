@@ -30,7 +30,7 @@
       "name": "hl7.fhir.us.core",
       "version": "6.0.0",
       "uri": "https://packages2.fhir.org/packages/hl7.fhir.us.core/6.0.0",
-      "sha256": "f501fdc134ddf53b51b36deb26a8f219e1b594ef8fcd60accbfb16aaba583db9"
+      "sha256": "eaf1a6edb6b5c9bd7906b2a3092b0140d6bc65829a8be0d936070199e4a02556"
     },
     {
       "name": "hl7.fhir.uv.ips",
