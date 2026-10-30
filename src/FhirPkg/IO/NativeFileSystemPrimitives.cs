@@ -226,8 +226,11 @@ internal static class NativeFileSystemPrimitives
 
     internal static FileSystemReplayOutcome<int> OpenDescriptor(string path, int flags, uint mode)
     {
-        EnsureSupportedUnix();
-        return OpenDescriptor(path, flags, mode, Open, Marshal.GetLastPInvokeError);
+        int createFlag = Platform == FileSystemPlatform.Linux ? 0x40 : 0x200;
+        UnixDescriptorResult result = (flags & createFlag) != 0
+            ? UnixDescriptorInterop.OpenWithMode(path, flags, mode)
+            : UnixDescriptorInterop.OpenExisting(path, flags);
+        return OpenDescriptorResult(path, flags, result);
     }
 
     internal static FileSystemReplayOutcome<int> OpenDescriptor(
@@ -239,11 +242,48 @@ internal static class NativeFileSystemPrimitives
     {
         int descriptor = open(path, flags, mode);
         int error = getLastError();
-        return descriptor >= 0
-            ? FileSystemReplayOutcome<int>.Complete(descriptor)
+        return OpenDescriptorResult(path, flags, new UnixDescriptorResult(descriptor, error));
+    }
+
+    private static FileSystemReplayOutcome<int> OpenDescriptorResult(
+        string path, int flags, UnixDescriptorResult result) =>
+        result.ReturnValue >= 0
+            ? FileSystemReplayOutcome<int>.Complete(result.ReturnValue)
             : Failed<int>(
                 "The file or directory could not be opened safely.",
-                error, "open", path, nativeFlags: flags);
+                result.Error, "open", path, nativeFlags: flags);
+
+    internal static FileSystemReplayOutcome<int> OpenOwnedDescriptor(
+        string path,
+        FileMode mode,
+        FileAccess access,
+        FileShare share,
+        FileOptions options)
+    {
+        int flags = OwnedOpenFlags(mode, access, share, options, Platform);
+        UnixDescriptorResult result = UnixDescriptorInterop.OpenWithMode(path, flags, 0x1B6);
+        return result.ReturnValue >= 0
+            ? FileSystemReplayOutcome<int>.Complete(result.ReturnValue)
+            : OwnedOpenFailure<int>(path, mode, result.Error, flags, Platform);
+    }
+
+    internal static int OwnedOpenFlags(
+        FileMode mode, FileAccess access, FileShare share, FileOptions options, FileSystemPlatform platform)
+    {
+        if (platform is not (FileSystemPlatform.Linux or FileSystemPlatform.MacOS))
+            throw new PlatformNotSupportedException("Owned descriptors require Linux or macOS.");
+
+        bool linux = platform == FileSystemPlatform.Linux;
+        int flags = access == FileAccess.Read ? 0 : access == FileAccess.Write ? 1 : 2;
+        if (mode is FileMode.Create or FileMode.CreateNew or FileMode.OpenOrCreate)
+            flags |= linux ? 0x40 : 0x200;
+        if (mode == FileMode.CreateNew)
+            flags |= linux ? 0x80 : 0x800;
+        if ((share & FileShare.Inheritable) == 0)
+            flags |= linux ? 0x80000 : 0x01000000;
+        if ((options & FileOptions.WriteThrough) != 0)
+            flags |= linux ? 0x101000 : 0x80;
+        return flags;
     }
 
     internal static FileSystemReplayOutcome<FileSystemProbeResult> InspectDescriptor(int descriptor, string? path = null)
@@ -280,8 +320,7 @@ internal static class NativeFileSystemPrimitives
         int minimum,
         string? path = null)
     {
-        EnsureSupportedUnix();
-        return DuplicateDescriptor(descriptor, command, minimum, Fcntl, Marshal.GetLastPInvokeError, path);
+        return DuplicateDescriptorResult(UnixDescriptorInterop.ControlInteger(descriptor, command, minimum), command, path);
     }
 
     internal static FileSystemReplayOutcome<int> DuplicateDescriptor(
@@ -294,12 +333,16 @@ internal static class NativeFileSystemPrimitives
     {
         int result = duplicate(descriptor, command, minimum);
         int error = getLastError();
-        return result >= 0
-            ? FileSystemReplayOutcome<int>.Complete(result)
+        return DuplicateDescriptorResult(new UnixDescriptorResult(result, error), command, path);
+    }
+
+    private static FileSystemReplayOutcome<int> DuplicateDescriptorResult(
+        UnixDescriptorResult result, int command, string? path) =>
+        result.ReturnValue >= 0
+            ? FileSystemReplayOutcome<int>.Complete(result.ReturnValue)
             : Failed<int>(
                 "The package manifest descriptor could not be duplicated safely.",
-                error, "fcntl(F_DUPFD_CLOEXEC)", path, nativeFlags: command);
-    }
+                result.Error, "fcntl(F_DUPFD_CLOEXEC)", path, nativeFlags: command);
 
     internal static FileSystemReplayOutcome<FileSystemDirectorySyncOutcome> SynchronizeDescriptor(
         int descriptor,
@@ -310,8 +353,7 @@ internal static class NativeFileSystemPrimitives
         if (fullSync)
         {
             return SynchronizeMacFull(
-                () => Fcntl(descriptor, MacFullFileSync),
-                Marshal.GetLastPInvokeError,
+                UnixDescriptorInterop.Control(descriptor, MacFullFileSync),
                 path);
         }
 
@@ -329,14 +371,20 @@ internal static class NativeFileSystemPrimitives
     {
         int result = fullSync();
         int error = getLastError();
-        if (result == 0)
+        return SynchronizeMacFull(new UnixDescriptorResult(result, error), path);
+    }
+
+    private static FileSystemReplayOutcome<FileSystemDirectorySyncOutcome> SynchronizeMacFull(
+        UnixDescriptorResult result, string? path)
+    {
+        if (result.ReturnValue == 0)
             return FileSystemReplayOutcome<FileSystemDirectorySyncOutcome>.Complete(FileSystemDirectorySyncOutcome.Full);
-        if (error is 22 or 25 or 45)
+        if (result.Error is 22 or 25 or 45)
             return FileSystemReplayOutcome<FileSystemDirectorySyncOutcome>.Complete(FileSystemDirectorySyncOutcome.Unsupported);
 
         return Failed<FileSystemDirectorySyncOutcome>(
             "The macOS full directory synchronization failed.",
-            error, "fcntl(F_FULLFSYNC)", path, nativeFlags: MacFullFileSync);
+            result.Error, "fcntl(F_FULLFSYNC)", path, nativeFlags: MacFullFileSync);
     }
 
     internal static FileSystemReplayOutcome<FileSystemDirectorySyncOutcome> SynchronizeStandard(
@@ -538,6 +586,36 @@ internal static class NativeFileSystemPrimitives
         return rejected ? FileSystemReplaySafety.Safe : FileSystemReplaySafety.Unsafe;
     }
 
+    internal static FileSystemReplayOutcome<T> OwnedOpenFailure<T>(
+        string path, FileMode mode, int error, long flags, FileSystemPlatform platform)
+    {
+        bool windows = platform == FileSystemPlatform.Windows;
+        bool collision = mode == FileMode.CreateNew && (windows ? error is 80 or 183 : error == 17);
+        Win32Exception native = new Win32Exception(error);
+        string message = $"The file '{path}' could not be opened: {native.Message}";
+        Exception exception = error switch
+        {
+            2 => new FileNotFoundException(message, path, native),
+            3 when windows => new DirectoryNotFoundException(message, native),
+            20 when !windows => new DirectoryNotFoundException(message, native),
+            5 when windows => new UnauthorizedAccessException(message, native),
+            1 or 13 when !windows => new UnauthorizedAccessException(message, native),
+            206 when windows => new PathTooLongException(message, native),
+            36 or 63 when !windows => new PathTooLongException(message, native),
+            _ => new IOException(message, native),
+        };
+        if (collision)
+            return FileSystemReplayOutcome<T>.SemanticFailure(exception);
+
+        return FileSystemReplayOutcome<T>.Failed(FileSystemFailureContext.CapturePrimitiveFailure(
+            exception,
+            MutationSafety(error, platform),
+            windows ? "CreateFileW" : "open(owned file)",
+            path,
+            nativeErrorCode: error,
+            nativeFlags: flags));
+    }
+
     private static FileSystemReplayOutcome<FileSystemProbeResult> MissingProbe() =>
         FileSystemReplayOutcome<FileSystemProbeResult>.Missing(new FileSystemProbeResult(FileSystemEntryKind.Missing));
 
@@ -593,17 +671,8 @@ internal static class NativeFileSystemPrimitives
     [DllImport("libc", EntryPoint = "rmdir", SetLastError = true)]
     private static extern int Rmdir(string path);
 
-    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
-    private static extern int Open(string path, int flags, uint mode);
-
     [DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
     private static extern int Fsync(int descriptor);
-
-    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
-    private static extern int Fcntl(int descriptor, int command);
-
-    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
-    private static extern int Fcntl(int descriptor, int command, int argument);
 
     [DllImport("libc", EntryPoint = "close", SetLastError = true)]
     private static extern int Close(int descriptor);

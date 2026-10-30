@@ -221,7 +221,7 @@ internal sealed class SystemFileSystemPrimitives : IFileSystemPrimitives
             return FileSystemReplayOutcome<SafeFileHandle>.Complete(handle);
 
         handle.Dispose();
-        return OwnedOpenFailure<SafeFileHandle>(path, mode, error, flags);
+        return NativeFileSystemPrimitives.OwnedOpenFailure<SafeFileHandle>(path, mode, error, flags, Platform);
     }
 
     public FileSystemReplayOutcome<int> OpenOwnedDescriptor(
@@ -229,28 +229,8 @@ internal sealed class SystemFileSystemPrimitives : IFileSystemPrimitives
         FileMode mode,
         FileAccess access,
         FileShare share,
-        FileOptions options)
-    {
-        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
-            throw new PlatformNotSupportedException("Owned descriptors require Linux or macOS.");
-
-        bool linux = OperatingSystem.IsLinux();
-        int flags = access == FileAccess.Read ? 0 : access == FileAccess.Write ? 1 : 2;
-        if (mode is FileMode.Create or FileMode.CreateNew or FileMode.OpenOrCreate)
-            flags |= linux ? 0x40 : 0x200;
-        if (mode == FileMode.CreateNew)
-            flags |= linux ? 0x80 : 0x800;
-        if ((share & FileShare.Inheritable) == 0)
-            flags |= linux ? 0x80000 : 0x01000000;
-        if ((options & FileOptions.WriteThrough) != 0)
-            flags |= linux ? 0x101000 : 0x80;
-
-        int descriptor = OpenOwned(path, flags, 0x1B6);
-        int error = Marshal.GetLastPInvokeError();
-        return descriptor >= 0
-            ? FileSystemReplayOutcome<int>.Complete(descriptor)
-            : OwnedOpenFailure<int>(path, mode, error, flags);
-    }
+        FileOptions options) =>
+        NativeFileSystemPrimitives.OpenOwnedDescriptor(path, mode, access, share, options);
 
     public FileSystemReplayOutcome<bool> ConfigureFileSharing(SafeFileHandle handle, FileShare share, string path)
     {
@@ -277,11 +257,10 @@ internal sealed class SystemFileSystemPrimitives : IFileSystemPrimitives
                 : NativeHandleFailure<bool>(error, "posix_fadvise", path, advice);
         }
 
-        int result = SetReadAhead(handle, 45, random ? 0 : 1);
-        int nativeError = Marshal.GetLastPInvokeError();
-        return result == 0
+        UnixDescriptorResult result = UnixDescriptorInterop.ControlInteger(handle, 45, random ? 0 : 1);
+        return result.ReturnValue == 0
             ? FileSystemReplayOutcome<bool>.Complete(true)
-            : NativeHandleFailure<bool>(nativeError, "fcntl(F_RDAHEAD)", path, 45);
+            : NativeHandleFailure<bool>(result.Error, "fcntl(F_RDAHEAD)", path, 45);
     }
 
     public FileSystemReplayOutcome<int> ReadAt(
@@ -548,41 +527,6 @@ internal sealed class SystemFileSystemPrimitives : IFileSystemPrimitives
     private static bool IsPhysicalFailure(Exception exception) =>
         exception is IOException or UnauthorizedAccessException;
 
-    private static FileSystemReplayOutcome<T> OwnedOpenFailure<T>(
-        string path, FileMode mode, int error, long flags)
-    {
-        bool windows = OperatingSystem.IsWindows();
-        bool collision = mode == FileMode.CreateNew && (windows ? error is 80 or 183 : error == 17);
-        Win32Exception native = new Win32Exception(error);
-        string message = $"The file '{path}' could not be opened: {native.Message}";
-        Exception exception = error switch
-        {
-            2 => new FileNotFoundException(message, path, native),
-            3 when windows => new DirectoryNotFoundException(message, native),
-            20 when !windows => new DirectoryNotFoundException(message, native),
-            5 when windows => new UnauthorizedAccessException(message, native),
-            1 or 13 when !windows => new UnauthorizedAccessException(message, native),
-            206 when windows => new PathTooLongException(message, native),
-            36 or 63 when !windows => new PathTooLongException(message, native),
-            _ => new IOException(message, native),
-        };
-        if (collision)
-            return FileSystemReplayOutcome<T>.SemanticFailure(exception);
-
-        // As with namespace mutations, these are definite rejections, not a
-        // transient-code allowlist. Unknown creation outcomes cannot be adopted.
-        bool rejected = windows
-            ? error is 2 or 3 or 5 or 17 or 32 or 33 or 80 or 87 or 123 or 145 or 183 or 206 or 267
-            : error is 1 or 2 or 9 or 13 or 17 or 18 or 20 or 21 or 22 or 28 or 30 or 36 or 39 or 40 or 45 or 62 or 63 or 66 or 95;
-        return FileSystemReplayOutcome<T>.Failed(FileSystemFailureContext.CapturePrimitiveFailure(
-            exception,
-            rejected ? FileSystemReplaySafety.Safe : FileSystemReplaySafety.Unsafe,
-            windows ? "CreateFileW" : "open(owned file)",
-            path,
-            nativeErrorCode: error,
-            nativeFlags: flags));
-    }
-
     private static FileSystemReplayOutcome<T> NativeHandleFailure<T>(
         int error, string operation, string path, long flags) =>
         FileSystemReplayOutcome<T>.Failed(FileSystemFailureContext.CapturePrimitiveFailure(
@@ -603,17 +547,11 @@ internal sealed class SystemFileSystemPrimitives : IFileSystemPrimitives
         string path, uint access, uint share, ref FileSecurityAttributes security,
         uint disposition, uint flags, IntPtr template);
 
-    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
-    private static extern int OpenOwned(string path, int flags, uint mode);
-
     [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
     private static extern int LockOwned(SafeFileHandle handle, int flags);
 
     [DllImport("libc", EntryPoint = "posix_fadvise")]
     private static extern int AdviseOwned(SafeFileHandle handle, long offset, long length, int advice);
-
-    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
-    private static extern int SetReadAhead(SafeFileHandle handle, int command, int value);
 
     private static FileSystemReplayOutcome<T> Failed<T>(
         Exception exception,

@@ -906,6 +906,12 @@ public sealed class DiskPackageCacheValidityTests : IDisposable
         int faultAttempt = step is "required-content" or "required-manifest" ? 2 : 1;
         int calls = 0;
         ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        if (step == "required-manifest")
+        {
+            files.OnWait = () => TestContext.Current.TestOutputHelper?.WriteLine(
+                $"Wait after call {files.Calls.Count}: async=[{string.Join(", ", files.AsyncWaits)}], " +
+                $"sync=[{string.Join(", ", files.Waits)}]");
+        }
         if (step.EndsWith("snapshot", StringComparison.Ordinal))
         {
             files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
@@ -916,17 +922,46 @@ public sealed class DiskPackageCacheValidityTests : IDisposable
         else
         {
             files.Set<FileSystemProbeResult>("Probe", call =>
-                call.Path == faultPath && ++calls == faultAttempt
+            {
+                FileSystemReplayOutcome<FileSystemProbeResult> outcome = call.Path == faultPath && ++calls == faultAttempt
                     ? ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "shape", call.Path)
-                    : SystemFileSystemPrimitives.Instance.Probe(call.Path!, call.Flags == 1));
+                    : SystemFileSystemPrimitives.Instance.Probe(call.Path!, call.Flags == 1);
+                if (step == "required-manifest" && call.Path == faultPath)
+                {
+                    string result = outcome.Kind == FileSystemReplayOutcomeKind.Completed
+                        ? outcome.Value.Kind.ToString()
+                        : outcome.Kind.ToString();
+                    if (outcome.PrimitiveFailure is FileSystemPrimitiveFailure failure
+                        && FileSystemFailureContext.TryGetOrigin(failure.Exception, out FileSystemFailureContext? evidence))
+                        result += $", errno={evidence.NativeErrorCode}";
+                    TestContext.Current.TestOutputHelper?.WriteLine(
+                        $"Manifest probe #{calls} at call {files.Calls.Count}: {result}");
+                }
+                return outcome;
+            });
         }
 
         PackageCacheInspection inspection = await new PackageCacheValidator(_cacheRoot, files.CreateContext(retries: 1))
             .InspectAsync(key, TestContext.Current.CancellationToken);
 
+        if (step == "required-manifest")
+        {
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                $"{files.Platform} operation order (paths relative to cache root): " +
+                string.Join(" -> ", files.Calls.Select((call, index) =>
+                    $"{index + 1}:{call.Operation}({(call.Path is null ? "-" : Path.GetRelativePath(_cacheRoot, call.Path))})")));
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                $"Final waits: async=[{string.Join(", ", files.AsyncWaits)}], sync=[{string.Join(", ", files.Waits)}]");
+        }
         inspection.State.ShouldBe(PackageCacheInspectionState.Valid);
         inspection.ContentPath.ShouldBe(contentPath);
         inspection.Manifest!.Name.ShouldBe(reference.Name);
+        CountManifestOpens(files, Path.Combine(contentPath, "package.json")).ShouldBe(1);
+        if (step == "required-manifest" && files.Platform == FileSystemPlatform.MacOS)
+        {
+            // The macOS protected-read precheck adds one probe after the shape retry.
+            expectedCalls++;
+        }
         calls.ShouldBe(expectedCalls);
         files.AsyncWaits.ShouldBe([10]);
         files.Waits.ShouldBeEmpty();

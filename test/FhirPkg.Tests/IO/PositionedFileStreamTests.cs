@@ -1,6 +1,9 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.ComponentModel;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
 using FhirPkg.IO;
@@ -18,6 +21,149 @@ public sealed class PositionedFileStreamTests : IDisposable
     public PositionedFileStreamTests() => Directory.CreateDirectory(_root);
 
     public void Dispose() => Directory.Delete(_root, recursive: true);
+
+    [Theory]
+    [InlineData(FileMode.CreateNew, false)]
+    [InlineData(FileMode.CreateNew, true)]
+    [InlineData(FileMode.Create, false)]
+    [InlineData(FileMode.Create, true)]
+    [InlineData(FileMode.OpenOrCreate, false)]
+    [InlineData(FileMode.OpenOrCreate, true)]
+    public async Task OwnedCreation_MatchesManagedPermissionsAndCanReopen(FileMode mode, bool asynchronous)
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            Assert.Skip("Physical owned-creation permission checks require Linux or macOS.");
+
+        OwnedCreationDiagnostics diagnostics = new OwnedCreationDiagnostics($"fresh {mode}; async={asynchronous}");
+        ScriptedFileSystemPrimitives primitives = diagnostics.SystemFiles();
+        ResilientFileSystem fileSystem = primitives.CreateContext().FileSystem;
+        string control = Path.Combine(_root, "managed-control");
+        string path = Path.Combine(_root, "native-created");
+        byte[] payload = "owned creation payload"u8.ToArray();
+        FileOptions options = asynchronous ? FileOptions.Asynchronous : FileOptions.None;
+        await using (FileStream stream = new FileStream(control, mode, FileAccess.ReadWrite, FileShare.None, 4096, options))
+            await WriteCharacterizationPayloadAsync(stream, payload, asynchronous);
+        UnixFileMode expectedMode = ReadUnixMode(control);
+        diagnostics.WriteLine($"Managed control '{control}': mode={FormatUnixMode(expectedMode)}; requested native mode=0666 (subject to umask).");
+
+        await diagnostics.ObserveAsync("owned create/write/close", async () =>
+        {
+            await using PositionedFileStream stream = asynchronous
+                ? await fileSystem.OpenPositionedFileAsync(
+                    path, mode, FileAccess.ReadWrite, FileShare.None, options, TestContext.Current.CancellationToken)
+                : fileSystem.OpenPositionedFile(
+                    path, mode, FileAccess.ReadWrite, FileShare.None, options, TestContext.Current.CancellationToken);
+            stream.Length.ShouldBe(0);
+            await WriteCharacterizationPayloadAsync(stream, payload, asynchronous);
+        });
+
+        // Keep collecting reopen evidence even when the permission comparison fails.
+        diagnostics.CheckMode(path, expectedMode);
+        await CharacterizeReopensAsync(diagnostics, fileSystem, control, payload, asynchronous);
+        await CharacterizeReopensAsync(diagnostics, fileSystem, path, payload, asynchronous);
+        diagnostics.AssertComplete();
+    }
+
+    [Theory]
+    [InlineData(FileMode.Create, false)]
+    [InlineData(FileMode.Create, true)]
+    [InlineData(FileMode.OpenOrCreate, false)]
+    [InlineData(FileMode.OpenOrCreate, true)]
+    public async Task OwnedCreation_ExistingFilePreservesModeAndModeSemantics(FileMode mode, bool asynchronous)
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            Assert.Skip("Physical owned-creation permission checks require Linux or macOS.");
+
+        OwnedCreationDiagnostics diagnostics = new OwnedCreationDiagnostics($"existing {mode}; async={asynchronous}");
+        ScriptedFileSystemPrimitives primitives = diagnostics.SystemFiles();
+        ResilientFileSystem fileSystem = primitives.CreateContext().FileSystem;
+        string path = Path.Combine(_root, "existing");
+        byte[] original = "original existing file contents"u8.ToArray();
+        byte[] payload = "new payload"u8.ToArray();
+        File.WriteAllBytes(path, original);
+        UnixFileMode expectedMode = ReadUnixMode(path);
+        byte[] expected = mode == FileMode.Create ? payload : original.Concat(payload).ToArray();
+        FileOptions options = asynchronous ? FileOptions.Asynchronous : FileOptions.None;
+
+        await diagnostics.ObserveAsync("existing owned open/write/close", async () =>
+        {
+            await using PositionedFileStream stream = asynchronous
+                ? await fileSystem.OpenPositionedFileAsync(
+                    path, mode, FileAccess.ReadWrite, FileShare.None, options, TestContext.Current.CancellationToken)
+                : fileSystem.OpenPositionedFile(
+                    path, mode, FileAccess.ReadWrite, FileShare.None, options, TestContext.Current.CancellationToken);
+            stream.Length.ShouldBe(mode == FileMode.Create ? 0 : original.Length);
+            stream.Position.ShouldBe(0);
+            if (mode == FileMode.OpenOrCreate)
+                stream.Seek(0, SeekOrigin.End).ShouldBe(original.Length);
+            await WriteCharacterizationPayloadAsync(stream, payload, asynchronous);
+        });
+        diagnostics.Observe("retained-handle truncation semantics", () =>
+        {
+            primitives.Count("OpenOwnedDescriptor").ShouldBe(1);
+            primitives.Count("OpenFile").ShouldBe(0);
+            SafeFileHandle retained = primitives.Calls.Single(call => call.Operation == "ConfigureFileSharing").Handle!;
+            FileSystemPrimitiveCall[] truncations = primitives.Calls.Where(call => call.Operation == "SetLength").ToArray();
+            truncations.Length.ShouldBe(mode == FileMode.Create ? 1 : 0);
+            foreach (FileSystemPrimitiveCall truncation in truncations)
+            {
+                truncation.Length.ShouldBe(0);
+                truncation.Handle.ShouldBeSameAs(retained);
+            }
+            primitives.Calls.Where(call => call.Operation is "GetHandleLength" or "WriteAt" or "WriteAtAsync")
+                .ShouldAllBe(call => ReferenceEquals(call.Handle, retained));
+        });
+
+        diagnostics.CheckMode(path, expectedMode);
+        await CharacterizeReopensAsync(diagnostics, fileSystem, path, expected, asynchronous);
+        diagnostics.CheckMode(path, expectedMode);
+        diagnostics.AssertComplete();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OwnedCreation_CreateNewCollisionPreservesForeignFile(bool asynchronous)
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            Assert.Skip("Physical owned-creation permission checks require Linux or macOS.");
+
+        OwnedCreationDiagnostics diagnostics = new OwnedCreationDiagnostics($"CreateNew collision; async={asynchronous}");
+        ScriptedFileSystemPrimitives primitives = diagnostics.SystemFiles();
+        ResilientFileSystem fileSystem = primitives.CreateContext().FileSystem;
+        string path = Path.Combine(_root, "foreign");
+        byte[] original = "foreign file must survive"u8.ToArray();
+        File.WriteAllBytes(path, original);
+        UnixFileMode expectedMode = ReadUnixMode(path);
+        FileOptions options = asynchronous ? FileOptions.Asynchronous : FileOptions.None;
+
+        await diagnostics.ObserveAsync("CreateNew collision rejects without adoption or deletion", async () =>
+        {
+            IOException exception = await Should.ThrowAsync<IOException>(async () =>
+            {
+                await using PositionedFileStream stream = asynchronous
+                    ? await fileSystem.OpenPositionedFileAsync(
+                        path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, options,
+                        TestContext.Current.CancellationToken)
+                    : fileSystem.OpenPositionedFile(
+                        path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, options,
+                        TestContext.Current.CancellationToken);
+            });
+            diagnostics.WriteException("expected collision", exception);
+            exception.InnerException.ShouldBeOfType<Win32Exception>().NativeErrorCode.ShouldBe(17);
+            primitives.Count("OpenOwnedDescriptor").ShouldBe(1);
+            foreach (string operation in new[] { "ConfigureFileSharing", "AdviseFileAccess", "SetLength", "DeleteEntry", "CloseFile", "CloseDescriptor" })
+                primitives.Count(operation).ShouldBe(0);
+            primitives.Waits.ShouldBeEmpty();
+            primitives.AsyncWaits.ShouldBeEmpty();
+            File.Exists(path).ShouldBeTrue();
+        });
+
+        diagnostics.CheckMode(path, expectedMode);
+        await CharacterizeReopensAsync(diagnostics, fileSystem, path, original, asynchronous);
+        diagnostics.CheckMode(path, expectedMode);
+        diagnostics.AssertComplete();
+    }
 
     [Theory]
     [InlineData(false)]
@@ -575,6 +721,185 @@ public sealed class PositionedFileStreamTests : IDisposable
         }
         await stream.DisposeAsync();
         files.Count("CloseFile").ShouldBe(1);
+    }
+
+    private static async Task WriteCharacterizationPayloadAsync(Stream stream, byte[] payload, bool asynchronous)
+    {
+        if (asynchronous)
+        {
+            await stream.WriteAsync(payload.AsMemory(), TestContext.Current.CancellationToken);
+            await stream.FlushAsync(TestContext.Current.CancellationToken);
+        }
+        else
+        {
+            stream.Write(payload);
+            stream.Flush();
+        }
+    }
+
+    private static async Task CharacterizeReopensAsync(
+        OwnedCreationDiagnostics diagnostics, ResilientFileSystem fileSystem, string path, byte[] expected, bool asynchronous)
+    {
+        await diagnostics.ObserveAsync($"managed read after close '{path}'", async () =>
+        {
+            byte[] actual = asynchronous
+                ? await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken)
+                : File.ReadAllBytes(path);
+            actual.ShouldBe(expected);
+        });
+        await diagnostics.ObserveAsync($"managed read/write reopen '{path}'", async () =>
+        {
+            FileOptions options = asynchronous ? FileOptions.Asynchronous : FileOptions.None;
+            await using FileStream stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None, 4096, options);
+            using MemoryStream copy = new MemoryStream();
+            if (asynchronous)
+                await stream.CopyToAsync(copy, TestContext.Current.CancellationToken);
+            else
+                stream.CopyTo(copy);
+            copy.ToArray().ShouldBe(expected);
+            stream.Position = 0;
+            await WriteCharacterizationPayloadAsync(stream, expected, asynchronous);
+        });
+        await diagnostics.ObserveAsync($"protected read reopen '{path}'", async () =>
+        {
+            await using Stream stream = asynchronous
+                ? await fileSystem.OpenProtectedRegularReadAsync(path, TestContext.Current.CancellationToken)
+                : fileSystem.OpenProtectedRegularRead(path, TestContext.Current.CancellationToken);
+            using MemoryStream copy = new MemoryStream();
+            if (asynchronous)
+                await stream.CopyToAsync(copy, TestContext.Current.CancellationToken);
+            else
+                stream.CopyTo(copy);
+            copy.ToArray().ShouldBe(expected);
+        });
+    }
+
+    private static UnixFileMode ReadUnixMode(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Unix permission characterization requires Linux or macOS.");
+        return File.GetUnixFileMode(path);
+    }
+
+    private static string FormatUnixMode(UnixFileMode mode) =>
+        $"0{Convert.ToString((int)mode, 8).PadLeft(3, '0')} (0x{(int)mode:X})";
+
+    private sealed class OwnedCreationDiagnostics
+    {
+        private readonly StringBuilder _text = new StringBuilder();
+        private readonly List<string> _failures = [];
+
+        internal OwnedCreationDiagnostics(string scenario)
+        {
+            WriteLine($"Owned creation characterization: {scenario}");
+            WriteLine($"OS: {RuntimeInformation.OSDescription}; ProcessArchitecture: {RuntimeInformation.ProcessArchitecture}; " +
+                $"OSArchitecture: {RuntimeInformation.OSArchitecture}; Runtime: {RuntimeInformation.FrameworkDescription}; " +
+                $"Environment.Version: {Environment.Version}; AppContext TFM: {AppContext.TargetFrameworkName}; " +
+                $"Test assembly TFM: {typeof(PositionedFileStreamTests).Assembly.GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName}");
+        }
+
+        internal void WriteLine(string message) => _text.AppendLine(message);
+
+        internal void WriteException(string phase, Exception exception)
+        {
+            WriteLine($"{phase}: {exception}");
+            for (Exception? current = exception; current is not null; current = current.InnerException)
+            {
+                WriteLine($"Exception: {current.GetType().FullName}; HResult=0x{current.HResult:X8}; " +
+                    $"native error={(current is Win32Exception native ? native.NativeErrorCode.ToString() : "not supplied by this exception")}");
+            }
+            WriteLine(FileSystemFailureContext.TryGetOrigin(exception, out FileSystemFailureContext? evidence)
+                ? evidence.Format()
+                : "No primitive failure context (managed exception or semantic rejection).");
+        }
+
+        internal void Observe(string phase, Action action)
+        {
+            try
+            {
+                action();
+                WriteLine($"{phase}: PASS");
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                _failures.Add(phase);
+                WriteException($"{phase}: FAIL", exception);
+            }
+        }
+
+        internal async Task ObserveAsync(string phase, Func<Task> action)
+        {
+            try
+            {
+                await action();
+                WriteLine($"{phase}: PASS");
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                _failures.Add(phase);
+                WriteException($"{phase}: FAIL", exception);
+            }
+        }
+
+        internal void CheckMode(string path, UnixFileMode expected)
+        {
+            WriteLine($"Unix mode '{path}': expected={FormatUnixMode(expected)}");
+            Observe("Unix mode comparison", () =>
+            {
+                UnixFileMode actual = ReadUnixMode(path);
+                WriteLine($"Unix mode '{path}': expected={FormatUnixMode(expected)}; actual={FormatUnixMode(actual)}");
+                actual.ShouldBe(expected);
+            });
+        }
+
+        internal ScriptedFileSystemPrimitives SystemFiles()
+        {
+            ScriptedFileSystemPrimitives primitives = PositionedFileStreamTests.SystemFiles();
+            SystemFileSystemPrimitives system = SystemFileSystemPrimitives.Instance;
+            // Observe the live primitives without replacing their calls, results, or ownership.
+            primitives.Set<int>("OpenOwnedDescriptor", call => RecordPrimitive(
+                $"OpenOwnedDescriptor '{call.Path}' mode={call.Mode} access={call.Access} share={call.Share} options={call.Options}",
+                system.OpenOwnedDescriptor(call.Path!, call.Mode!.Value, call.Access!.Value, call.Share!.Value, call.Options!.Value)));
+            primitives.Set<int>("OpenDescriptor", call => RecordPrimitive(
+                $"OpenDescriptor '{call.Path}' flags=0x{call.Flags:X}",
+                system.OpenDescriptor(call.Path!, (int)call.Flags!.Value, 0)));
+            primitives.Set<int>("DuplicateDescriptor", call => RecordPrimitive(
+                $"DuplicateDescriptor '{call.Path}'",
+                system.DuplicateDescriptor(call.Descriptor!.Value, (int)call.Flags!.Value,
+                    NativeFileSystemPrimitives.MinimumTransferDescriptor, call.Path)));
+            primitives.Set<bool>("ConfigureFileSharing", call => RecordPrimitive(
+                $"ConfigureFileSharing '{call.Path}'",
+                system.ConfigureFileSharing(call.Handle!, call.Share!.Value, call.Path!)));
+            primitives.Set<bool>("AdviseFileAccess", call => RecordPrimitive(
+                $"AdviseFileAccess '{call.Path}' options={call.Options}",
+                system.AdviseFileAccess(call.Handle!, call.Options!.Value, call.Path!)));
+            primitives.Set<bool>("SetLength", call => RecordPrimitive(
+                $"SetLength '{call.Path}' length={call.Length}",
+                system.SetLength(call.Handle!, call.Length!.Value, call.Path!)));
+            return primitives;
+        }
+
+        private FileSystemReplayOutcome<T> RecordPrimitive<T>(string operation, FileSystemReplayOutcome<T> outcome)
+        {
+            WriteLine($"Primitive {operation}: {outcome.Kind}");
+            if (outcome.Kind == FileSystemReplayOutcomeKind.Completed)
+                WriteLine($"Primitive value: {outcome.Value}; no reported failure.");
+            if (outcome.PrimitiveFailure is FileSystemPrimitiveFailure failure)
+            {
+                WriteLine($"Primitive replay safety: {failure.ReplaySafety}");
+                WriteException(operation, failure.Exception);
+            }
+            if (outcome.SemanticException is not null)
+                WriteException(operation, outcome.SemanticException.SourceException);
+            return outcome;
+        }
+
+        internal void AssertComplete()
+        {
+            string diagnostics = _text.ToString();
+            TestContext.Current.TestOutputHelper?.WriteLine(diagnostics);
+            _failures.ShouldBeEmpty(diagnostics);
+        }
     }
 
     private static ScriptedFileSystemPrimitives SystemFiles()
