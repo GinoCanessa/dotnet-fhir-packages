@@ -7,6 +7,7 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Utilities;
 using Microsoft.Extensions.Logging;
@@ -27,7 +28,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
     private const int CopyBufferSize = 81_920;
     private const long MaxPublishManifestBytes = 1024 * 1024;
     private readonly PackageInstallLimits _installLimits;
-    private readonly Func<string> _createTempDirectory;
+    private readonly Func<string>? _createTempDirectory;
 
     /// <summary>
     /// Initialises a new <see cref="NpmRegistryClient"/>.
@@ -44,6 +45,27 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             endpoint,
             logger,
             PackageInstallLimits.FromEnvironment())
+    {
+    }
+
+    /// <summary>
+    /// Initialises a client with a construction-time filesystem retry policy.
+    /// </summary>
+    /// <param name="httpClient">The HTTP client to use for requests.</param>
+    /// <param name="endpoint">The NPM registry endpoint.</param>
+    /// <param name="logger">The logger instance.</param>
+    /// <param name="fileSystemRetry">The bounded filesystem retry options.</param>
+    public NpmRegistryClient(
+        HttpClient httpClient,
+        RegistryEndpoint endpoint,
+        ILogger<NpmRegistryClient> logger,
+        FileSystemRetryOptions fileSystemRetry)
+        : this(
+            RegistryHttpTransport.CreateUnverified(httpClient),
+            endpoint,
+            logger,
+            PackageInstallLimits.FromEnvironment(),
+            new FileSystemContext(fileSystemRetry))
     {
     }
 
@@ -65,13 +87,29 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
         ILogger<NpmRegistryClient> logger,
         PackageInstallLimits installLimits,
         Func<string>? createTempDirectory = null)
-        : base(transport, endpoint, logger)
+        : this(
+            transport,
+            endpoint,
+            logger,
+            installLimits,
+            FileSystemContext.CreateDefault(),
+            createTempDirectory)
+    {
+    }
+
+    internal NpmRegistryClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<NpmRegistryClient> logger,
+        PackageInstallLimits installLimits,
+        FileSystemContext context,
+        Func<string>? createTempDirectory = null)
+        : base(transport, endpoint, logger, context)
     {
         ArgumentNullException.ThrowIfNull(installLimits);
 
         _installLimits = PackageInstallLimits.ResolveManager(installLimits);
-        _createTempDirectory = createTempDirectory
-            ?? (() => TempDirectory.Create("fhirpkg-npm-publish"));
+        _createTempDirectory = createTempDirectory;
     }
 
     // ── IRegistryClient properties ──────────────────────────────────────
@@ -287,13 +325,19 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             reference.Name, reference.Version, url);
 
         string? workspacePath = null;
+        Stream? source = null;
+        PublishResult result;
+        FileSystemFailureContext? cleanupFailure = null;
         try
         {
-            workspacePath = _createTempDirectory();
+            cancellationToken.ThrowIfCancellationRequested();
+            source = FileSystemContext.ProtectRead(tarballStream);
+            workspacePath = await CreateWorkspacePathAsync(cancellationToken)
+                .ConfigureAwait(false);
             NpmPublishPreparation preparation =
                 await PreparePublishAsync(
                         reference,
-                        tarballStream,
+                        source,
                         workspacePath,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -310,7 +354,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
                 "Published {PackageId}@{Version} to NPM successfully ({StatusCode})",
                 reference.Name, reference.Version, (int)response.StatusCode);
 
-            return new PublishResult
+            result = new PublishResult
             {
                 Success = true,
                 StatusCode = response.StatusCode,
@@ -322,17 +366,45 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             Logger.LogError(
                 ex, "Failed to publish {PackageId}@{Version} to NPM", reference.Name, reference.Version);
 
-            return new PublishResult
+            result = FileSystemFailureContext.AttachToResult(new PublishResult
             {
                 Success = false,
                 StatusCode = ex.StatusCode ?? HttpStatusCode.InternalServerError,
-                Message = ex.Message,
-            };
+                Message = FileSystemFailureContext.FormatMessage(ex),
+            }, ex);
         }
         finally
         {
-            DeleteWorkspace(workspacePath);
+            if (source is not null && !ReferenceEquals(source, tarballStream))
+                await source.DisposeAsync().ConfigureAwait(false);
+            cleanupFailure = await DeleteWorkspaceAsync(workspacePath).ConfigureAwait(false);
         }
+
+        if (!result.Success
+            && cleanupFailure is not null
+            && !FileSystemFailureContext.TryGetResult(result, out _))
+        {
+            result = FileSystemFailureContext.AttachToResult(result with
+            {
+                Message = $"{result.Message} ({cleanupFailure.Format()})",
+            }, cleanupFailure);
+        }
+
+        return result;
+    }
+
+    private async Task<string> CreateWorkspacePathAsync(CancellationToken cancellationToken)
+    {
+        // The injected factory is a one-shot callback, not a filesystem replay unit.
+        if (_createTempDirectory is not null)
+            return _createTempDirectory();
+
+        string tempRoot = await FileSystemContext.FileSystem.GetTempPathAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (string.IsNullOrEmpty(tempRoot))
+            throw new IOException("The system temporary directory path is empty, so no temporary directory could be created.");
+
+        return Path.Combine(tempRoot, $"fhirpkg-npm-publish-{Guid.NewGuid():N}");
     }
 
     private async Task<NpmPublishPreparation> PreparePublishAsync(
@@ -341,7 +413,9 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
         string workspacePath,
         CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(workspacePath);
+        ResilientFileSystem fileSystem = FileSystemContext.FileSystem;
+        await fileSystem.CreateDirectoryAsync(workspacePath, cancellationToken)
+            .ConfigureAwait(false);
         string archivePath = Path.Combine(workspacePath, "package.tgz");
         string extractionPath = Path.Combine(workspacePath, "extracted");
         long archiveLength = 0;
@@ -350,13 +424,15 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
         using IncrementalHash sha512 =
             IncrementalHash.CreateHash(HashAlgorithmName.SHA512);
-        await using (FileStream spool = new FileStream(
-            archivePath,
-            FileMode.CreateNew,
-            FileAccess.Write,
-            FileShare.None,
-            CopyBufferSize,
-            FileOptions.Asynchronous | FileOptions.SequentialScan))
+        await using (PositionedFileStream spool =
+            await fileSystem.OpenPositionedFileAsync(
+                    archivePath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan,
+                    cancellationToken)
+                .ConfigureAwait(false))
         {
             byte[] buffer = new byte[CopyBufferSize];
             while (true)
@@ -377,25 +453,28 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
                         reference.FhirDirective);
                 }
 
-                sha1.AppendData(buffer, 0, read);
-                sha512.AppendData(buffer, 0, read);
+                // Commit counters and hashes only after this retained block succeeds.
                 await spool.WriteAsync(
                         buffer.AsMemory(0, read),
                         cancellationToken)
                     .ConfigureAwait(false);
                 archiveLength += read;
+                sha1.AppendData(buffer, 0, read);
+                sha512.AppendData(buffer, 0, read);
             }
 
             await spool.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        await using (FileStream archive = new FileStream(
-            archivePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            CopyBufferSize,
-            FileOptions.Asynchronous | FileOptions.SequentialScan))
+        await using (PositionedFileStream archive =
+            await fileSystem.OpenPositionedFileAsync(
+                    archivePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan,
+                    cancellationToken)
+                .ConfigureAwait(false))
         {
             ArchiveExtractionMetrics metrics =
                 await TarballExtractor.ExtractAsync(
@@ -403,6 +482,7 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
                         extractionPath,
                         _installLimits,
                         reference.FhirDirective,
+                        FileSystemContext,
                         cancellationToken)
                     .ConfigureAwait(false);
             PackageArchiveInventory inventory = metrics.Inventory
@@ -410,10 +490,13 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
                     reference,
                     "Package archive inventory was not produced.");
             PackageArchiveLayoutResult layout =
-                TarballExtractor.ValidateAndNormalizePackageStructure(
-                    extractionPath,
-                    inventory,
-                    reference.FhirDirective);
+                await TarballExtractor.ValidateAndNormalizePackageStructureAsync(
+                        extractionPath,
+                        inventory,
+                        reference.FhirDirective,
+                        FileSystemContext,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             if (layout.Layout != PackageArchiveLayout.Standard)
             {
                 throw InvalidArchive(
@@ -424,8 +507,10 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             long manifestLimit = Math.Min(
                 MaxPublishManifestBytes,
                 _installLimits.MaxEntryBytes);
-            long manifestLength =
-                new FileInfo(layout.ManifestPath).Length;
+            long manifestLength = await fileSystem.GetLengthAsync(
+                    layout.ManifestPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
             if (manifestLength > manifestLimit)
             {
                 throw InvalidArchive(
@@ -441,16 +526,19 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
                     layout.ManifestPath,
                     expectation,
                     reference.FhirDirective,
+                    FileSystemContext,
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            await using FileStream manifestStream = new FileStream(
-                layout.ManifestPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                16_384,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await using PositionedFileStream manifestStream =
+                await fileSystem.OpenPositionedFileAsync(
+                        layout.ManifestPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.Read,
+                        FileOptions.Asynchronous | FileOptions.SequentialScan,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             JsonObject manifest =
                 await JsonNode.ParseAsync(
                         manifestStream,
@@ -525,7 +613,8 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
             preparation.ArchivePath,
             preparation.ArchiveLength,
             packument,
-            marker);
+            marker,
+            FileSystemContext);
     }
 
     private string CreateTarballUrl(
@@ -829,14 +918,20 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
         return true;
     }
 
-    private void DeleteWorkspace(string? workspacePath)
+    private async Task<FileSystemFailureContext?> DeleteWorkspaceAsync(string? workspacePath)
     {
-        if (workspacePath is null || !Directory.Exists(workspacePath))
-            return;
+        if (workspacePath is null)
+            return null;
 
         try
         {
-            Directory.Delete(workspacePath, recursive: true);
+            await FileSystemContext.FileSystem.DeleteAsync(
+                    workspacePath,
+                    FileSystemEntryKind.Directory,
+                    recursive: true,
+                    missingAllowed: true,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -844,7 +939,11 @@ public sealed class NpmRegistryClient : RegistryClientBase, IRegistryClient
                 exception,
                 "Failed to delete NPM publish workspace {WorkspacePath}",
                 workspacePath);
+            if (FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? failure))
+                return failure;
         }
+
+        return null;
     }
 
     private static PackageInstallException InvalidArchive(

@@ -18,9 +18,20 @@ on:
         required: true
         default: true
         type: boolean
+      recover_run_id:
+        description: Original release run to finish (recovery only)
+        required: false
+        default: ''
+        type: string
+      approval_commit:
+        description: Full SHA of the main commit holding docs/releases/approvals/v<version>.json (recovery only)
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: nuget-release-${{ github.event.release.tag_name || inputs.tag }}
@@ -37,6 +48,19 @@ jobs:
       version: ${{ steps.inputs.outputs.version }}
       tag: ${{ steps.inputs.outputs.tag }}
       validation_only: ${{ steps.inputs.outputs.validation_only }}
+      mode: ${{ steps.inputs.outputs.mode }}
+      recover_run_id: ${{ steps.inputs.outputs.recover_run_id }}
+      approval_commit: ${{ steps.inputs.outputs.approval_commit }}
+      bundle_artifact_id: ${{ steps.bundle.outputs.bundle_artifact_id }}
+      bundle_artifact_digest: ${{ steps.bundle.outputs.bundle_artifact_digest }}
+      bundle_run_id: ${{ steps.bundle.outputs.bundle_run_id }}
+      corpus_blob: ${{ steps.bundle.outputs.corpus_blob }}
+      release_published: ${{ steps.recovery.outputs.release_published }}
+      candidate_artifact_id: ${{ steps.recovery.outputs.candidate_artifact_id }}
+      candidate_artifact_digest: ${{ steps.recovery.outputs.candidate_artifact_digest }}
+      original_bundle_artifact_id: ${{ steps.recovery.outputs.original_bundle_artifact_id }}
+      original_bundle_artifact_digest: ${{ steps.recovery.outputs.original_bundle_artifact_digest }}
+      approval_author: ${{ steps.recovery.outputs.approval_author }}
 
     steps:
       - uses: actions/checkout@v6
@@ -52,6 +76,8 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_VALIDATION_ONLY: ${{ inputs.validation_only }}
+          INPUT_RECOVER_RUN_ID: ${{ inputs.recover_run_id }}
+          INPUT_APPROVAL_COMMIT: ${{ inputs.approval_commit }}
           RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
         run: |
           if ($env:EVENT_NAME -ceq 'release')
@@ -64,26 +90,77 @@ jobs:
 
             $version = $tag.Substring(1)
             $validationOnly = 'false'
+            $mode = 'release'
+            $recoverRunId = ''
+            $approvalCommit = ''
           }
           elseif ($env:EVENT_NAME -ceq 'workflow_dispatch')
           {
-            if ($env:INPUT_VALIDATION_ONLY -cne 'true')
-            {
-              throw 'Manual workflow dispatch is validation-only.'
-            }
-
             $version = $env:INPUT_VERSION
             $tag = $env:INPUT_TAG
-            $validationOnly = 'true'
+            $recoverRunId = $env:INPUT_RECOVER_RUN_ID
+            $approvalCommit = $env:INPUT_APPROVAL_COMMIT
+            if ([string]::IsNullOrEmpty($recoverRunId))
+            {
+              if (![string]::IsNullOrEmpty($approvalCommit))
+              {
+                throw 'approval_commit requires recover_run_id.'
+              }
+
+              if ($env:INPUT_VALIDATION_ONLY -cne 'true')
+              {
+                throw 'Manual workflow dispatch is validation-only unless recover_run_id names the release run being finished.'
+              }
+
+              $validationOnly = 'true'
+              $mode = 'validation'
+            }
+            else
+            {
+              if ($recoverRunId -cnotmatch '^[1-9][0-9]*\z')
+              {
+                throw "recover_run_id '$recoverRunId' must be a workflow run id: a positive integer with no leading zero."
+              }
+
+              if (![string]::IsNullOrEmpty($approvalCommit) -and
+                  $approvalCommit -cnotmatch '^[0-9a-f]{40}\z')
+              {
+                throw "approval_commit '$approvalCommit' must be the full 40-character lowercase commit SHA."
+              }
+
+              if ($env:INPUT_VALIDATION_ONLY -ceq 'false')
+              {
+                $validationOnly = 'false'
+              }
+              else
+              {
+                $validationOnly = 'true'
+              }
+
+              $mode = 'recovery'
+            }
           }
           else
           {
             throw "Unsupported release event '$env:EVENT_NAME'."
           }
 
+          if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z')
+          {
+            throw 'version must be three numeric components with no leading zeros (for example, 2026.717.1608).'
+          }
+
+          if (-not [string]::Equals($tag, "v$version", [StringComparison]::Ordinal))
+          {
+            throw "tag must be exactly 'v$version'."
+          }
+
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "validation_only=$validationOnly"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "mode=$mode"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "recover_run_id=$recoverRunId"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "approval_commit=$approvalCommit"
 
       - uses: actions/setup-dotnet@v5
         with:
@@ -101,6 +178,9 @@ jobs:
 
       - name: Validate release inputs, tag, and main ancestry
         id: release
+        env:
+          RELEASE_VERSION: ${{ steps.inputs.outputs.version }}
+          RELEASE_TAG: ${{ steps.inputs.outputs.tag }}
         run: >-
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -110,13 +190,58 @@ jobs:
           --no-restore
           --
           validate-inputs
-          --version "${{ steps.inputs.outputs.version }}"
-          --tag "${{ steps.inputs.outputs.tag }}"
+          --version "$RELEASE_VERSION"
+          --tag "$RELEASE_TAG"
           --github-ref "${{ github.ref }}"
+          ${{ steps.inputs.outputs.mode == 'recovery' && '--allow-published-version' || '' }}
+
+      - name: Locate frozen fixture bundle
+        id: bundle
+        if: ${{ steps.inputs.outputs.mode != 'recovery' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.inputs.outputs.tag }}
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          locate-fixture-bundle
+          --repository "${{ github.repository }}"
+          --commit "${{ steps.release.outputs.commit }}"
+          --tag "$RELEASE_TAG"
+
+      - name: Authorize recovery
+        id: recovery
+        if: ${{ steps.inputs.outputs.mode == 'recovery' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.inputs.outputs.version }}
+          RELEASE_TAG: ${{ steps.inputs.outputs.tag }}
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          verify-recovery
+          --repository "${{ github.repository }}"
+          --version "$RELEASE_VERSION"
+          --tag "$RELEASE_TAG"
+          --commit "${{ steps.release.outputs.commit }}"
+          --recover-run-id "${{ steps.inputs.outputs.recover_run_id }}"
+          --approval-commit "${{ steps.inputs.outputs.approval_commit }}"
+          ${{ steps.inputs.outputs.validation_only == 'true' && '--dry-run' || '' }}
 
   source-ci:
     name: exact-source-ci
     needs: validate
+    if: ${{ needs.validate.outputs.mode != 'recovery' }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-and-test.yaml
@@ -126,12 +251,15 @@ jobs:
   pack:
     name: pack-release-candidate
     needs: [validate, source-ci]
+    if: ${{ needs.validate.outputs.mode != 'recovery' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
       sdk_package_sha256: ${{ steps.candidate.outputs.sdk_sha256 }}
       cli_package_sha256: ${{ steps.candidate.outputs.cli_sha256 }}
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      bundle_sha256: ${{ steps.bundle.outputs.bundle_sha256 }}
+      candidate_run_id: ${{ github.run_id }}
 
     steps:
       - uses: actions/checkout@v6
@@ -169,6 +297,38 @@ jobs:
           --configuration Release
           --framework net10.0
           --no-restore
+
+      - name: Download frozen fixture bundle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          fetch-artifact
+          --repository "${{ github.repository }}"
+          --artifact-id "${{ needs.validate.outputs.bundle_artifact_id }}"
+          --expected-digest "${{ needs.validate.outputs.bundle_artifact_digest }}"
+          --destination "${{ runner.temp }}/fixture-bundle"
+
+      - name: Record qualification input identity
+        id: bundle
+        shell: pwsh
+        run: |
+          $manifestPath = Join-Path `
+            '${{ runner.temp }}' `
+            'fixture-bundle/bundle-manifest.json'
+          $bundleSha256 =
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).
+              Hash.
+              ToLowerInvariant()
+          Add-Content `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "bundle_sha256=$bundleSha256"
 
       - name: Build release graph once
         shell: pwsh
@@ -310,6 +470,9 @@ jobs:
 
       - name: Verify release candidate
         id: candidate
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: >-
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -320,8 +483,8 @@ jobs:
           --
           validate-candidate
           --candidate-directory "${{ runner.temp }}/release-candidate"
-          --version "${{ needs.validate.outputs.version }}"
-          --tag "${{ needs.validate.outputs.tag }}"
+          --version "$RELEASE_VERSION"
+          --tag "$RELEASE_TAG"
           --repository-commit "${{ needs.validate.outputs.commit }}"
 
       - name: Upload immutable release candidate
@@ -334,9 +497,399 @@ jobs:
           compression-level: 0
           retention-days: 90
 
+      - name: Upload qualification inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: fhir-pkg-${{ needs.validate.outputs.version }}-fixture-bundle
+          path: ${{ runner.temp }}/fixture-bundle/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+  retrieve:
+    name: retrieve-release-candidate
+    needs: validate
+    if: ${{ needs.validate.outputs.mode == 'recovery' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      sdk_package_sha256: ${{ steps.candidate.outputs.sdk_sha256 }}
+      cli_package_sha256: ${{ steps.candidate.outputs.cli_sha256 }}
+      artifact_digest: ${{ needs.validate.outputs.candidate_artifact_digest }}
+      bundle_sha256: ${{ steps.inputs_identity.outputs.bundle_sha256 }}
+      base_bundle_sha256: ${{ steps.base_identity.outputs.base_bundle_sha256 }}
+      candidate_run_id: ${{ needs.validate.outputs.recover_run_id }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Verify exact source commit
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          $actualCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $env:EXPECTED_COMMIT)
+          {
+            throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
+          }
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Restore release validation tool
+        run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
+
+      - name: Build release validation tool
+        run: >-
+          dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-restore
+
+      - name: Retrieve original release candidate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          fetch-artifact
+          --repository "${{ github.repository }}"
+          --artifact-id "${{ needs.validate.outputs.candidate_artifact_id }}"
+          --expected-digest "${{ needs.validate.outputs.candidate_artifact_digest }}"
+          --destination "${{ runner.temp }}/release-candidate"
+
+      - name: Verify original release candidate
+        id: candidate
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          validate-candidate
+          --candidate-directory "${{ runner.temp }}/release-candidate"
+          --version "$RELEASE_VERSION"
+          --tag "$RELEASE_TAG"
+          --repository-commit "${{ needs.validate.outputs.commit }}"
+
+      - name: Retrieve original qualification inputs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          fetch-artifact
+          --repository "${{ github.repository }}"
+          --artifact-id "${{ needs.validate.outputs.original_bundle_artifact_id }}"
+          --expected-digest "${{ needs.validate.outputs.original_bundle_artifact_digest }}"
+          --destination "${{ runner.temp }}/original-fixture-bundle"
+
+      - name: Record original qualification input identity
+        id: base_identity
+        shell: pwsh
+        run: |
+          $manifestPath = Join-Path `
+            '${{ runner.temp }}' `
+            'original-fixture-bundle/bundle-manifest.json'
+          $baseBundleSha256 =
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).
+              Hash.
+              ToLowerInvariant()
+          Add-Content `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "base_bundle_sha256=$baseBundleSha256"
+
+      - name: Extract fixture approval
+        if: ${{ needs.validate.outputs.approval_commit != '' }}
+        shell: bash
+        env:
+          APPROVAL_COMMIT: ${{ needs.validate.outputs.approval_commit }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          git show "${APPROVAL_COMMIT}:docs/releases/approvals/${RELEASE_TAG}.json" > "${RUNNER_TEMP}/fixture-approval.json"
+
+      - name: Restore qualification harness
+        if: ${{ needs.validate.outputs.approval_commit != '' }}
+        run: dotnet restore test/FhirPkg.Qualification/FhirPkg.Qualification.csproj
+
+      - name: Derive approved qualification inputs
+        if: ${{ needs.validate.outputs.approval_commit != '' }}
+        shell: pwsh
+        env:
+          BASE_BUNDLE_SHA256: ${{ steps.base_identity.outputs.base_bundle_sha256 }}
+          APPROVAL_COMMIT: ${{ needs.validate.outputs.approval_commit }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          $bundle = Join-Path '${{ runner.temp }}' 'fixture-bundle'
+          $baseBundle = Join-Path '${{ runner.temp }}' 'original-fixture-bundle'
+          $approval = Join-Path '${{ runner.temp }}' 'fixture-approval.json'
+          $cache = Join-Path '${{ runner.temp }}' 'derive-cache'
+          $report = Join-Path '${{ runner.temp }}' 'derive-report.json'
+          dotnet run `
+            --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
+            --configuration Release `
+            --framework net10.0 `
+            --no-restore `
+            -- `
+            --derive-bundle $bundle `
+            --bundle $baseBundle `
+            --bundle-sha256 $env:BASE_BUNDLE_SHA256 `
+            --approval $approval `
+            --approval-commit $env:APPROVAL_COMMIT `
+            --release-tag $env:RELEASE_TAG `
+            --cache $cache `
+            --output $report `
+            --corpus test/FhirPkg.Qualification/qualification-corpus.json `
+            --summary $env:GITHUB_STEP_SUMMARY `
+            --summary-title retrieve-release-candidate
+
+      - name: Reuse original qualification inputs
+        if: ${{ needs.validate.outputs.approval_commit == '' }}
+        shell: pwsh
+        run: |
+          Copy-Item `
+            -LiteralPath (Join-Path '${{ runner.temp }}' 'original-fixture-bundle') `
+            -Destination (Join-Path '${{ runner.temp }}' 'fixture-bundle') `
+            -Recurse
+
+      - name: Record qualification input identity
+        id: inputs_identity
+        shell: pwsh
+        run: |
+          $manifestPath = Join-Path `
+            '${{ runner.temp }}' `
+            'fixture-bundle/bundle-manifest.json'
+          $bundleSha256 =
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).
+              Hash.
+              ToLowerInvariant()
+          Add-Content `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "bundle_sha256=$bundleSha256"
+
+      - name: Upload qualification inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: fhir-pkg-${{ needs.validate.outputs.version }}-fixture-bundle
+          path: ${{ runner.temp }}/fixture-bundle/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload derivation report
+        if: ${{ always() && needs.validate.outputs.approval_commit != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-derivation-report-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/derive-report.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  release-identity:
+    name: release-identity
+    needs: [validate, pack, retrieve]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.validate.result == 'success' &&
+        (needs.pack.result == 'success' || needs.retrieve.result == 'success')
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      candidate_run_id: ${{ steps.identity.outputs.candidate_run_id }}
+      sdk_package_sha256: ${{ steps.identity.outputs.sdk_package_sha256 }}
+      cli_package_sha256: ${{ steps.identity.outputs.cli_package_sha256 }}
+      artifact_digest: ${{ steps.identity.outputs.artifact_digest }}
+      bundle_sha256: ${{ steps.identity.outputs.bundle_sha256 }}
+
+    steps:
+      - name: Resolve and record release identity
+        id: identity
+        shell: pwsh
+        env:
+          MODE: ${{ needs.validate.outputs.mode }}
+          PACK_RESULT: ${{ needs.pack.result }}
+          RETRIEVE_RESULT: ${{ needs.retrieve.result }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          BUNDLE_RUN_ID: ${{ needs.validate.outputs.bundle_run_id }}
+          CORPUS_BLOB: ${{ needs.validate.outputs.corpus_blob }}
+          APPROVAL_COMMIT: ${{ needs.validate.outputs.approval_commit }}
+          APPROVAL_AUTHOR: ${{ needs.validate.outputs.approval_author }}
+          PACK_CANDIDATE_RUN_ID: ${{ needs.pack.outputs.candidate_run_id }}
+          PACK_SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
+          PACK_CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
+          PACK_ARTIFACT_DIGEST: ${{ needs.pack.outputs.artifact_digest }}
+          PACK_BUNDLE_SHA256: ${{ needs.pack.outputs.bundle_sha256 }}
+          RETRIEVE_CANDIDATE_RUN_ID: ${{ needs.retrieve.outputs.candidate_run_id }}
+          RETRIEVE_SDK_PACKAGE_SHA256: ${{ needs.retrieve.outputs.sdk_package_sha256 }}
+          RETRIEVE_CLI_PACKAGE_SHA256: ${{ needs.retrieve.outputs.cli_package_sha256 }}
+          RETRIEVE_ARTIFACT_DIGEST: ${{ needs.retrieve.outputs.artifact_digest }}
+          RETRIEVE_BUNDLE_SHA256: ${{ needs.retrieve.outputs.bundle_sha256 }}
+          RETRIEVE_BASE_BUNDLE_SHA256: ${{ needs.retrieve.outputs.base_bundle_sha256 }}
+          RUNS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs
+          RUN_ID: ${{ github.run_id }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          if ($env:MODE -ceq 'recovery')
+          {
+            if ($env:RETRIEVE_RESULT -cne 'success' -or
+                $env:PACK_RESULT -cne 'skipped')
+            {
+              throw "A recovery run requires retrieve-release-candidate to succeed and pack-release-candidate to be skipped, not '$env:RETRIEVE_RESULT' and '$env:PACK_RESULT'."
+            }
+
+            $candidateRunId = $env:RETRIEVE_CANDIDATE_RUN_ID
+            $sdkPackageSha256 = $env:RETRIEVE_SDK_PACKAGE_SHA256
+            $cliPackageSha256 = $env:RETRIEVE_CLI_PACKAGE_SHA256
+            $artifactDigest = $env:RETRIEVE_ARTIFACT_DIGEST
+            $bundleSha256 = $env:RETRIEVE_BUNDLE_SHA256
+            $baseBundleSha256 = $env:RETRIEVE_BASE_BUNDLE_SHA256
+          }
+          else
+          {
+            if ($env:PACK_RESULT -cne 'success' -or
+                $env:RETRIEVE_RESULT -cne 'skipped')
+            {
+              throw "A $env:MODE run requires pack-release-candidate to succeed and retrieve-release-candidate to be skipped, not '$env:PACK_RESULT' and '$env:RETRIEVE_RESULT'."
+            }
+
+            $candidateRunId = $env:PACK_CANDIDATE_RUN_ID
+            $sdkPackageSha256 = $env:PACK_SDK_PACKAGE_SHA256
+            $cliPackageSha256 = $env:PACK_CLI_PACKAGE_SHA256
+            $artifactDigest = "sha256:$env:PACK_ARTIFACT_DIGEST"
+            $bundleSha256 = $env:PACK_BUNDLE_SHA256
+            $baseBundleSha256 = $null
+          }
+
+          $sha256Values = [ordered]@{
+            sdk_package_sha256 = $sdkPackageSha256
+            cli_package_sha256 = $cliPackageSha256
+            bundle_sha256 = $bundleSha256
+          }
+          if ($env:MODE -ceq 'recovery')
+          {
+            $sha256Values['base_bundle_sha256'] = $baseBundleSha256
+          }
+
+          foreach ($name in $sha256Values.Keys)
+          {
+            if ("$($sha256Values[$name])" -cnotmatch '^[0-9a-f]{64}$')
+            {
+              throw "$name '$($sha256Values[$name])' must be 64 lowercase hexadecimal characters."
+            }
+          }
+
+          if ("$artifactDigest" -cnotmatch '^sha256:[0-9a-f]{64}$')
+          {
+            throw "artifact_digest '$artifactDigest' must be 'sha256:' followed by 64 lowercase hexadecimal characters."
+          }
+
+          if ("$candidateRunId" -cnotmatch '^[1-9][0-9]*$')
+          {
+            throw "candidate_run_id '$candidateRunId' must be a workflow run id."
+          }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "candidate_run_id=$candidateRunId"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "sdk_package_sha256=$sdkPackageSha256"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "cli_package_sha256=$cliPackageSha256"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "artifact_digest=$artifactDigest"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "bundle_sha256=$bundleSha256"
+
+          $candidateRunUrl = "$env:RUNS_URL/$candidateRunId"
+          if ($env:MODE -ceq 'recovery')
+          {
+            $sourceCi = "original run [$candidateRunId]($candidateRunUrl) (linked, not re-run)"
+          }
+          else
+          {
+            $sourceCi = 'this run'
+          }
+
+          $summary = @(
+            '### Release identity',
+            '',
+            '#### Product candidate',
+            '',
+            "- Version: $env:RELEASE_VERSION",
+            "- Tag: $env:RELEASE_TAG",
+            "- Commit: $env:RELEASE_COMMIT",
+            "- Candidate run: [$candidateRunId]($candidateRunUrl)",
+            "- Workflow artifact digest: $artifactDigest",
+            "- fhir-pkg-lib SHA-256: $sdkPackageSha256",
+            "- fhir-pkg-cli SHA-256: $cliPackageSha256",
+            "- Source CI: $sourceCi",
+            '',
+            '#### Qualification inputs',
+            '',
+            "- Bundle SHA-256: $bundleSha256"
+          )
+          if ($env:MODE -ceq 'recovery')
+          {
+            $summary += "- Base bundle SHA-256: $baseBundleSha256"
+          }
+          else
+          {
+            $summary += "- Producing drift run: [$env:BUNDLE_RUN_ID]($env:RUNS_URL/$env:BUNDLE_RUN_ID)"
+            $summary += "- Corpus blob: $env:CORPUS_BLOB"
+          }
+
+          if ([string]::IsNullOrEmpty($env:APPROVAL_COMMIT))
+          {
+            $summary += '- Approval: none'
+          }
+          else
+          {
+            $summary += "- Approval commit: $env:APPROVAL_COMMIT"
+            $summary += "- Approval author: ``$env:APPROVAL_AUTHOR``"
+          }
+
+          if ($env:MODE -ceq 'recovery')
+          {
+            $summary += @(
+              '',
+              '#### Recovery',
+              '',
+              "- This run: [$env:RUN_ID]($env:RUNS_URL/$env:RUN_ID)",
+              "- Workflow SHA: $env:WORKFLOW_SHA"
+            )
+          }
+
+          try
+          {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+          }
+          catch
+          {
+            Write-Warning "The release identity summary was not written: $($_.Exception.Message)"
+          }
+
   package-qualification:
     name: qualify-${{ matrix.os }}-${{ matrix.framework }}
-    needs: [validate, pack]
+    needs: [validate, release-identity]
+    if: ${{ !cancelled() && needs.release-identity.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -359,6 +912,35 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $actualCommit -cne $env:EXPECTED_COMMIT)
           {
             throw "Checked out '$actualCommit', expected '$env:EXPECTED_COMMIT'."
+          }
+
+      - name: Write candidate identity summary
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          SDK_PACKAGE_SHA256: ${{ needs.release-identity.outputs.sdk_package_sha256 }}
+          CLI_PACKAGE_SHA256: ${{ needs.release-identity.outputs.cli_package_sha256 }}
+          ARTIFACT_DIGEST: ${{ needs.release-identity.outputs.artifact_digest }}
+          CANDIDATE_RUN_ID: ${{ needs.release-identity.outputs.candidate_run_id }}
+        run: |
+          $summary = @(
+            '### Candidate',
+            '',
+            "- Artifact: fhir-pkg-$env:RELEASE_VERSION-candidate",
+            "- Workflow artifact digest: $env:ARTIFACT_DIGEST",
+            "- fhir-pkg-lib SHA-256: $env:SDK_PACKAGE_SHA256",
+            "- fhir-pkg-cli SHA-256: $env:CLI_PACKAGE_SHA256",
+            "- Release commit: $env:RELEASE_COMMIT",
+            "- Candidate run id: $env:CANDIDATE_RUN_ID"
+          )
+          try
+          {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+          }
+          catch
+          {
+            Write-Warning "The candidate identity summary was not written: $($_.Exception.Message)"
           }
 
       - uses: actions/setup-dotnet@v5
@@ -393,9 +975,15 @@ jobs:
         with:
           name: fhir-pkg-${{ needs.validate.outputs.version }}-candidate
           path: ${{ runner.temp }}/release-candidate
+          run-id: ${{ needs.release-identity.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Verify downloaded release candidate
         id: candidate
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: >-
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -406,11 +994,11 @@ jobs:
           --
           validate-candidate
           --candidate-directory "${{ runner.temp }}/release-candidate"
-          --version "${{ needs.validate.outputs.version }}"
-          --tag "${{ needs.validate.outputs.tag }}"
+          --version "$env:RELEASE_VERSION"
+          --tag "$env:RELEASE_TAG"
           --repository-commit "${{ needs.validate.outputs.commit }}"
-          --expected-sdk-package-sha256 "${{ needs.pack.outputs.sdk_package_sha256 }}"
-          --expected-cli-package-sha256 "${{ needs.pack.outputs.cli_package_sha256 }}"
+          --expected-sdk-package-sha256 "${{ needs.release-identity.outputs.sdk_package_sha256 }}"
+          --expected-cli-package-sha256 "${{ needs.release-identity.outputs.cli_package_sha256 }}"
 
       - name: Create isolated qualification package source
         id: nuget
@@ -466,7 +1054,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARGET_FRAMEWORK: ${{ matrix.framework }}
-          SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
+          SDK_PACKAGE_SHA256: ${{ needs.release-identity.outputs.sdk_package_sha256 }}
         run: |
           $candidatePackage = Join-Path `
             '${{ runner.temp }}/release-candidate' `
@@ -516,7 +1104,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
           TARGET_FRAMEWORK: ${{ matrix.framework }}
-          CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
+          CLI_PACKAGE_SHA256: ${{ needs.release-identity.outputs.cli_package_sha256 }}
         run: |
           ./.github/scripts/Test-ToolQualification.ps1 `
             -ToolPath '${{ steps.tool.outputs.tool_path }}' `
@@ -526,11 +1114,24 @@ jobs:
             -RepositoryCommit $env:RELEASE_COMMIT `
             -ExpectedPackageSha256 $env:CLI_PACKAGE_SHA256
 
+      - name: Download frozen qualification inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: fhir-pkg-${{ needs.validate.outputs.version }}-fixture-bundle
+          path: ${{ runner.temp }}/fixture-bundle
+
       - name: Qualify exact local package
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARGET_FRAMEWORK: ${{ matrix.framework }}
+          QUALIFY_TITLE: qualify-${{ matrix.os }}-${{ matrix.framework }}
+          BUNDLE_SHA256: ${{ needs.release-identity.outputs.bundle_sha256 }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          HTTP_PROXY: http://127.0.0.1:1
+          HTTPS_PROXY: http://127.0.0.1:1
+          ALL_PROXY: http://127.0.0.1:1
+          NO_PROXY: ''
         run: |
           $cache = Join-Path '${{ runner.temp }}' 'qualification-cache'
           $report = Join-Path '${{ runner.temp }}' 'qualification-report.json'
@@ -545,16 +1146,49 @@ jobs:
             -- `
             --cache $cache `
             --output $report `
-            --corpus test/FhirPkg.Qualification/qualification-corpus.json
+            --corpus test/FhirPkg.Qualification/qualification-corpus.json `
+            --summary $env:GITHUB_STEP_SUMMARY `
+            --summary-title $env:QUALIFY_TITLE `
+            --bundle (Join-Path '${{ runner.temp }}' 'fixture-bundle') `
+            --bundle-sha256 $env:BUNDLE_SHA256 `
+            --release-tag $env:RELEASE_TAG
+
+      - name: Report missing qualification report
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $report = Join-Path '${{ runner.temp }}' 'qualification-report.json'
+          if (!(Test-Path -LiteralPath $report -PathType Leaf))
+          {
+            $message =
+              'The qualification harness produced no report; the failing step above (restore, tool install, or smoke test) has the cause.'
+            Write-Output "::error title=No qualification report::$message"
+            try
+            {
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $message
+            }
+            catch
+            {
+              Write-Warning "The missing-report summary was not written: $($_.Exception.Message)"
+            }
+          }
 
       - name: Record qualification candidate evidence
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-          SDK_PACKAGE_SHA256: ${{ needs.pack.outputs.sdk_package_sha256 }}
-          CLI_PACKAGE_SHA256: ${{ needs.pack.outputs.cli_package_sha256 }}
-          ARTIFACT_DIGEST: ${{ needs.pack.outputs.artifact_digest }}
+          SDK_PACKAGE_SHA256: ${{ needs.release-identity.outputs.sdk_package_sha256 }}
+          CLI_PACKAGE_SHA256: ${{ needs.release-identity.outputs.cli_package_sha256 }}
+          ARTIFACT_DIGEST: ${{ needs.release-identity.outputs.artifact_digest }}
+          CANDIDATE_RUN_ID: ${{ needs.release-identity.outputs.candidate_run_id }}
+          BUNDLE_SHA256: ${{ needs.release-identity.outputs.bundle_sha256 }}
+          MODE: ${{ needs.validate.outputs.mode }}
+          APPROVAL_COMMIT: ${{ needs.validate.outputs.approval_commit }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
           TARGET_FRAMEWORK: ${{ matrix.framework }}
           TOOL_INFORMATIONAL_VERSION: ${{ steps.tool_qualification.outputs.informational_version }}
           MATRIX_OS: ${{ matrix.os }}
@@ -571,10 +1205,19 @@ jobs:
 
           $evidence = [ordered]@{
             version = $env:RELEASE_VERSION
+            releaseTag = $env:RELEASE_TAG
             repositoryCommit = $env:RELEASE_COMMIT
             sdkPackageSha256 = $env:SDK_PACKAGE_SHA256
             cliPackageSha256 = $env:CLI_PACKAGE_SHA256
             workflowArtifactDigest = $env:ARTIFACT_DIGEST
+            candidateRunId = $env:CANDIDATE_RUN_ID
+            bundleSha256 = $env:BUNDLE_SHA256
+            approvalCommit = $env:APPROVAL_COMMIT
+            corpusSha256 = $report.corpusSha256
+            mode = $env:MODE
+            runId = $env:RUN_ID
+            runAttempt = $env:RUN_ATTEMPT
+            workflowSha = $env:WORKFLOW_SHA
             runner = $env:MATRIX_OS
             framework = $env:TARGET_FRAMEWORK
             toolInformationalVersion =
@@ -600,13 +1243,22 @@ jobs:
 
   publish:
     name: publish-nuget
-    needs: [validate, pack, package-qualification]
+    needs: [validate, release-identity, package-qualification]
     if: >-
       ${{
+        !cancelled() &&
+        needs.release-identity.result == 'success' &&
+        needs.package-qualification.result == 'success' &&
         needs.validate.outputs.validation_only == 'false' &&
-        github.event_name == 'release' &&
-        github.event.action == 'published' &&
-        github.event.release.tag_name == needs.validate.outputs.tag
+        (
+          (github.event_name == 'release' &&
+           github.event.action == 'published' &&
+           github.event.release.tag_name == needs.validate.outputs.tag &&
+           needs.validate.outputs.mode == 'release') ||
+          (github.event_name == 'workflow_dispatch' &&
+           needs.validate.outputs.mode == 'recovery' &&
+           needs.validate.outputs.release_published == 'true')
+        )
       }}
     runs-on: ubuntu-latest
     environment: nuget.org
@@ -654,6 +1306,9 @@ jobs:
           --no-restore
 
       - name: Revalidate release tag and main ancestry
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: >-
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -663,19 +1318,40 @@ jobs:
           --no-restore
           --
           validate-inputs
-          --version "${{ needs.validate.outputs.version }}"
-          --tag "${{ needs.validate.outputs.tag }}"
+          --version "$RELEASE_VERSION"
+          --tag "$RELEASE_TAG"
           --github-ref "${{ github.ref }}"
           --allow-published-version
+
+      - name: Verify GitHub Release is published
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: >-
+          dotnet run
+          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
+          --configuration Release
+          --framework net10.0
+          --no-build
+          --no-restore
+          --
+          verify-release-published
+          --repository "${{ github.repository }}"
+          --tag "$RELEASE_TAG"
 
       - name: Download qualified release candidate
         uses: actions/download-artifact@v4
         with:
           name: fhir-pkg-${{ needs.validate.outputs.version }}-candidate
           path: ${{ runner.temp }}/release-candidate
+          run-id: ${{ needs.release-identity.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Revalidate qualified release candidate
         id: candidate
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: >-
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -686,14 +1362,16 @@ jobs:
           --
           validate-candidate
           --candidate-directory "${{ runner.temp }}/release-candidate"
-          --version "${{ needs.validate.outputs.version }}"
-          --tag "${{ needs.validate.outputs.tag }}"
+          --version "$RELEASE_VERSION"
+          --tag "$RELEASE_TAG"
           --repository-commit "${{ needs.validate.outputs.commit }}"
-          --expected-sdk-package-sha256 "${{ needs.pack.outputs.sdk_package_sha256 }}"
-          --expected-cli-package-sha256 "${{ needs.pack.outputs.cli_package_sha256 }}"
+          --expected-sdk-package-sha256 "${{ needs.release-identity.outputs.sdk_package_sha256 }}"
+          --expected-cli-package-sha256 "${{ needs.release-identity.outputs.cli_package_sha256 }}"
 
       - name: Reconcile existing NuGet publication state
         id: publication_state
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: >-
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -704,7 +1382,7 @@ jobs:
           --
           inspect-publication
           --candidate-directory "${{ runner.temp }}/release-candidate"
-          --version "${{ needs.validate.outputs.version }}"
+          --version "$RELEASE_VERSION"
           --repository-commit "${{ needs.validate.outputs.commit }}"
 
       - name: Push CLI primary package to NuGet.org
@@ -721,6 +1399,8 @@ jobs:
 
       - name: Verify published CLI primary matches candidate
         if: steps.publication_state.outputs.cli_state == 'missing'
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: >-
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -732,8 +1412,8 @@ jobs:
           validate-published-package
           --package-id fhir-pkg-cli
           --candidate-package-path "${{ steps.candidate.outputs.cli_package_path }}"
-          --published-package-uri "https://api.nuget.org/v3-flatcontainer/fhir-pkg-cli/${{ needs.validate.outputs.version }}/fhir-pkg-cli.${{ needs.validate.outputs.version }}.nupkg"
-          --version "${{ needs.validate.outputs.version }}"
+          --published-package-uri "https://api.nuget.org/v3-flatcontainer/fhir-pkg-cli/$RELEASE_VERSION/fhir-pkg-cli.$RELEASE_VERSION.nupkg"
+          --version "$RELEASE_VERSION"
           --repository-commit "${{ needs.validate.outputs.commit }}"
 
       - name: Push SDK primary package to NuGet.org
@@ -750,6 +1430,8 @@ jobs:
 
       - name: Verify published SDK primary matches candidate
         if: steps.publication_state.outputs.sdk_state == 'missing'
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: >-
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -761,8 +1443,8 @@ jobs:
           validate-published-package
           --package-id fhir-pkg-lib
           --candidate-package-path "${{ steps.candidate.outputs.sdk_package_path }}"
-          --published-package-uri "https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/${{ needs.validate.outputs.version }}/fhir-pkg-lib.${{ needs.validate.outputs.version }}.nupkg"
-          --version "${{ needs.validate.outputs.version }}"
+          --published-package-uri "https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/$RELEASE_VERSION/fhir-pkg-lib.$RELEASE_VERSION.nupkg"
+          --version "$RELEASE_VERSION"
           --repository-commit "${{ needs.validate.outputs.commit }}"
 
       - name: Push CLI symbols package to NuGet.org

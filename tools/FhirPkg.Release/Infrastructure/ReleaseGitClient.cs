@@ -27,7 +27,20 @@ internal interface IReleaseGitClient
         CancellationToken cancellationToken);
 }
 
-internal sealed class ReleaseGitClient : IReleaseGitClient
+internal interface IReleaseGitObjectClient
+{
+    Task<ReleaseGitCommandResult> ResolveBlobIdAsync(
+        string revision,
+        string path,
+        CancellationToken cancellationToken);
+
+    Task<ReleaseGitCommandResult> ResolveCommitAuthorAsync(
+        string commit,
+        CancellationToken cancellationToken);
+}
+
+internal sealed class ReleaseGitClient
+    : IReleaseGitClient, IReleaseGitObjectClient
 {
     private readonly IReleaseProcessRunner _processRunner;
 
@@ -91,6 +104,21 @@ internal sealed class ReleaseGitClient : IReleaseGitClient
                 ancestorCommit,
                 descendantRevision,
             ],
+            cancellationToken);
+
+    public Task<ReleaseGitCommandResult> ResolveBlobIdAsync(
+        string revision,
+        string path,
+        CancellationToken cancellationToken) =>
+        RunGitAsync(
+            ["rev-parse", $"{revision}:{path}"],
+            cancellationToken);
+
+    public Task<ReleaseGitCommandResult> ResolveCommitAuthorAsync(
+        string commit,
+        CancellationToken cancellationToken) =>
+        RunGitAsync(
+            ["log", "-1", "--format=%an <%ae>", commit],
             cancellationToken);
 
     private async Task<ReleaseGitCommandResult> RunGitAsync(

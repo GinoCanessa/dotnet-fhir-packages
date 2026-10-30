@@ -5,7 +5,9 @@ using System.IO.Compression;
 using System.Text;
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
+using FhirPkg.Tests.Support;
 using FhirPkg.Utilities;
 using Shouldly;
 using Xunit;
@@ -128,6 +130,135 @@ public sealed class PackageCacheCoordinatorTests
 
         PackageCacheCoordinator.GetProcessLockEntryCount(
             directory.Path).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 0)]
+    [InlineData(false, 2)]
+    [InlineData(true, 2)]
+    public async Task IdentityRecovery_StagingRootDisappearsAfterProbe_DoesNotAbort(
+        bool asynchronous,
+        int retries)
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(directory.Path);
+        FileSystemContext context = files.CreateContext(retries);
+        using DiskPackageCache cache = new(
+            directory.Path, null, null, new PackageInstallLimits(), context);
+        cache.FileSystemContext.ShouldBeSameAs(context);
+        PackageReference reference = new("recovery.package", "1.0.0");
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        string contentPath = Path.Combine(cacheKey.GetPackageDirectoryPath(cache.CacheDirectory), "package");
+        Directory.CreateDirectory(contentPath);
+        File.WriteAllText(
+            Path.Combine(contentPath, "package.json"),
+            """{"name":"recovery.package","version":"1.0.0"}""");
+        string stagingRoot = Path.Combine(cache.CacheDirectory, ".fhirpkg", "staging");
+        string transactionDirectory = Path.Combine(cache.CacheDirectory, ".fhirpkg", "transactions");
+        string identityLockPath = Path.Combine(cache.CacheDirectory, ".fhirpkg", "locks", $"{cacheKey.LockHash}.lock");
+        Directory.CreateDirectory(stagingRoot);
+        Directory.CreateDirectory(transactionDirectory);
+        int baseline = PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory);
+        baseline.ShouldBe(0);
+        List<FileStream> lockStreams = [];
+        files.Set<FileStream>("OpenFile", call =>
+        {
+            call.Path.ShouldBe(identityLockPath);
+            FileSystemReplayOutcome<FileStream> opened = SystemFileSystemPrimitives.Instance.OpenFile(
+                call.Path!, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                OperatingSystem.IsMacOS() ? FileShare.None : FileShare.ReadWrite, 1, FileOptions.None);
+            lockStreams.Add(opened.Value);
+            return opened;
+        });
+        List<DirectoryNotFoundException> failures = [];
+        files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+        {
+            if (call.Path != stagingRoot)
+                return SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!);
+
+            PackageCacheCoordinator.GetIdentityReferenceCount(cache.CacheDirectory, cacheKey).ShouldBe(1);
+            PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory).ShouldBe(baseline + 1);
+            if (failures.Count == 0)
+                Directory.Delete(stagingRoot);
+            Directory.Exists(stagingRoot).ShouldBeFalse();
+            DirectoryNotFoundException failure = new("The staging root disappeared after journal discovery.");
+            failures.Add(failure);
+            return ScriptedFileSystemPrimitives.Fail<IEnumerator<string>>(
+                failure, "EnumerateDirectory", call.Path, nativeError: 2);
+        });
+        files.Calls.Clear();
+
+        if (asynchronous)
+            (await cache.IsInstalledAsync(reference, TestContext.Current.CancellationToken)).ShouldBeTrue();
+        else
+            cache.GetPackageContentPath(reference).ShouldBe(contentPath);
+
+        int stagingProbe = files.Calls.FindIndex(call => call.Operation == "Probe" && call.Path == stagingRoot);
+        int journalSnapshot = files.Calls.FindIndex(call =>
+            call.Operation == "CreateDirectoryEnumerator" && call.Path == transactionDirectory);
+        int journalDisposal = files.Calls.FindIndex(call =>
+            call.Operation == "DisposeEnumerator" && call.Path == transactionDirectory);
+        int stagingSnapshot = files.Calls.FindIndex(call =>
+            call.Operation == "CreateDirectoryEnumerator" && call.Path == stagingRoot);
+        stagingProbe.ShouldBeGreaterThan(0);
+        journalSnapshot.ShouldBeGreaterThan(stagingProbe);
+        journalDisposal.ShouldBeGreaterThan(journalSnapshot);
+        stagingSnapshot.ShouldBeGreaterThan(journalDisposal);
+        files.Calls.Count(call => call.Operation == "Probe" && call.Path == stagingRoot).ShouldBe(1);
+        files.Calls.Count(call => call.Operation == "CreateDirectoryEnumerator" && call.Path == transactionDirectory)
+            .ShouldBe(1);
+        files.Calls.Count(call => call.Operation == "DisposeEnumerator" && call.Path == transactionDirectory)
+            .ShouldBe(1);
+        files.Calls.Count(call => call.Operation == "CreateDirectoryEnumerator" && call.Path == stagingRoot)
+            .ShouldBe(retries + 1);
+        files.Calls.ShouldNotContain(call => call.Path == stagingRoot
+            && (call.Operation == "MoveNext" || call.Operation == "DisposeEnumerator"));
+        failures.Count.ShouldBe(retries + 1);
+        FileSystemFailureContext.TryGetTerminal(
+            failures[^1], out FileSystemFailureContext? failureContext).ShouldBeTrue();
+        failureContext!.Operation.ShouldBe("EnumerateDirectory");
+        failureContext.Path.ShouldBe(stagingRoot);
+        failureContext.Phase.ShouldBe("SnapshotDirectory");
+        failureContext.AttemptCount.ShouldBe((long)retries + 1);
+        failureContext.RetriesUsed.ShouldBe((long)retries);
+        failureContext.Termination.ShouldBe(FileSystemFailureTermination.Exhausted);
+        failureContext.NativeErrorCode.ShouldBe(2);
+        foreach (DirectoryNotFoundException earlier in failures.Take(retries))
+            FileSystemFailureContext.TryGetTerminal(earlier, out _).ShouldBeFalse();
+        files.Calls.Where(call => call.Operation == "OpenFile").Select(call => call.Path)
+            .ShouldBe([identityLockPath]);
+        files.Count("TryLock").ShouldBe(1);
+        files.Count("Unlock").ShouldBe(1);
+        lockStreams.ShouldHaveSingleItem().CanRead.ShouldBeFalse();
+        files.Count("DeleteEntry").ShouldBe(0);
+        files.Calls.ShouldNotContain(call => call.Operation == "Probe"
+            && call.Path == stagingRoot && call.Flags != 0);
+        files.AsyncWaits.ShouldBe(Enumerable.Repeat(10, retries).ToArray());
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetIdentityReferenceCount(cache.CacheDirectory, cacheKey).ShouldBe(0);
+        PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory).ShouldBe(baseline);
+
+        PackageCacheCoordinator coordinator = new(
+            cache.CacheDirectory, context, NullPackageCacheContentionObserver.Instance);
+        using CancellationTokenSource subsequent = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        subsequent.CancelAfter(TimeSpan.FromSeconds(5));
+        await using (PackageCacheLease successor = await coordinator.AcquireIdentityAsync(cacheKey, subsequent.Token))
+        {
+            PackageCacheCoordinator.GetIdentityReferenceCount(cache.CacheDirectory, cacheKey).ShouldBe(1);
+            PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory).ShouldBe(baseline + 1);
+            lockStreams.Count.ShouldBe(2);
+            lockStreams[1].CanRead.ShouldBeTrue();
+        }
+
+        files.Calls.Where(call => call.Operation == "OpenFile").Select(call => call.Path)
+            .ShouldBe([identityLockPath, identityLockPath]);
+        files.Count("TryLock").ShouldBe(2);
+        files.Count("Unlock").ShouldBe(2);
+        lockStreams[1].CanRead.ShouldBeFalse();
+        PackageCacheCoordinator.GetIdentityReferenceCount(cache.CacheDirectory, cacheKey).ShouldBe(0);
+        PackageCacheCoordinator.GetProcessLockEntryCount(cache.CacheDirectory).ShouldBe(baseline);
     }
 
     [Fact]
@@ -660,6 +791,273 @@ public sealed class PackageCacheCoordinatorTests
                     CreateNativeIOException(nativeError))
                 .ShouldBe(acceptedCodes.Contains(nativeError));
         }
+    }
+
+    [Theory]
+    [InlineData(35, true)]
+    [InlineData(13, false)]
+    [InlineData(123456, false)]
+    public void RawMacLock_ClassifiesContentionBeforeFaultScheduling(int error, bool contended)
+    {
+        int calls = 0;
+        FileSystemReplayOutcome<bool> outcome = NativeFileSystemPrimitives.TryLockDescriptor(
+            73,
+            (descriptor, flags) =>
+            {
+                descriptor.ShouldBe(73);
+                flags.ShouldBe(2 | 4);
+                calls++;
+                return -1;
+            },
+            () => error);
+
+        calls.ShouldBe(1);
+        outcome.Kind.ShouldBe(contended
+            ? FileSystemReplayOutcomeKind.Contended
+            : FileSystemReplayOutcomeKind.PrimitiveFailure);
+        if (!contended)
+        {
+            FileSystemFailureContext.TryGetOrigin(
+                outcome.PrimitiveFailure!.Exception, out FileSystemFailureContext? failure).ShouldBeTrue();
+            failure!.NativeErrorCode.ShouldBe(error);
+            outcome.PrimitiveFailure.ReplaySafety.ShouldBe(FileSystemReplaySafety.Safe);
+            FileSystemFailureContext.TryGetTerminal(outcome.PrimitiveFailure.Exception, out _).ShouldBeFalse();
+        }
+    }
+
+    [Fact]
+    public async Task Coordination_MoreThanFiveBusyPollsDoesNotSpendFaultBudget()
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives primitives = new();
+        primitives.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        primitives.Set<FileStream>("OpenFile", _ => OpenScriptedLockFile(directory.Path));
+        for (int index = 0; index < 7; index++)
+            primitives.Enqueue("TryLock", FileSystemReplayOutcome<bool>.Complete(false));
+        primitives.Enqueue("TryLock", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set("Unlock", FileSystemReplayOutcome<bool>.Complete(true));
+        PackageCacheCoordinator coordinator = new(
+            directory.Path,
+            primitives.CreateContext(retries: 2),
+            NullPackageCacheContentionObserver.Instance);
+        PackageCacheKey cacheKey = PackageCacheKey.Create(
+            new PackageReference("busy.package", "1.0.0"));
+
+        await using (await coordinator.AcquireIdentityAsync(
+            cacheKey,
+            TestContext.Current.CancellationToken))
+        {
+        }
+
+        primitives.Count("TryLock").ShouldBe(8);
+        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Coordination_InterleavedFaultsDoNotResetBudget()
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives primitives = new();
+        primitives.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        primitives.Set<FileStream>("OpenFile", _ => OpenScriptedLockFile(directory.Path));
+        for (int index = 0; index < 3; index++)
+        {
+            primitives.Enqueue(
+                "TryLock",
+                ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "TryLock"));
+            primitives.Enqueue("TryLock", FileSystemReplayOutcome<bool>.Complete(false));
+        }
+
+        PackageCacheCoordinator coordinator = new(
+            directory.Path,
+            primitives.CreateContext(retries: 2),
+            NullPackageCacheContentionObserver.Instance);
+        PackageCacheKey cacheKey = PackageCacheKey.Create(
+            new PackageReference("faulty.package", "1.0.0"));
+
+        await Should.ThrowAsync<PackageInstallException>(
+            () => coordinator.AcquireIdentityAsync(
+                cacheKey,
+                TestContext.Current.CancellationToken));
+
+        // Three faults against two retries: the busy polls between them never refilled it.
+        primitives.Count("TryLock").ShouldBe(5);
+        primitives.AsyncWaits.Count.ShouldBe(2);
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Lease_UnlockExhaustionReleasesHandleAndSemaphoreOnce()
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives primitives = new();
+        primitives.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        primitives.Set<FileStream>("OpenFile", _ => OpenScriptedLockFile(directory.Path));
+        primitives.Set("TryLock", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set(
+            "Unlock",
+            _ => ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "Unlock"));
+        PackageCacheCoordinator coordinator = new(
+            directory.Path,
+            primitives.CreateContext(retries: 2),
+            NullPackageCacheContentionObserver.Instance);
+        PackageCacheKey cacheKey = PackageCacheKey.Create(
+            new PackageReference("unlock.package", "1.0.0"));
+        PackageCacheLease lease = await coordinator.AcquireIdentityAsync(
+            cacheKey,
+            TestContext.Current.CancellationToken);
+
+        await Should.ThrowAsync<IOException>(async () => await lease.DisposeAsync());
+        await lease.DisposeAsync();
+
+        primitives.Count("Unlock").ShouldBe(3);
+        primitives.AsyncWaits.ShouldBe([10, 10]);
+        primitives.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
+        await using (await new PackageCacheCoordinator(directory.Path)
+            .AcquireIdentityAsync(cacheKey, TestContext.Current.CancellationToken))
+        {
+        }
+    }
+
+    [Fact]
+    public async Task NonblockingOwner_FaultsAndUnlockUseAsyncWaitsOnOneHandle()
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives files = new();
+        files.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        FileStream? retained = null;
+        files.Set<FileStream>("OpenFile", _ =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = OpenScriptedLockFile(directory.Path);
+            retained = opened.Value;
+            return opened;
+        });
+        files.Enqueue("OpenFile", ScriptedFileSystemPrimitives.NativeFailure<FileStream>(5, "owner open"));
+        files.Enqueue("TryLock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "owner lock"));
+        files.Set("TryLock", FileSystemReplayOutcome<bool>.Complete(true));
+        files.Enqueue("Unlock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "owner unlock"));
+        files.Set("Unlock", FileSystemReplayOutcome<bool>.Complete(true));
+        PackageCacheCoordinator coordinator = new(
+            directory.Path, files.CreateContext(retries: 2), NullPackageCacheContentionObserver.Instance);
+
+        PackageCacheLease? lease = await coordinator.TryAcquireOperationOwnerAsync(
+            "owner", TestContext.Current.CancellationToken);
+
+        // Open and lock spend the same episode's two retries; unlock has its own budget.
+        lease.ShouldNotBeNull();
+        await lease.DisposeAsync();
+        await lease.DisposeAsync();
+        retained.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        files.Count("OpenFile").ShouldBe(2);
+        files.Count("TryLock").ShouldBe(2);
+        files.Count("Unlock").ShouldBe(2);
+        files.AsyncWaits.ShouldBe([10, 10, 10]);
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NonblockingOwner_ContentionReturnsImmediatelyWithoutFaultWaits(bool processContention)
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives files = new();
+        files.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        FileStream? retained = null;
+        files.Set<FileStream>("OpenFile", _ =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = OpenScriptedLockFile(directory.Path);
+            retained = opened.Value;
+            return opened;
+        });
+        files.Set("TryLock", FileSystemReplayOutcome<bool>.Complete(processContention));
+        files.Set("Unlock", FileSystemReplayOutcome<bool>.Complete(true));
+        PackageCacheCoordinator coordinator = new(
+            directory.Path, files.CreateContext(retries: 0), NullPackageCacheContentionObserver.Instance);
+        PackageCacheLease? first = processContention
+            ? await coordinator.TryAcquireOperationOwnerAsync("owner", TestContext.Current.CancellationToken)
+            : null;
+        try
+        {
+            PackageCacheLease? contended = await coordinator.TryAcquireOperationOwnerAsync(
+                "owner", TestContext.Current.CancellationToken);
+
+            contended.ShouldBeNull();
+            files.Count("OpenFile").ShouldBe(1);
+            files.Count("TryLock").ShouldBe(1);
+            files.AsyncWaits.ShouldBeEmpty();
+            files.Waits.ShouldBeEmpty();
+            if (!processContention)
+                retained.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        }
+        finally
+        {
+            if (first is not null)
+                await first.DisposeAsync();
+        }
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NonblockingOwner_FaultExhaustionOrCancellationReleasesRetainedHandle(bool cancel)
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives files = new();
+        files.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.Directory));
+        FileStream? retained = null;
+        files.Set<FileStream>("OpenFile", _ =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = OpenScriptedLockFile(directory.Path);
+            retained = opened.Value;
+            return opened;
+        });
+        files.Set("TryLock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "owner lock"));
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        if (cancel)
+            files.OnWait = cancellation.Cancel;
+        PackageCacheCoordinator coordinator = new(
+            directory.Path, files.CreateContext(retries: 2), NullPackageCacheContentionObserver.Instance);
+
+        if (cancel)
+        {
+            await Should.ThrowAsync<OperationCanceledException>(async () =>
+                await coordinator.TryAcquireOperationOwnerAsync("owner", cancellation.Token));
+        }
+        else
+        {
+            PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(async () =>
+                await coordinator.TryAcquireOperationOwnerAsync("owner", cancellation.Token));
+            exception.ErrorCode.ShouldBe(PackageInstallErrorCode.CoordinationFailed);
+            FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? failure).ShouldBeTrue();
+            failure!.RetriesUsed.ShouldBe(2);
+        }
+
+        retained.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        files.Count("OpenFile").ShouldBe(1);
+        files.Count("TryLock").ShouldBe(cancel ? 1 : 3);
+        files.Count("Unlock").ShouldBe(0);
+        files.AsyncWaits.ShouldBe(cancel ? [10] : [10, 10]);
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(directory.Path).ShouldBe(0);
+    }
+
+    private static FileSystemReplayOutcome<FileStream> OpenScriptedLockFile(string root)
+    {
+        string path = Path.Combine(root, $"scripted-{Guid.NewGuid():N}.lock");
+        return FileSystemReplayOutcome<FileStream>.Complete(
+            new FileStream(
+                path,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.ReadWrite | FileShare.Delete,
+                1,
+                FileOptions.DeleteOnClose));
     }
 
     private sealed class TestDirectory : IDisposable

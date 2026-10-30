@@ -1,7 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Text;
-using FhirPkg.Cache;
+using FhirPkg.IO;
 
 namespace FhirPkg.Utilities;
 
@@ -22,6 +22,9 @@ namespace FhirPkg.Utilities;
 /// </remarks>
 public static class IniParser
 {
+    // File.WriteAllText semantics: UTF-8 without a BOM.
+    private static readonly UTF8Encoding s_directWriteEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
     /// <summary>
     /// Parses INI-format content from a string into a nested dictionary structure.
     /// </summary>
@@ -99,13 +102,47 @@ public static class IniParser
     public static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ParseFile(string filePath)
     {
         ArgumentNullException.ThrowIfNull(filePath);
+        return ParseFile(filePath, FileSystemContext.CreateDefault());
+    }
 
-        if (!File.Exists(filePath))
-            return new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+    internal static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ParseFile(
+        string filePath,
+        FileSystemContext context)
+    {
+        ArgumentNullException.ThrowIfNull(filePath);
+        ArgumentNullException.ThrowIfNull(context);
 
-        string content = File.ReadAllText(filePath);
+        // Absence is an explicit probe outcome; a real fault is never absence.
+        if (!IsReadableFileKind(context.FileSystem.ProbeFollowing(filePath).Kind))
+            return EmptyFile();
+
+        PositionedFileStream stream = context.FileSystem.OpenPositionedFile(
+            filePath, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.SequentialScan);
+        string content;
+        try
+        {
+            using StreamReader reader = new StreamReader(
+                stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
+            content = reader.ReadToEnd();
+        }
+        catch
+        {
+            stream.ReleaseAfterFailure();
+            throw;
+        }
+
+        stream.Dispose();
         return Parse(content);
     }
+
+    private static bool IsReadableFileKind(FileSystemEntryKind kind) =>
+        kind is not (FileSystemEntryKind.Missing
+            or FileSystemEntryKind.Directory
+            or FileSystemEntryKind.DirectorySymbolicLink);
+
+    private static Dictionary<string, IReadOnlyDictionary<string, string>> EmptyFile() =>
+        new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+
 
     /// <summary>
     /// Serializes a nested dictionary structure into INI-format text.
@@ -150,12 +187,39 @@ public static class IniParser
     {
         ArgumentNullException.ThrowIfNull(filePath);
         ArgumentNullException.ThrowIfNull(sections);
+        WriteFile(filePath, sections, FileSystemContext.CreateDefault());
+    }
+
+    internal static void WriteFile(
+        string filePath,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> sections,
+        FileSystemContext context)
+    {
+        ArgumentNullException.ThrowIfNull(filePath);
+        ArgumentNullException.ThrowIfNull(sections);
+        ArgumentNullException.ThrowIfNull(context);
+
+        // Serialize and encode once, above all I/O.
+        byte[] content = s_directWriteEncoding.GetBytes(Serialize(sections));
 
         string? directory = Path.GetDirectoryName(filePath);
         if (directory is not null)
-            Directory.CreateDirectory(directory);
+            context.FileSystem.CreateDirectory(directory);
 
-        File.WriteAllText(filePath, Serialize(sections));
+        // Direct overwrite stays direct: no temporary file or replacement.
+        PositionedFileStream stream = context.FileSystem.OpenPositionedFile(
+            filePath, FileMode.Create, FileAccess.Write, FileShare.Read, FileOptions.None);
+        try
+        {
+            stream.Write(content);
+        }
+        catch
+        {
+            stream.ReleaseAfterFailure();
+            throw;
+        }
+
+        stream.Dispose();
     }
 
     /// <summary>
@@ -173,11 +237,45 @@ public static class IniParser
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(filePath);
+        return await ParseFileAsync(filePath, FileSystemContext.CreateDefault(), ct).ConfigureAwait(false);
+    }
 
-        if (!File.Exists(filePath))
-            return new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+    internal static async Task<IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>> ParseFileAsync(
+        string filePath,
+        FileSystemContext context,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(filePath);
+        ArgumentNullException.ThrowIfNull(context);
 
-        string content = await File.ReadAllTextAsync(filePath, ct).ConfigureAwait(false);
+        // Absence is an explicit probe outcome; a real fault is never absence.
+        string fullPath = await context.FileSystem.GetFullPathAsync(filePath, ct).ConfigureAwait(false);
+        FileSystemProbeResult probe = await context.FileSystem.ExecuteAsync(
+                "ProbeFollowing",
+                () => context.Primitives.Probe(fullPath, followLinks: true),
+                ct)
+            .ConfigureAwait(false);
+        if (!IsReadableFileKind(probe.Kind))
+            return EmptyFile();
+
+        PositionedFileStream stream = await context.FileSystem.OpenPositionedFileAsync(
+                fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                FileOptions.Asynchronous | FileOptions.SequentialScan, ct)
+            .ConfigureAwait(false);
+        string content;
+        try
+        {
+            using StreamReader reader = new StreamReader(
+                stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 4096, leaveOpen: true);
+            content = await reader.ReadToEndAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            stream.ReleaseAfterFailure();
+            throw;
+        }
+
+        stream.Dispose();
         return Parse(content);
     }
 
@@ -196,12 +294,40 @@ public static class IniParser
     {
         ArgumentNullException.ThrowIfNull(filePath);
         ArgumentNullException.ThrowIfNull(sections);
+        await WriteFileAsync(filePath, sections, FileSystemContext.CreateDefault(), ct).ConfigureAwait(false);
+    }
+
+    internal static async Task WriteFileAsync(
+        string filePath,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> sections,
+        FileSystemContext context,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(filePath);
+        ArgumentNullException.ThrowIfNull(sections);
+        ArgumentNullException.ThrowIfNull(context);
+
+        byte[] content = s_directWriteEncoding.GetBytes(Serialize(sections));
 
         string? directory = Path.GetDirectoryName(filePath);
         if (directory is not null)
-            Directory.CreateDirectory(directory);
+            await context.FileSystem.CreateDirectoryAsync(directory, ct).ConfigureAwait(false);
 
-        await File.WriteAllTextAsync(filePath, Serialize(sections), ct).ConfigureAwait(false);
+        // Direct overwrite stays direct: no temporary file or replacement.
+        PositionedFileStream stream = await context.FileSystem.OpenPositionedFileAsync(
+                filePath, FileMode.Create, FileAccess.Write, FileShare.Read, FileOptions.Asynchronous, ct)
+            .ConfigureAwait(false);
+        try
+        {
+            await stream.WriteAsync(content, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            stream.ReleaseAfterFailure();
+            throw;
+        }
+
+        stream.Dispose();
     }
 
     /// <summary>
@@ -216,7 +342,7 @@ public static class IniParser
         await WriteFileAtomicallyAsync(
                 filePath,
                 sections,
-                SystemPackageCacheFileOperations.Instance,
+                FileSystemContext.CreateDefault().DurableFiles,
                 ct)
             .ConfigureAwait(false);
     }
@@ -224,7 +350,7 @@ public static class IniParser
     internal static async Task WriteFileAtomicallyAsync(
         string filePath,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> sections,
-        IPackageCacheFileOperations fileOperations,
+        IDurableFileOperations fileOperations,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(filePath);

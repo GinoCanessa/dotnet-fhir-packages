@@ -1,12 +1,14 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using FhirPkg.Installation;
+using FhirPkg.IO;
 
 namespace FhirPkg.Cache;
 
 internal sealed class PackageCacheCommitter
 {
     private readonly string _cacheRoot;
+    private readonly FileSystemContext _context;
     private readonly PackageCacheValidator _validator;
     private readonly PackageCacheMetadataStore _metadataStore;
     private readonly PackageCacheJournalStore _journalStore;
@@ -20,15 +22,37 @@ internal sealed class PackageCacheCommitter
         PackageCacheJournalStore journalStore,
         IPackageCacheFileOperations fileOperations,
         IPackageCacheFaultObserver faultObserver)
+        : this(
+            cacheRoot,
+            (fileOperations as SystemPackageCacheFileOperations)?.Context
+                ?? FileSystemContext.CreateDefault(),
+            validator,
+            metadataStore,
+            journalStore,
+            fileOperations,
+            faultObserver)
+    {
+    }
+
+    internal PackageCacheCommitter(
+        string cacheRoot,
+        FileSystemContext context,
+        PackageCacheValidator validator,
+        PackageCacheMetadataStore metadataStore,
+        PackageCacheJournalStore journalStore,
+        IPackageCacheFileOperations fileOperations,
+        IPackageCacheFaultObserver faultObserver)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
+        ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(validator);
         ArgumentNullException.ThrowIfNull(metadataStore);
         ArgumentNullException.ThrowIfNull(journalStore);
         ArgumentNullException.ThrowIfNull(fileOperations);
         ArgumentNullException.ThrowIfNull(faultObserver);
 
-        _cacheRoot = Path.GetFullPath(cacheRoot);
+        _context = context;
+        _cacheRoot = context.FileSystem.GetFullPath(cacheRoot);
         _validator = validator;
         _metadataStore = metadataStore;
         _journalStore = journalStore;
@@ -50,17 +74,19 @@ internal sealed class PackageCacheCommitter
         ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
         ArgumentNullException.ThrowIfNull(intendedMetadata);
 
-        if (!_fileOperations.DirectoryExists(stagingDirectory))
+        if (!await _fileOperations.DirectoryExistsAsync(stagingDirectory, cancellationToken)
+                .ConfigureAwait(false))
         {
             throw CommitFailure(
                 cacheKey,
                 "The validated staging directory is missing.");
         }
 
-        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot);
+        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot, _context);
         string stagingRelativePath = GetRelativePath(stagingDirectory);
         PackageCacheArtifactKind artifactKind =
-            _fileOperations.GetArtifactKind(targetPath);
+            await _fileOperations.GetArtifactKindAsync(targetPath, cancellationToken)
+                .ConfigureAwait(false);
         string? artifactRelativePath = artifactKind
             == PackageCacheArtifactKind.Missing
                 ? null
@@ -121,14 +147,19 @@ internal sealed class PackageCacheCommitter
         {
             throw;
         }
+        catch (OperationCanceledException)
+        {
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
+            throw;
+        }
         catch (UnauthorizedAccessException exception)
         {
-            TryDeleteJournal(journal);
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             throw CommitFailure(cacheKey, exception);
         }
         catch (IOException exception)
         {
-            TryDeleteJournal(journal);
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             throw CommitFailure(cacheKey, exception);
         }
         try
@@ -137,28 +168,38 @@ internal sealed class PackageCacheCommitter
         }
         catch (OperationCanceledException)
         {
-            TryDeleteJournal(journal);
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             throw;
         }
 
         bool destructiveWorkStarted = false;
         try
         {
+            // Only the pre-boundary work honors the caller token; once the original
+            // moves, every step runs to a durable state regardless of cancellation.
             string? targetParent = Path.GetDirectoryName(targetPath);
             if (targetParent is not null)
-                _fileOperations.CreateDirectory(targetParent);
+            {
+                await _fileOperations.CreateDirectoryAsync(targetParent, cancellationToken)
+                    .ConfigureAwait(false);
+            }
 
             if (artifactPath is not null)
             {
                 string? artifactParent = Path.GetDirectoryName(artifactPath);
                 if (artifactParent is not null)
-                    _fileOperations.CreateDirectory(artifactParent);
+                {
+                    await _fileOperations.CreateDirectoryAsync(artifactParent, cancellationToken)
+                        .ConfigureAwait(false);
+                }
 
                 destructiveWorkStarted = true;
-                _fileOperations.MoveArtifact(
-                    targetPath,
-                    artifactPath,
-                    artifactKind);
+                await _fileOperations.MoveArtifactAsync(
+                        targetPath,
+                        artifactPath,
+                        artifactKind,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
                 await ObserveAsync(
                         journal,
                         PackageCacheFaultPoint.OriginalRenamed)
@@ -176,7 +217,11 @@ internal sealed class PackageCacheCommitter
             await _journalStore.WriteAsync(journal, CancellationToken.None)
                 .ConfigureAwait(false);
 
-            _fileOperations.MoveDirectory(stagingDirectory, targetPath);
+            await _fileOperations.MoveDirectoryAsync(
+                    stagingDirectory,
+                    targetPath,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
             await ObserveAsync(
                     journal,
                     PackageCacheFaultPoint.ReplacementPromoted)
@@ -234,12 +279,17 @@ internal sealed class PackageCacheCommitter
         {
             throw;
         }
+        catch (OperationCanceledException) when (!destructiveWorkStarted)
+        {
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
+            throw;
+        }
         catch (UnauthorizedAccessException exception)
         {
             if (destructiveWorkStarted)
                 await RollbackAfterFailureAsync(journal).ConfigureAwait(false);
             else
-                TryDeleteJournal(journal);
+                await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             throw CommitFailure(cacheKey, exception);
         }
         catch (IOException exception)
@@ -247,7 +297,7 @@ internal sealed class PackageCacheCommitter
             if (destructiveWorkStarted)
                 await RollbackAfterFailureAsync(journal).ConfigureAwait(false);
             else
-                TryDeleteJournal(journal);
+                await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             throw CommitFailure(cacheKey, exception);
         }
         catch (PackageInstallException exception)
@@ -255,7 +305,7 @@ internal sealed class PackageCacheCommitter
             if (destructiveWorkStarted)
                 await RollbackAfterFailureAsync(journal).ConfigureAwait(false);
             else
-                TryDeleteJournal(journal);
+                await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             if (exception.ErrorCode == PackageInstallErrorCode.CommitFailed)
                 throw;
             throw CommitFailure(cacheKey, exception);
@@ -275,9 +325,10 @@ internal sealed class PackageCacheCommitter
         if (originalInspection.State == PackageCacheInspectionState.Missing)
             return false;
 
-        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot);
+        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot, _context);
         PackageCacheArtifactKind artifactKind =
-            _fileOperations.GetArtifactKind(targetPath);
+            await _fileOperations.GetArtifactKindAsync(targetPath, cancellationToken)
+                .ConfigureAwait(false);
         if (artifactKind == PackageCacheArtifactKind.Missing)
             return false;
 
@@ -333,14 +384,19 @@ internal sealed class PackageCacheCommitter
         {
             throw;
         }
+        catch (OperationCanceledException)
+        {
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
+            throw;
+        }
         catch (UnauthorizedAccessException exception)
         {
-            TryDeleteJournal(journal);
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             throw CommitFailure(cacheKey, exception);
         }
         catch (IOException exception)
         {
-            TryDeleteJournal(journal);
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             throw CommitFailure(cacheKey, exception);
         }
         try
@@ -349,19 +405,27 @@ internal sealed class PackageCacheCommitter
         }
         catch (OperationCanceledException)
         {
-            TryDeleteJournal(journal);
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             throw;
         }
 
+        bool destructiveWorkStarted = false;
         try
         {
             string? artifactParent = Path.GetDirectoryName(artifactPath);
             if (artifactParent is not null)
-                _fileOperations.CreateDirectory(artifactParent);
-            _fileOperations.MoveArtifact(
-                targetPath,
-                artifactPath,
-                artifactKind);
+            {
+                await _fileOperations.CreateDirectoryAsync(artifactParent, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            destructiveWorkStarted = true;
+            await _fileOperations.MoveArtifactAsync(
+                    targetPath,
+                    artifactPath,
+                    artifactKind,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
             await ObserveAsync(
                     journal,
                     PackageCacheFaultPoint.OriginalRenamed)
@@ -400,6 +464,11 @@ internal sealed class PackageCacheCommitter
         }
         catch (PackageCacheInjectedFaultException)
         {
+            throw;
+        }
+        catch (OperationCanceledException) when (!destructiveWorkStarted)
+        {
+            await TryDeleteJournalAsync(journal).ConfigureAwait(false);
             throw;
         }
         catch (UnauthorizedAccessException exception)
@@ -613,13 +682,17 @@ internal sealed class PackageCacheCommitter
         try
         {
             if (artifactPath is not null
-                && _fileOperations.ArtifactExists(
-                    artifactPath,
-                    journal.OriginalArtifactKind))
+                && await _fileOperations.ArtifactExistsAsync(
+                        artifactPath,
+                        journal.OriginalArtifactKind,
+                        CancellationToken.None)
+                    .ConfigureAwait(false))
             {
-                _fileOperations.DeleteArtifact(
-                    artifactPath,
-                    journal.OriginalArtifactKind);
+                await _fileOperations.DeleteArtifactAsync(
+                        artifactPath,
+                        journal.OriginalArtifactKind,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
                 await ObserveAsync(
                         journal,
                         PackageCacheFaultPoint.ArtifactRemoved)
@@ -627,10 +700,14 @@ internal sealed class PackageCacheCommitter
             }
 
             if (artifactPath is not null)
-                DeleteEmptyContainer(Path.GetDirectoryName(artifactPath));
+            {
+                await DeleteEmptyContainerAsync(Path.GetDirectoryName(artifactPath))
+                    .ConfigureAwait(false);
+            }
 
-            DeleteStagingIfPresent(journal);
-            _journalStore.Delete(journal);
+            await DeleteStagingIfPresentAsync(journal).ConfigureAwait(false);
+            await _journalStore.DeleteAsync(journal, CancellationToken.None)
+                .ConfigureAwait(false);
             return true;
         }
         catch (PackageCacheInjectedFaultException)
@@ -672,7 +749,7 @@ internal sealed class PackageCacheCommitter
         PackageCacheTransactionJournal journal)
     {
         PackageCacheKey cacheKey = journal.GetCacheKey();
-        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot);
+        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot, _context);
         string? artifactPath = GetArtifactPath(journal);
 
         if (journal.State != PackageCacheTransactionState.RollbackStarted
@@ -689,24 +766,34 @@ internal sealed class PackageCacheCommitter
         if (journal.State != PackageCacheTransactionState.RolledBack)
         {
             bool artifactExists = artifactPath is not null
-                && _fileOperations.ArtifactExists(
-                    artifactPath,
-                    journal.OriginalArtifactKind);
+                && await _fileOperations.ArtifactExistsAsync(
+                        artifactPath,
+                        journal.OriginalArtifactKind,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
             PackageCacheArtifactKind targetKind =
-                _fileOperations.GetArtifactKind(targetPath);
+                await _fileOperations.GetArtifactKindAsync(targetPath, CancellationToken.None)
+                    .ConfigureAwait(false);
             if (journal.OriginalState
                 == PackageCacheInspectionState.Missing)
             {
-                _fileOperations.DeleteArtifact(targetPath, targetKind);
+                await _fileOperations.DeleteArtifactAsync(
+                        targetPath, targetKind, CancellationToken.None)
+                    .ConfigureAwait(false);
             }
             else if (artifactExists)
             {
-                _fileOperations.DeleteArtifact(targetPath, targetKind);
-                _fileOperations.MoveArtifact(
-                    artifactPath!,
-                    targetPath,
-                    journal.OriginalArtifactKind);
-                DeleteEmptyContainer(Path.GetDirectoryName(artifactPath));
+                await _fileOperations.DeleteArtifactAsync(
+                        targetPath, targetKind, CancellationToken.None)
+                    .ConfigureAwait(false);
+                await _fileOperations.MoveArtifactAsync(
+                        artifactPath!,
+                        targetPath,
+                        journal.OriginalArtifactKind,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                await DeleteEmptyContainerAsync(Path.GetDirectoryName(artifactPath))
+                    .ConfigureAwait(false);
             }
             else if (targetKind == PackageCacheArtifactKind.Missing)
             {
@@ -738,19 +825,26 @@ internal sealed class PackageCacheCommitter
         }
 
         if (artifactPath is not null
-            && _fileOperations.ArtifactExists(
-                artifactPath,
-                journal.OriginalArtifactKind))
+            && await _fileOperations.ArtifactExistsAsync(
+                    artifactPath,
+                    journal.OriginalArtifactKind,
+                    CancellationToken.None)
+                .ConfigureAwait(false))
         {
-            _fileOperations.DeleteArtifact(
-                artifactPath,
-                journal.OriginalArtifactKind);
+            await _fileOperations.DeleteArtifactAsync(
+                    artifactPath,
+                    journal.OriginalArtifactKind,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
         }
 
         if (artifactPath is not null)
-            DeleteEmptyContainer(Path.GetDirectoryName(artifactPath));
+        {
+            await DeleteEmptyContainerAsync(Path.GetDirectoryName(artifactPath))
+                .ConfigureAwait(false);
+        }
 
-        CompleteRolledBack(journal);
+        await CompleteRolledBackAsync(journal).ConfigureAwait(false);
     }
 
     private async Task<bool> PriorStateMatchesAsync(
@@ -782,17 +876,18 @@ internal sealed class PackageCacheCommitter
             .ConfigureAwait(false);
     }
 
-    private void CompleteRolledBack(PackageCacheTransactionJournal journal)
+    private async Task CompleteRolledBackAsync(PackageCacheTransactionJournal journal)
     {
-        DeleteStagingIfPresent(journal);
-        TryDeleteJournal(journal);
+        await DeleteStagingIfPresentAsync(journal).ConfigureAwait(false);
+        await TryDeleteJournalAsync(journal).ConfigureAwait(false);
     }
 
-    private void TryDeleteJournal(PackageCacheTransactionJournal journal)
+    private async Task TryDeleteJournalAsync(PackageCacheTransactionJournal journal)
     {
         try
         {
-            _journalStore.Delete(journal);
+            await _journalStore.DeleteAsync(journal, CancellationToken.None)
+                .ConfigureAwait(false);
         }
         catch (UnauthorizedAccessException)
         {
@@ -804,7 +899,7 @@ internal sealed class PackageCacheCommitter
         }
     }
 
-    private void DeleteStagingIfPresent(
+    private async Task DeleteStagingIfPresentAsync(
         PackageCacheTransactionJournal journal)
     {
         if (journal.StagingRelativePath is null)
@@ -816,27 +911,38 @@ internal sealed class PackageCacheCommitter
         string operationPath = Path.GetDirectoryName(stagingPath)
             ?? throw PackageCacheTransactionJournal.InvalidJournal(
                 "The staging path has no operation directory.");
-        if (_fileOperations.DirectoryExists(operationPath))
+        if (await _fileOperations.DirectoryExistsAsync(operationPath, CancellationToken.None)
+                .ConfigureAwait(false))
         {
-            _fileOperations.DeleteDirectory(
-                operationPath,
-                recursive: true);
+            await _fileOperations.DeleteDirectoryAsync(
+                    operationPath,
+                    recursive: true,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
         }
 
-        DeleteEmptyContainer(Path.GetDirectoryName(operationPath));
+        await DeleteEmptyContainerAsync(Path.GetDirectoryName(operationPath))
+            .ConfigureAwait(false);
     }
 
-    private static void DeleteEmptyContainer(string? path)
+    private async Task DeleteEmptyContainerAsync(string? path)
     {
         if (path is null)
             return;
 
         try
         {
-            if (Directory.Exists(path)
-                && !Directory.EnumerateFileSystemEntries(path).Any())
+            if ((await _context.FileSystem.ProbeAsync(path).ConfigureAwait(false)).Kind
+                    == FileSystemEntryKind.Directory
+                && (await _context.FileSystem.SnapshotDirectoryAsync(path)
+                    .ConfigureAwait(false)).Length == 0)
             {
-                Directory.Delete(path);
+                await _context.FileSystem.DeleteAsync(
+                        path,
+                        FileSystemEntryKind.Directory,
+                        recursive: false,
+                        missingAllowed: true)
+                    .ConfigureAwait(false);
             }
         }
         catch (UnauthorizedAccessException)

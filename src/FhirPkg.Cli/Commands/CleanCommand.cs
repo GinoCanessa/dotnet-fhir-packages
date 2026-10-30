@@ -2,6 +2,7 @@
 
 using System.CommandLine;
 using FhirPkg.Cli.Formatting;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using Spectre.Console;
 
@@ -64,9 +65,9 @@ internal static class CleanCommand
 
             try
             {
-                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
+                CliInvocationContext invocation = await CliInvocationContext.CreateAsync(globalOpts, ct);
                 using FhirPackageManager manager =
-                    ManagerFactory.Create(mgrOptions);
+                    ManagerFactory.Create(invocation);
 
                 // Build a description of what will be cleaned
                 string description = (ciOnly, olderThan) switch
@@ -134,7 +135,7 @@ internal static class CleanCommand
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, $"Cache error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Cache error: {FileSystemFailureContext.FormatMessage(ex)}");
                 return ExitCodes.CacheError;
             }
             catch (OperationCanceledException)
@@ -144,8 +145,7 @@ internal static class CleanCommand
             }
             catch (Exception ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
-                return ExitCodes.GeneralError;
+                return CommandHelpers.WriteException(globalOpts, ex);
             }
         });
 

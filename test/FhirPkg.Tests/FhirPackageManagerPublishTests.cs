@@ -4,6 +4,8 @@ using System.Net;
 using System.Text.Json;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
+using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
@@ -27,6 +29,111 @@ public sealed class FhirPackageManagerPublishTests : IDisposable
     public FhirPackageManagerPublishTests()
     {
         Directory.CreateDirectory(_tempRoot);
+    }
+
+    [Theory]
+    [InlineData(RegistryType.FhirNpm)]
+    [InlineData(RegistryType.Npm)]
+    public async Task Publish_ManagerContextCoversProbeLengthExtractionTargetAndCleanup(RegistryType type)
+    {
+        string path = CreateArchiveFile("example.package", "1.0.0");
+        byte[] originalArchive = File.ReadAllBytes(path);
+        CaptureHandler handler = new();
+        using HttpClient http = new(handler);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_tempRoot);
+        using FhirPackageManager manager = CreateResolvedManager(files.CreateContext(retries: 1), http);
+        files.Enqueue("Probe", ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "publish probe", path));
+        files.Enqueue("GetHandleLength", ScriptedFileSystemPrimitives.NativeFailure<long>(1117, "publish length", path));
+        files.Enqueue("ReadAtAsync", ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "publish read", path));
+        files.Enqueue("DeleteEntry", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "publish cleanup"));
+        string[] variables =
+        [
+            FileSystemRetryOptions.RetryCountEnvironmentVariable,
+            FileSystemRetryOptions.MinimumDelayMillisecondsEnvironmentVariable,
+            FileSystemRetryOptions.MaximumJitterMillisecondsEnvironmentVariable,
+        ];
+        string?[] originals = variables.Select(Environment.GetEnvironmentVariable).ToArray();
+        try
+        {
+            foreach (string variable in variables)
+                Environment.SetEnvironmentVariable(variable, "invalid-after-manager-construction");
+
+            PublishResult result = await manager.PublishAsync(
+                path, CreateTargetEndpoint() with { Type = type }, TestContext.Current.CancellationToken);
+
+            result.Success.ShouldBeTrue();
+            handler.RequestCount.ShouldBe(1);
+            handler.ContentType.ShouldBe(type == RegistryType.Npm ? "application/json" : "application/gzip");
+            files.AsyncWaits.ShouldBe([10, 10, 10, 10]);
+            files.Waits.ShouldBeEmpty();
+            FileSystemPrimitiveCall[] opens = files.Calls.Where(call =>
+                call.Operation == "OpenFileHandle" && call.Path == path).ToArray();
+            opens.ShouldHaveSingleItem();
+            opens[0].Share.ShouldBe(FileShare.Read);
+            opens[0].Options.ShouldBe(FileOptions.Asynchronous | FileOptions.SequentialScan);
+            files.Calls.Count(call => call.Operation == "GetHandleLength" && call.Path == path)
+                .ShouldBeGreaterThanOrEqualTo(3);
+            files.Count("GetTempPath").ShouldBe(type == RegistryType.Npm ? 2 : 1);
+            files.Calls.ShouldContain(call => call.Operation == "DeleteEntry"
+                && call.Path!.StartsWith(_tempRoot, StringComparison.Ordinal));
+            Directory.GetDirectories(_tempRoot).ShouldBeEmpty();
+            File.ReadAllBytes(path).ShouldBe(originalArchive);
+        }
+        finally
+        {
+            for (int index = 0; index < variables.Length; index++)
+                Environment.SetEnvironmentVariable(variables[index], originals[index]);
+        }
+    }
+
+    [Fact]
+    public async Task Publish_TerminalTargetReadReturnsFinalContextWithoutAnotherRequestOrOpen()
+    {
+        string path = CreateArchiveFile("example.package", "1.0.0");
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_tempRoot);
+        CaptureHandler handler = new(() =>
+            files.Set<int>("ReadAtAsync", call =>
+                ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "publish body read", call.Path)));
+        using HttpClient http = new(handler);
+        using FhirPackageManager manager = CreateResolvedManager(files.CreateContext(retries: 2), http);
+
+        PublishResult result = await manager.PublishAsync(
+            path, CreateTargetEndpoint() with { Type = RegistryType.FhirNpm },
+            TestContext.Current.CancellationToken);
+
+        result.Success.ShouldBeFalse();
+        FileSystemFailureContext.TryGetResult(result, out FileSystemFailureContext? failure).ShouldBeTrue();
+        failure!.Path.ShouldBe(path);
+        failure.AttemptCount.ShouldBe(3);
+        failure.RetriesUsed.ShouldBe(2);
+        string message = result.Message.ShouldNotBeNull();
+        message.ShouldContain(path);
+        message.ShouldContain("attempts 3, retries 2");
+        handler.RequestCount.ShouldBe(1);
+        files.Calls.Count(call => call.Operation == "OpenFileHandle" && call.Path == path).ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        Directory.GetDirectories(_tempRoot).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Publish_MissingTarballDoesNotSpendFaultRetries()
+    {
+        string path = Path.Combine(_tempRoot, "missing.tgz");
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_tempRoot);
+        CaptureHandler handler = new();
+        using HttpClient http = new(handler);
+        using FhirPackageManager manager = CreateResolvedManager(files.CreateContext(), http);
+
+        FileNotFoundException exception = await Should.ThrowAsync<FileNotFoundException>(() =>
+            manager.PublishAsync(path, CreateTargetEndpoint(), TestContext.Current.CancellationToken));
+
+        exception.FileName.ShouldBe(path);
+        files.Count("Probe").ShouldBe(1);
+        files.Count("OpenFileHandle").ShouldBe(0);
+        files.Count("GetTempPath").ShouldBe(0);
+        files.AsyncWaits.ShouldBeEmpty();
+        files.Waits.ShouldBeEmpty();
+        handler.RequestCount.ShouldBe(0);
     }
 
     [Fact]
@@ -192,6 +299,84 @@ public sealed class FhirPackageManagerPublishTests : IDisposable
             It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Theory]
+    [InlineData(RegistryType.FhirNpm)]
+    [InlineData(RegistryType.Npm)]
+    public async Task Publish_ManagerAndNpmNormalizationUseAsyncPerChildWaits(RegistryType type)
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package/package.json", """{"name":"example.package","version":"1.0.0"}"""),
+            ArbitraryTarBuilder.File("openapi/schema.json", "{}"),
+            ArbitraryTarBuilder.File("other/data.txt", "payload"));
+        string path = Path.Combine(_tempRoot, "ancillary.tgz");
+        byte[] bytes = archive.ToArray();
+        File.WriteAllBytes(path, bytes);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_tempRoot);
+        HashSet<string> failedDestinations = [];
+        files.Set<bool>("MovePath", call =>
+            Path.GetFileName(call.DestinationPath) == "openapi" && failedDestinations.Add(call.DestinationPath!)
+                ? ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "publish normalization", call.Path)
+                : SystemFileSystemPrimitives.Instance.MovePath(call.Path!, call.DestinationPath!, call.Flags == 1));
+        CaptureHandler handler = new();
+        using HttpClient http = new(handler);
+        using FhirPackageManager manager = CreateResolvedManager(files.CreateContext(retries: 1), http);
+
+        PublishResult result = await manager.PublishAsync(
+            path, CreateTargetEndpoint() with { Type = type }, TestContext.Current.CancellationToken);
+
+        result.Success.ShouldBeTrue();
+        handler.RequestCount.ShouldBe(1);
+        int normalizations = type == RegistryType.Npm ? 2 : 1;
+        failedDestinations.Count.ShouldBe(normalizations);
+        files.Count("MovePath").ShouldBe(3 * normalizations);
+        files.Calls.Where(call => call.Operation == "MovePath" && Path.GetFileName(call.DestinationPath) == "other")
+            .Select(call => call.Path).Distinct().Count().ShouldBe(normalizations);
+        files.AsyncWaits.ShouldBe(type == RegistryType.Npm ? [10, 10] : [10]);
+        files.Waits.ShouldBeEmpty();
+        if (type == RegistryType.FhirNpm)
+        {
+            handler.Body.ShouldBe(bytes);
+        }
+        else
+        {
+            using JsonDocument document = JsonDocument.Parse(handler.Body);
+            JsonElement attachment = document.RootElement.GetProperty("_attachments")
+                .GetProperty("example.package-1.0.0.tgz");
+            Convert.FromBase64String(attachment.GetProperty("data").GetString()!).ShouldBe(bytes);
+            attachment.GetProperty("length").GetInt64().ShouldBe(bytes.Length);
+        }
+        Directory.GetDirectories(_tempRoot).ShouldBeEmpty();
+        File.ReadAllBytes(path).ShouldBe(bytes);
+    }
+
+    [Fact]
+    public async Task Publish_NormalizationExhaustionStopsBeforeAnyRegistryRequest()
+    {
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package/package.json", """{"name":"example.package","version":"1.0.0"}"""),
+            ArbitraryTarBuilder.File("openapi/schema.json", "{}"));
+        string path = Path.Combine(_tempRoot, "normalization-failure.tgz");
+        File.WriteAllBytes(path, archive.ToArray());
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_tempRoot);
+        files.Set<bool>("MovePath", call =>
+            ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "publish normalization", call.Path));
+        CaptureHandler handler = new();
+        using HttpClient http = new(handler);
+        using FhirPackageManager manager = CreateResolvedManager(files.CreateContext(retries: 2), http);
+
+        IOException exception = await Should.ThrowAsync<IOException>(() => manager.PublishAsync(
+            path, CreateTargetEndpoint(), TestContext.Current.CancellationToken));
+
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? context).ShouldBeTrue();
+        context!.RetriesUsed.ShouldBe(2);
+        handler.RequestCount.ShouldBe(0);
+        files.Count("MovePath").ShouldBe(3);
+        files.Count("GetTempPath").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        Directory.GetDirectories(_tempRoot).ShouldBeEmpty();
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_tempRoot))
@@ -208,6 +393,19 @@ public sealed class FhirPackageManagerPublishTests : IDisposable
             AuthHeaderValue = "Bearer read-token",
             CustomHeaders = [("X-Publish-Mode", "read")],
         };
+
+    private FhirPackageManager CreateResolvedManager(FileSystemContext context, HttpClient http)
+    {
+        Mock<IPackageCache> cache = new();
+        cache.SetupGet(value => value.CacheDirectory).Returns(_tempRoot);
+        FhirPackageManagerConfiguration configuration = FhirPackageManagerConfiguration.CreateResolved(
+            CreateOptions(CreateConfiguredReadEndpoint()), context);
+        return FhirPackageManager.CreateWithConfiguration(
+            cache.Object, new Mock<IRegistryClient>().Object, new Mock<IVersionResolver>().Object,
+            new Mock<IDependencyResolver>().Object, new Mock<IPackageIndexer>().Object,
+            configuration, NullLogger<FhirPackageManager>.Instance, null, http,
+            NullLoggerFactory.Instance, redirectsControlled: true);
+    }
 
     private static RegistryEndpoint CreateTargetEndpoint() =>
         new()

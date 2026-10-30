@@ -3,6 +3,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FhirPkg.IO;
 
 namespace FhirPkg.Models;
 
@@ -167,9 +168,19 @@ public record PackageManifest
     public static PackageManifest Deserialize(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        return JsonSerializer.Deserialize<PackageManifest>(stream, s_serializerOptions)
-            ?? throw new JsonException("Deserialization returned null.");
+        return DeserializeCore(FileSystemContext.ProtectRead(stream, context: null));
     }
+
+    internal static PackageManifest Deserialize(Stream stream, FileSystemContext context)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentNullException.ThrowIfNull(context);
+        return DeserializeCore(context.ProtectRead(stream));
+    }
+
+    private static PackageManifest DeserializeCore(Stream stream) =>
+        JsonSerializer.Deserialize<PackageManifest>(stream, s_serializerOptions)
+            ?? throw new JsonException("Deserialization returned null.");
 
     /// <summary>
     /// Serializes this manifest to a JSON string.

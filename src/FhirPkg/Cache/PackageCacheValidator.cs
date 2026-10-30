@@ -2,6 +2,7 @@
 
 using System.Text.Json;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 
 namespace FhirPkg.Cache;
@@ -14,11 +15,20 @@ internal sealed class PackageCacheValidator
     };
 
     private readonly string _cacheRoot;
+    private readonly FileSystemContext _context;
 
+    // Compatibility entry point for standalone callers; cache graphs pass their own context.
     internal PackageCacheValidator(string cacheRoot)
+        : this(cacheRoot, FileSystemContext.CreateDefault())
+    {
+    }
+
+    internal PackageCacheValidator(string cacheRoot, FileSystemContext context)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
-        _cacheRoot = Path.GetFullPath(cacheRoot);
+        ArgumentNullException.ThrowIfNull(context);
+        _context = context;
+        _cacheRoot = context.FileSystem.GetFullPath(cacheRoot);
     }
 
     internal PackageCacheInspection Inspect(PackageReference reference)
@@ -29,7 +39,7 @@ internal sealed class PackageCacheValidator
 
     internal PackageCacheInspection Inspect(PackageCacheKey cacheKey)
     {
-        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot);
+        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot, _context);
         PackageCacheInspection? ancestorFailure =
             InspectTargetAncestors(cacheKey, targetPath);
         if (ancestorFailure is not null)
@@ -45,83 +55,16 @@ internal sealed class PackageCacheValidator
 
         try
         {
-            using FileStream stream =
-                PackageCacheRegularFile.OpenRead(manifestPath);
+            using Stream stream =
+                _context.FileSystem.OpenProtectedRegularRead(manifestPath);
             PackageManifest? manifest = JsonSerializer.Deserialize<PackageManifest>(
                 stream,
                 s_jsonOptions);
-            if (manifest is null)
-            {
-                return Corrupt(
-                    cacheKey,
-                    targetPath,
-                    contentPath,
-                    manifestPath,
-                    "Package manifest JSON did not contain an object.");
-            }
-
-            PackageIdentityExpectation expectation =
-                PackageIdentityValidator.CreateExpectation(
-                    cacheKey.DisplayReference);
-            _ = PackageIdentityValidator.ValidateExpected(
-                manifest,
-                expectation,
-                cacheKey.DisplayReference.ToString());
-            return Valid(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                manifest);
+            return Complete(cacheKey, targetPath, contentPath, manifestPath, manifest);
         }
-        catch (PackageInstallException exception)
+        catch (Exception exception) when (IsInspectionFailure(exception))
         {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
-        }
-        catch (JsonException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
-        }
-        catch (PlatformNotSupportedException)
-        {
-            throw;
-        }
-        catch (NotSupportedException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
-        }
-        catch (UnauthorizedAccessException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
-        }
-        catch (IOException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
+            return CorruptFrom(exception, cacheKey, targetPath, contentPath, manifestPath);
         }
     }
 
@@ -138,40 +81,72 @@ internal sealed class PackageCacheValidator
         PackageCacheKey cacheKey,
         CancellationToken cancellationToken)
     {
-        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot);
+        cancellationToken.ThrowIfCancellationRequested();
+        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot, _context);
         PackageCacheInspection? ancestorFailure =
-            InspectTargetAncestors(cacheKey, targetPath);
+            await InspectTargetAncestorsAsync(cacheKey, targetPath, cancellationToken)
+                .ConfigureAwait(false);
         if (ancestorFailure is not null)
             return ancestorFailure;
 
-        PackageCacheInspection? shapeFailure = InspectShape(
-            cacheKey,
-            targetPath,
-            out string contentPath,
-            out string manifestPath);
+        (PackageCacheInspection? shapeFailure, string contentPath, string manifestPath) =
+            await InspectShapeAsync(cacheKey, targetPath, cancellationToken)
+                .ConfigureAwait(false);
         if (shapeFailure is not null)
             return shapeFailure;
 
         try
         {
-            await using FileStream stream =
-                PackageCacheRegularFile.OpenRead(manifestPath);
+            await using Stream stream =
+                await _context.FileSystem.OpenProtectedRegularReadAsync(
+                        manifestPath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             PackageManifest? manifest =
                 await JsonSerializer.DeserializeAsync<PackageManifest>(
                         stream,
                         s_jsonOptions,
                         cancellationToken)
                     .ConfigureAwait(false);
-            if (manifest is null)
-            {
-                return Corrupt(
-                    cacheKey,
-                    targetPath,
-                    contentPath,
-                    manifestPath,
-                    "Package manifest JSON did not contain an object.");
-            }
+            return Complete(cacheKey, targetPath, contentPath, manifestPath, manifest);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsInspectionFailure(exception))
+        {
+            return CorruptFrom(exception, cacheKey, targetPath, contentPath, manifestPath);
+        }
+    }
 
+    // Exhausted physical read faults stay Corrupt; cancellation and platform errors escape.
+    private static bool IsInspectionFailure(Exception exception) =>
+        exception is PackageInstallException
+            or JsonException
+            or UnauthorizedAccessException
+            or IOException
+        || (exception is NotSupportedException and not PlatformNotSupportedException);
+
+    private static PackageCacheInspection Complete(
+        PackageCacheKey cacheKey,
+        string targetPath,
+        string contentPath,
+        string manifestPath,
+        PackageManifest? manifest)
+    {
+        if (manifest is null)
+        {
+            return Corrupt(
+                cacheKey,
+                targetPath,
+                contentPath,
+                manifestPath,
+                "Package manifest JSON did not contain an object.");
+        }
+
+        try
+        {
             PackageIdentityExpectation expectation =
                 PackageIdentityValidator.CreateExpectation(
                     cacheKey.DisplayReference);
@@ -179,111 +154,39 @@ internal sealed class PackageCacheValidator
                 manifest,
                 expectation,
                 cacheKey.DisplayReference.ToString());
-            return Valid(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                manifest);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
         }
         catch (PackageInstallException exception)
         {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
+            return CorruptFrom(exception, cacheKey, targetPath, contentPath, manifestPath);
         }
-        catch (JsonException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
-        }
-        catch (PlatformNotSupportedException)
-        {
-            throw;
-        }
-        catch (NotSupportedException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
-        }
-        catch (UnauthorizedAccessException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
-        }
-        catch (IOException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
-        }
+
+        return Valid(cacheKey, targetPath, contentPath, manifestPath, manifest);
     }
 
-    private static PackageCacheInspection? InspectShape(
+    private PackageCacheInspection? InspectShape(
         PackageCacheKey cacheKey,
         string targetPath,
         out string contentPath,
-        out string manifestPath)
+        out string manifestPath,
+        CancellationToken cancellationToken = default)
     {
         contentPath = Path.Combine(targetPath, "package");
         manifestPath = Path.Combine(contentPath, "package.json");
-        FileAttributes targetAttributes;
+        FileSystemProbeResult target;
         try
         {
-            targetAttributes = File.GetAttributes(targetPath);
+            target = _context.FileSystem.Probe(targetPath, cancellationToken);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            return CorruptFrom(exception, cacheKey, targetPath, null, null);
         }
 
-        catch (FileNotFoundException)
-        {
+        // A genuinely absent target is an explicit Missing result, never a retried fault.
+        if (target.Kind == FileSystemEntryKind.Missing)
             return Missing(cacheKey, targetPath);
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return Missing(cacheKey, targetPath);
-        }
-        catch (UnauthorizedAccessException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                null,
-                null,
-                exception.Message);
-        }
-        catch (IOException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                null,
-                null,
-                exception.Message);
-        }
 
-        if (!targetAttributes.HasFlag(FileAttributes.Directory)
-            || targetAttributes.HasFlag(FileAttributes.ReparsePoint))
+        if (target.Kind != FileSystemEntryKind.Directory)
         {
             return Corrupt(
                 cacheKey,
@@ -298,37 +201,24 @@ internal sealed class PackageCacheValidator
             // Without an exact root candidate, retain standard-only cache
             // compatibility, including the host filesystem's case behavior.
             // With one, incidental package entries must not redirect root content.
-            if (HasExactManifestCandidate(targetPath)
-                && !HasExactStandardManifestCandidate(targetPath))
+            if (HasExactManifestCandidate(targetPath, cancellationToken)
+                && !HasExactStandardManifestCandidate(targetPath, cancellationToken))
             {
                 contentPath = targetPath;
                 manifestPath = Path.Combine(targetPath, "package.json");
             }
         }
-        catch (UnauthorizedAccessException exception)
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
         {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
-        }
-        catch (IOException exception)
-        {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                contentPath,
-                manifestPath,
-                exception.Message);
+            return CorruptFrom(exception, cacheKey, targetPath, contentPath, manifestPath);
         }
 
         PackageCacheInspection? contentFailure = InspectRequiredPath(
             cacheKey,
             targetPath,
             contentPath,
-            expectDirectory: true);
+            expectDirectory: true,
+            cancellationToken);
         if (contentFailure is not null)
             return contentFailure;
 
@@ -336,45 +226,131 @@ internal sealed class PackageCacheValidator
             cacheKey,
             targetPath,
             manifestPath,
-            expectDirectory: false);
+            expectDirectory: false,
+            cancellationToken);
     }
 
-    private static bool HasExactStandardManifestCandidate(string targetPath) =>
-        TryGetExactChildAttributes(targetPath, "package", out FileAttributes attributes)
-        && attributes.HasFlag(FileAttributes.Directory)
-        && !attributes.HasFlag(FileAttributes.ReparsePoint)
-        && HasExactManifestCandidate(Path.Combine(targetPath, "package"));
+    private bool HasExactStandardManifestCandidate(
+        string targetPath,
+        CancellationToken cancellationToken) =>
+        TryGetExactChildKind(targetPath, "package", cancellationToken, out FileSystemEntryKind kind)
+        && kind == FileSystemEntryKind.Directory
+        && HasExactManifestCandidate(Path.Combine(targetPath, "package"), cancellationToken);
 
-    private static bool HasExactManifestCandidate(string contentPath) =>
-        TryGetExactChildAttributes(contentPath, "package.json", out FileAttributes attributes)
-        && !attributes.HasFlag(FileAttributes.Directory)
-        && !attributes.HasFlag(FileAttributes.ReparsePoint)
-        && !attributes.HasFlag(FileAttributes.Device);
+    private async ValueTask<(PackageCacheInspection? Failure, string ContentPath, string ManifestPath)>
+        InspectShapeAsync(
+            PackageCacheKey cacheKey,
+            string targetPath,
+            CancellationToken cancellationToken)
+    {
+        string contentPath = Path.Combine(targetPath, "package");
+        string manifestPath = Path.Combine(contentPath, "package.json");
+        FileSystemProbeResult target;
+        try
+        {
+            target = await _context.FileSystem.ProbeAsync(targetPath, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            return (CorruptFrom(exception, cacheKey, targetPath, null, null), contentPath, manifestPath);
+        }
 
-    private static bool TryGetExactChildAttributes(
+        if (target.Kind == FileSystemEntryKind.Missing)
+            return (Missing(cacheKey, targetPath), contentPath, manifestPath);
+
+        if (target.Kind != FileSystemEntryKind.Directory)
+        {
+            return (Corrupt(
+                cacheKey, targetPath, null, null,
+                "The cache target is not a regular directory."), contentPath, manifestPath);
+        }
+
+        try
+        {
+            if (await HasExactManifestCandidateAsync(targetPath, cancellationToken).ConfigureAwait(false)
+                && !await HasExactStandardManifestCandidateAsync(targetPath, cancellationToken).ConfigureAwait(false))
+            {
+                contentPath = targetPath;
+                manifestPath = Path.Combine(targetPath, "package.json");
+            }
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            return (CorruptFrom(exception, cacheKey, targetPath, contentPath, manifestPath), contentPath, manifestPath);
+        }
+
+        PackageCacheInspection? failure = await InspectRequiredPathAsync(
+                cacheKey, targetPath, contentPath, expectDirectory: true, cancellationToken)
+            .ConfigureAwait(false)
+            ?? await InspectRequiredPathAsync(
+                    cacheKey, targetPath, manifestPath, expectDirectory: false, cancellationToken)
+                .ConfigureAwait(false);
+        return (failure, contentPath, manifestPath);
+    }
+
+    private async ValueTask<bool> HasExactStandardManifestCandidateAsync(
+        string targetPath,
+        CancellationToken cancellationToken) =>
+        await GetExactChildKindAsync(targetPath, "package", cancellationToken).ConfigureAwait(false)
+            == FileSystemEntryKind.Directory
+        && await HasExactManifestCandidateAsync(Path.Combine(targetPath, "package"), cancellationToken)
+            .ConfigureAwait(false);
+
+    private async ValueTask<bool> HasExactManifestCandidateAsync(
+        string contentPath,
+        CancellationToken cancellationToken) =>
+        await GetExactChildKindAsync(contentPath, "package.json", cancellationToken).ConfigureAwait(false)
+            == FileSystemEntryKind.File;
+
+    private async ValueTask<FileSystemEntryKind> GetExactChildKindAsync(
         string parentPath,
         string name,
-        out FileAttributes attributes)
+        CancellationToken cancellationToken)
     {
-        foreach (string path in Directory.EnumerateFileSystemEntries(
-            parentPath,
-            name,
-            SearchOption.TopDirectoryOnly))
+        string[] paths = await _context.FileSystem.SnapshotDirectoryAsync(parentPath, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (string path in paths)
         {
             if (string.Equals(Path.GetFileName(path), name, StringComparison.Ordinal))
             {
-                attributes = File.GetAttributes(path);
-                return true;
+                return (await _context.FileSystem.ProbeAsync(path, cancellationToken)
+                    .ConfigureAwait(false)).Kind;
             }
         }
 
-        attributes = default;
+        return FileSystemEntryKind.Missing;
+    }
+
+    private bool HasExactManifestCandidate(
+        string contentPath,
+        CancellationToken cancellationToken) =>
+        TryGetExactChildKind(contentPath, "package.json", cancellationToken, out FileSystemEntryKind kind)
+        && kind == FileSystemEntryKind.File;
+
+    private bool TryGetExactChildKind(
+        string parentPath,
+        string name,
+        CancellationToken cancellationToken,
+        out FileSystemEntryKind kind)
+    {
+        foreach (string path in _context.FileSystem.SnapshotDirectory(parentPath, cancellationToken))
+        {
+            if (string.Equals(Path.GetFileName(path), name, StringComparison.Ordinal))
+            {
+                kind = _context.FileSystem.Probe(path, cancellationToken).Kind;
+                return kind != FileSystemEntryKind.Missing;
+            }
+        }
+
+        kind = FileSystemEntryKind.Missing;
         return false;
     }
 
     private PackageCacheInspection? InspectTargetAncestors(
         PackageCacheKey cacheKey,
-        string targetPath)
+        string targetPath,
+        CancellationToken cancellationToken = default)
     {
         string relativePath = Path.GetRelativePath(_cacheRoot, targetPath);
         string? relativeParent = Path.GetDirectoryName(relativePath);
@@ -389,9 +365,12 @@ internal sealed class PackageCacheValidator
             currentPath = Path.Combine(currentPath, segment);
             try
             {
-                FileAttributes attributes = File.GetAttributes(currentPath);
-                if (!attributes.HasFlag(FileAttributes.Directory)
-                    || attributes.HasFlag(FileAttributes.ReparsePoint))
+                FileSystemProbeResult probe =
+                    _context.FileSystem.Probe(currentPath, cancellationToken);
+                if (probe.Kind == FileSystemEntryKind.Missing)
+                    return null;
+
+                if (probe.Kind != FileSystemEntryKind.Directory)
                 {
                     return Corrupt(
                         cacheKey,
@@ -402,32 +381,14 @@ internal sealed class PackageCacheValidator
                         isRepairable: false);
                 }
             }
-            catch (FileNotFoundException)
+            catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
             {
-                return null;
-            }
-            catch (DirectoryNotFoundException)
-            {
-                return null;
-            }
-            catch (UnauthorizedAccessException exception)
-            {
-                return Corrupt(
+                return CorruptFrom(
+                    exception,
                     cacheKey,
                     targetPath,
                     null,
                     null,
-                    exception.Message,
-                    isRepairable: false);
-            }
-            catch (IOException exception)
-            {
-                return Corrupt(
-                    cacheKey,
-                    targetPath,
-                    null,
-                    null,
-                    exception.Message,
                     isRepairable: false);
             }
         }
@@ -435,65 +396,127 @@ internal sealed class PackageCacheValidator
         return null;
     }
 
-    private static PackageCacheInspection? InspectRequiredPath(
+    private PackageCacheInspection? InspectRequiredPath(
         PackageCacheKey cacheKey,
         string targetPath,
         string path,
-        bool expectDirectory)
+        bool expectDirectory,
+        CancellationToken cancellationToken)
     {
+        string? contentPath = expectDirectory ? path : Path.GetDirectoryName(path);
+        string? manifestPath = expectDirectory ? null : path;
         try
         {
-            FileAttributes attributes = File.GetAttributes(path);
-            bool isDirectory = attributes.HasFlag(FileAttributes.Directory);
-            if (isDirectory != expectDirectory
-                || attributes.HasFlag(FileAttributes.ReparsePoint)
-                || (!expectDirectory && attributes.HasFlag(FileAttributes.Device)))
+            FileSystemProbeResult probe = _context.FileSystem.Probe(path, cancellationToken);
+            if (probe.Kind == FileSystemEntryKind.Missing)
             {
                 return Corrupt(
                     cacheKey,
                     targetPath,
-                    expectDirectory ? path : Path.GetDirectoryName(path),
-                    expectDirectory ? null : path,
+                    contentPath,
+                    manifestPath,
+                    "A required cache path is missing.");
+            }
+
+            FileSystemEntryKind expected = expectDirectory
+                ? FileSystemEntryKind.Directory
+                : FileSystemEntryKind.File;
+            if (probe.Kind != expected)
+            {
+                return Corrupt(
+                    cacheKey,
+                    targetPath,
+                    contentPath,
+                    manifestPath,
                     expectDirectory
                         ? "The package content path is not a regular directory."
                         : "The package manifest is not a regular file.");
             }
         }
-        catch (FileNotFoundException)
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
         {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                expectDirectory ? path : Path.GetDirectoryName(path),
-                expectDirectory ? null : path,
-                "A required cache path is missing.");
+            return CorruptFrom(exception, cacheKey, targetPath, contentPath, manifestPath);
         }
-        catch (DirectoryNotFoundException)
+
+        return null;
+    }
+
+    private async ValueTask<PackageCacheInspection?> InspectTargetAncestorsAsync(
+        PackageCacheKey cacheKey,
+        string targetPath,
+        CancellationToken cancellationToken)
+    {
+        string relativePath = Path.GetRelativePath(_cacheRoot, targetPath);
+        string? relativeParent = Path.GetDirectoryName(relativePath);
+        if (string.IsNullOrEmpty(relativeParent))
+            return null;
+
+        string currentPath = _cacheRoot;
+        foreach (string segment in relativeParent.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries))
         {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                expectDirectory ? path : Path.GetDirectoryName(path),
-                expectDirectory ? null : path,
-                "A required cache path is missing.");
+            currentPath = Path.Combine(currentPath, segment);
+            try
+            {
+                FileSystemProbeResult probe = await _context.FileSystem.ProbeAsync(currentPath, cancellationToken)
+                    .ConfigureAwait(false);
+                if (probe.Kind == FileSystemEntryKind.Missing)
+                    return null;
+
+                if (probe.Kind != FileSystemEntryKind.Directory)
+                {
+                    return Corrupt(
+                        cacheKey, targetPath, null, null,
+                        "A cache target ancestor is not a regular directory.",
+                        isRepairable: false);
+                }
+            }
+            catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+            {
+                return CorruptFrom(
+                    exception, cacheKey, targetPath, null, null, isRepairable: false);
+            }
         }
-        catch (UnauthorizedAccessException exception)
+
+        return null;
+    }
+
+    private async ValueTask<PackageCacheInspection?> InspectRequiredPathAsync(
+        PackageCacheKey cacheKey,
+        string targetPath,
+        string path,
+        bool expectDirectory,
+        CancellationToken cancellationToken)
+    {
+        string? contentPath = expectDirectory ? path : Path.GetDirectoryName(path);
+        string? manifestPath = expectDirectory ? null : path;
+        try
         {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                expectDirectory ? path : Path.GetDirectoryName(path),
-                expectDirectory ? null : path,
-                exception.Message);
+            FileSystemProbeResult probe = await _context.FileSystem.ProbeAsync(path, cancellationToken)
+                .ConfigureAwait(false);
+            if (probe.Kind == FileSystemEntryKind.Missing)
+            {
+                return Corrupt(
+                    cacheKey, targetPath, contentPath, manifestPath,
+                    "A required cache path is missing.");
+            }
+
+            FileSystemEntryKind expected = expectDirectory
+                ? FileSystemEntryKind.Directory
+                : FileSystemEntryKind.File;
+            if (probe.Kind != expected)
+            {
+                return Corrupt(
+                    cacheKey, targetPath, contentPath, manifestPath,
+                    expectDirectory
+                        ? "The package content path is not a regular directory."
+                        : "The package manifest is not a regular file.");
+            }
         }
-        catch (IOException exception)
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
         {
-            return Corrupt(
-                cacheKey,
-                targetPath,
-                expectDirectory ? path : Path.GetDirectoryName(path),
-                expectDirectory ? null : path,
-                exception.Message);
+            return CorruptFrom(exception, cacheKey, targetPath, contentPath, manifestPath);
         }
 
         return null;
@@ -542,4 +565,25 @@ internal sealed class PackageCacheValidator
             CorruptionReason = reason,
             IsRepairable = isRepairable
         };
+
+    // Embeds the final retry evidence so an exhausted physical failure is diagnosable.
+    private static PackageCacheInspection CorruptFrom(
+        Exception exception,
+        PackageCacheKey cacheKey,
+        string targetPath,
+        string? contentPath,
+        string? manifestPath,
+        bool isRepairable = true)
+    {
+        PackageCacheInspection inspection = Corrupt(
+            cacheKey,
+            targetPath,
+            contentPath,
+            manifestPath,
+            FileSystemFailureContext.FormatMessage(exception),
+            isRepairable);
+        return FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? context)
+            ? inspection with { FailureContext = context }
+            : inspection;
+    }
 }

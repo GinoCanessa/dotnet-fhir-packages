@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License. See LICENSE in the project root.
 
 using System.Text.Json;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry.CiBuild;
 using FhirPkg.Resolution;
@@ -77,7 +78,24 @@ public sealed class FhirCiBuildClient : RegistryClientBase, IRegistryClient, ICi
         ILogger<FhirCiBuildClient> logger,
         TimeProvider? timeProvider = null,
         string? gitHubToken = null)
-        : base(transport, endpoint, logger)
+        : this(
+            transport,
+            endpoint,
+            logger,
+            timeProvider,
+            gitHubToken,
+            FileSystemContext.CreateDefault())
+    {
+    }
+
+    internal FhirCiBuildClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<FhirCiBuildClient> logger,
+        TimeProvider? timeProvider,
+        string? gitHubToken,
+        FileSystemContext context)
+        : base(transport, endpoint, logger, context)
     {
         _timeProvider = timeProvider ?? TimeProvider.System;
         _selector = new CiBuildCanonicalRepositorySelector(

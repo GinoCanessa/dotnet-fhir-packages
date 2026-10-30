@@ -73,9 +73,9 @@ public sealed class RestoreCommandTests : IntegrationTestBase
 
         (int exitCode, string _, string standardError) =
             await RunCliAsync(
-                $"restore \"{projectPath}\" {optionArguments}");
+                $"restore \"{projectPath}\" {optionArguments} --fs-retry-count 0");
 
-        exitCode.ShouldNotBe(0);
+        exitCode.ShouldBe(1);
         standardError.ShouldContain(errorToken);
     }
 

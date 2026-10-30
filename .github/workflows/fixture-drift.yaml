@@ -1,0 +1,166 @@
+name: Fixture drift check
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixture-drift:
+    name: fixture-drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Resolve corpus key
+        id: key
+        shell: pwsh
+        run: |
+          $corpusBlob =
+            git rev-parse 'HEAD:test/FhirPkg.Qualification/qualification-corpus.json'
+          if ($LASTEXITCODE -ne 0 -or "$corpusBlob" -cnotmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
+          {
+            throw "Expected the qualification corpus blob id to be 40 or 64 lowercase hex characters, got '$corpusBlob'."
+          }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "corpus_blob=$corpusBlob"
+
+      - name: Restore qualification harness
+        run: dotnet restore test/FhirPkg.Qualification/FhirPkg.Qualification.csproj
+
+      - name: Freeze verified fixture bundle
+        shell: pwsh
+        run: |
+          $bundle = Join-Path '${{ runner.temp }}' 'fixture-bundle'
+          $cache = Join-Path '${{ runner.temp }}' 'fixture-drift-cache'
+          $report = Join-Path '${{ runner.temp }}' 'fixture-drift-report.json'
+          dotnet run `
+            --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
+            --configuration Release `
+            --framework net10.0 `
+            --no-restore `
+            -- `
+            --freeze-bundle $bundle `
+            --cache $cache `
+            --output $report `
+            --corpus test/FhirPkg.Qualification/qualification-corpus.json `
+            --summary $env:GITHUB_STEP_SUMMARY `
+            --summary-title fixture-drift
+
+      - name: Report missing drift report
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $report = Join-Path '${{ runner.temp }}' 'fixture-drift-report.json'
+          if (!(Test-Path -LiteralPath $report -PathType Leaf))
+          {
+            $message =
+              'The fixture drift check produced no report; the failing step above (corpus key, restore, or harness build) has the cause.'
+            Write-Output "::error title=No fixture drift report::$message"
+            try
+            {
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $message
+            }
+            catch
+            {
+              Write-Warning "The missing-report summary was not written: $($_.Exception.Message)"
+            }
+          }
+
+      # A bundle is uploaded only from a passing freeze, under a name keyed by
+      # the corpus file's git blob id, so a consumer can match it to the exact
+      # corpus it was verified against.
+      - name: Upload frozen fixture bundle
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-bundle-v1-${{ steps.key.outputs.corpus_blob }}
+          path: ${{ runner.temp }}/fixture-bundle/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Upload drift report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-drift-report-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture-drift-report.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  live-registry-interop:
+    name: live-registry-interop
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Informational only: live registries change without notice, so this job
+    # reports today's interoperability but never fails the run, never gates
+    # publication, and never freezes or uploads fixture bytes.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Restore qualification harness
+        run: dotnet restore test/FhirPkg.Qualification/FhirPkg.Qualification.csproj
+
+      - name: Run LIVE registry interoperability
+        shell: pwsh
+        env:
+          SUMMARY_TITLE: 'LIVE — informational; never gates publication; never feeds qualification'
+        run: |
+          $cache = Join-Path '${{ runner.temp }}' 'live-registry-interop-cache'
+          $report = Join-Path '${{ runner.temp }}' 'live-registry-interop-report.json'
+          dotnet run `
+            --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
+            --configuration Release `
+            --framework net10.0 `
+            --no-restore `
+            -- `
+            --cache $cache `
+            --output $report `
+            --corpus test/FhirPkg.Qualification/qualification-corpus.json `
+            --summary $env:GITHUB_STEP_SUMMARY `
+            --summary-title $env:SUMMARY_TITLE
+
+      - name: Report missing live interop report
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $report = Join-Path '${{ runner.temp }}' 'live-registry-interop-report.json'
+          if (!(Test-Path -LiteralPath $report -PathType Leaf))
+          {
+            $message =
+              'The LIVE registry interoperability run produced no report; the failing step above (restore or harness build) has the cause.'
+            Write-Output "::error title=No live interop report::$message"
+            try
+            {
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $message
+            }
+            catch
+            {
+              Write-Warning "The missing-report summary was not written: $($_.Exception.Message)"
+            }
+          }
+
+      - name: Upload live interop report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-registry-interop-report-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/live-registry-interop-report.json
+          if-no-files-found: warn
+          retention-days: 30

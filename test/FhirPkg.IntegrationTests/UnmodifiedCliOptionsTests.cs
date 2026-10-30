@@ -48,6 +48,93 @@ public sealed class UnmodifiedCliOptionsTests : IntegrationTestBase
         new ConfigFile().Unmodified.ShouldBeNull();
     }
 
+    [Fact]
+    public void RetryOptions_TrackEachUnspecifiedValueAndParseRecursively()
+    {
+        RootCommand root = Program.BuildRootCommand();
+        string[][] placements =
+        [
+            ["--fs-retry-count", "0", "install", "test.package#1.0.0"],
+            ["install", "test.package#1.0.0", "--fs-retry-count", "0"],
+            ["--fs-min-delay-ms", "0", "restore", "project"],
+            ["restore", "project", "--fs-min-delay-ms", "0"],
+            ["--fs-jitter-max-ms", "0", "list"],
+            ["list", "--fs-jitter-max-ms", "0"],
+        ];
+        foreach (string[] arguments in placements)
+        {
+            ParseResult parsed = root.Parse([.. arguments, "--no-color", "false"]);
+            parsed.Errors.ShouldBeEmpty();
+            GlobalOptions options = parsed.GetGlobalOptions();
+            options.FileSystemRetryCount.ShouldBe(arguments.Contains("--fs-retry-count") ? 0 : null);
+            options.FileSystemMinimumDelayMilliseconds.ShouldBe(arguments.Contains("--fs-min-delay-ms") ? 0 : null);
+            options.FileSystemMaximumJitterMilliseconds.ShouldBe(arguments.Contains("--fs-jitter-max-ms") ? 0 : null);
+        }
+
+        GlobalOptionsBinder.FileSystemRetryCountOption.Recursive.ShouldBeTrue();
+        GlobalOptionsBinder.FileSystemMinimumDelayOption.Recursive.ShouldBeTrue();
+        GlobalOptionsBinder.FileSystemMaximumJitterOption.Recursive.ShouldBeTrue();
+        GlobalOptions unspecified = new();
+        unspecified.FileSystemRetryCount.ShouldBeNull();
+        unspecified.FileSystemMinimumDelayMilliseconds.ShouldBeNull();
+        unspecified.FileSystemMaximumJitterMilliseconds.ShouldBeNull();
+    }
+
+    [Fact]
+    public void BuildManagerOptions_PreservesConfigurationKeysAndFlagPrecedence()
+    {
+        Func<ConfigFile?>? originalLoader = GlobalOptions.ConfigLoaderOverride;
+        int configLoads = 0;
+        try
+        {
+            GlobalOptions.ConfigLoaderOverride = () =>
+            {
+                configLoads++;
+                return new ConfigFile
+                {
+                    CachePath = Path.Combine(TempCacheDir, "configured"),
+                    Unmodified = true,
+                    HttpTimeout = 42,
+                    IncludeCiBuilds = false,
+                    GitHubToken = "configured-test-token",
+                    VerifyChecksums = false,
+                    Registries =
+                    [
+                        new ConfigRegistry { Url = "https://registry.invalid/", Type = "Npm", Auth = "test-only" },
+                        new ConfigRegistry { Url = null },
+                    ],
+                };
+            };
+            FhirPackageManagerOptions options = new GlobalOptions
+            {
+                CachePath = TempCacheDir,
+                Unmodified = false,
+                GitHubToken = "flag-test-token",
+                FileSystemRetryCount = 0,
+                FileSystemMinimumDelayMilliseconds = 0,
+                FileSystemMaximumJitterMilliseconds = 0,
+            }.BuildManagerOptions();
+
+            configLoads.ShouldBe(1);
+            options.CachePath.ShouldBe(TempCacheDir);
+            options.Unmodified.ShouldBeFalse();
+            options.GitHubToken.ShouldBe("flag-test-token");
+            options.HttpTimeout.ShouldBe(TimeSpan.FromSeconds(42));
+            options.IncludeCiBuilds.ShouldBeFalse();
+            options.VerifyChecksums.ShouldBeFalse();
+            options.Registries.ShouldHaveSingleItem().Url.ShouldBe("https://registry.invalid/");
+            options.Registries[0].Type.ShouldBe(RegistryType.Npm);
+            options.Registries[0].AuthHeaderValue.ShouldBe("test-only");
+            options.FileSystemRetry.RetryCount.ShouldBe(0);
+            options.FileSystemRetry.MinimumDelayMilliseconds.ShouldBe(0);
+            options.FileSystemRetry.MaximumJitterMilliseconds.ShouldBe(0);
+        }
+        finally
+        {
+            GlobalOptions.ConfigLoaderOverride = originalLoader;
+        }
+    }
+
     public static TheoryData<string, string, bool, bool> HandlerCases
     {
         get

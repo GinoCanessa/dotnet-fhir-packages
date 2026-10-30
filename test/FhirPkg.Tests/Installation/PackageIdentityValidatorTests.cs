@@ -2,7 +2,9 @@
 
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
+using FhirPkg.Tests.Support;
 using Shouldly;
 using Xunit;
 
@@ -352,6 +354,33 @@ public class PackageIdentityValidatorTests : IDisposable
         ((int)PackageProgressPhase.WaitingForLock).ShouldBe(8);
         ((int)PackageProgressPhase.Repairing).ShouldBe(9);
         ((int)PackageProgressPhase.Committing).ShouldBe(10);
+    }
+
+    [Fact]
+    public async Task ManifestRead_ExhaustionPreservesIdentityValidationWrapping()
+    {
+        string manifestPath = await WriteManifestAsync(
+            """{"name":"example.package","version":"1.2.3"}""");
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(
+            SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<int>("ReadAtAsync", call =>
+            ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "ReadAtAsync", call.Path));
+        PackageIdentityExpectation expectation =
+            PackageIdentityValidator.CreateExpectation(
+                new PackageReference("example.package", "1.2.3"));
+
+        PackageInstallException exception =
+            await Should.ThrowAsync<PackageInstallException>(
+                () => PackageIdentityValidator.ValidateExpectedAsync(
+                    manifestPath,
+                    expectation,
+                    "example.package#1.2.3",
+                    primitives.CreateContext(retries: 2),
+                    TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(PackageInstallErrorCode.InvalidArchive);
+        primitives.Count("ReadAtAsync").ShouldBe(3);
     }
 
     private async Task<string> WriteManifestAsync(string content)

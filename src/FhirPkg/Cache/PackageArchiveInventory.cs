@@ -2,6 +2,7 @@
 
 using System.Text;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 
 namespace FhirPkg.Cache;
 
@@ -256,19 +257,31 @@ internal sealed class PackageArchiveInventory
 
     internal static PackageArchiveInventory FromFileSystem(
         string extractedPath,
-        string? directive)
+        string? directive) =>
+        FromFileSystem(extractedPath, directive, FileSystemContext.CreateDefault());
+
+    internal static PackageArchiveInventory FromFileSystem(
+        string extractedPath,
+        string? directive,
+        FileSystemContext context)
     {
+        ArgumentNullException.ThrowIfNull(context);
+        ResilientFileSystem fileSystem = context.FileSystem;
+        string fullExtractedPath = fileSystem.GetFullPath(extractedPath);
         PackageInstallLimits limits = new PackageInstallLimits();
         PackageArchiveInventory inventory = new PackageArchiveInventory(limits);
         Stack<string> pendingDirectories = new Stack<string>();
-        pendingDirectories.Push(extractedPath);
+        pendingDirectories.Push(fullExtractedPath);
 
         while (pendingDirectories.Count > 0)
         {
             string directory = pendingDirectories.Pop();
-            foreach (string entryPath in Directory.EnumerateFileSystemEntries(directory))
+            // One directory is materialized at a time; a failed attempt's private
+            // list is discarded, so the inventory only sees a successful snapshot.
+            string[] entryPaths = fileSystem.SnapshotDirectory(directory);
+            foreach (string entryPath in entryPaths)
             {
-                FileAttributes attributes = File.GetAttributes(entryPath);
+                FileAttributes attributes = fileSystem.GetAttributes(entryPath);
                 if ((attributes & FileAttributes.ReparsePoint) != 0)
                 {
                     throw InvalidArchive(
@@ -277,7 +290,7 @@ internal sealed class PackageArchiveInventory
                 }
 
                 bool isDirectory = (attributes & FileAttributes.Directory) != 0;
-                string relativePath = Path.GetRelativePath(extractedPath, entryPath);
+                string relativePath = Path.GetRelativePath(fullExtractedPath, entryPath);
                 PortableArchivePath portablePath = PortableArchivePath.Create(
                     relativePath,
                     isDirectory,

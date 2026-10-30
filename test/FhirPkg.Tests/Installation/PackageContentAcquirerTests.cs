@@ -6,7 +6,10 @@ using System.Security.Cryptography;
 using System.Text;
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
+using FhirPkg.Tests.Support;
+using Microsoft.Win32.SafeHandles;
 using Shouldly;
 using Xunit;
 
@@ -312,29 +315,344 @@ public class PackageContentAcquirerTests : IDisposable
         AssertNoStagingOperations();
     }
 
-    [Fact]
-    public async Task DiskPackageCache_ExtractionLimitFailure_CleansOperation()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DiskPackageCache_ExtractionLimitFailure_CleansOperationWithoutReplacingPrimary(bool import)
     {
         using MemoryStream archive = CreatePackageTarball();
-        using DiskPackageCache cache = new DiskPackageCache(_cacheRoot);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        for (int attempt = 0; attempt < 3; attempt++)
+            files.Enqueue("Unlock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "acquired owner unlock"));
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), files.CreateContext(retries: 2));
         PackageInstallLimits limits = CreateLimits(archive.Length);
         limits.MaxExpandedBytes = 128;
         limits.MaxEntryBytes = 16;
 
         PackageInstallException exception =
             await Should.ThrowAsync<PackageInstallException>(
-                () => cache.InstallAsync(
-                    new PackageReference("example.package", "1.0.0"),
-                    archive,
-                    new InstallCacheOptions
-                    {
-                        VerifyChecksum = false,
-                        Limits = limits
-                    },
-                    TestContext.Current.CancellationToken));
+                () => import
+                    ? cache.ImportAsync(
+                        archive,
+                        new InstallCacheOptions { VerifyChecksum = false, Limits = limits },
+                        TestContext.Current.CancellationToken)
+                    : cache.InstallAsync(
+                        new PackageReference("example.package", "1.0.0"),
+                        archive,
+                        new InstallCacheOptions { VerifyChecksum = false, Limits = limits },
+                        TestContext.Current.CancellationToken));
 
         exception.ErrorCode.ShouldBe(PackageInstallErrorCode.EntrySizeLimitExceeded);
+        files.Count("Unlock").ShouldBe(import ? 3 : 4);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+        archive.CanRead.ShouldBeTrue();
         AssertNoStagingOperations();
+    }
+
+    [Fact]
+    public async Task Acquire_PartialStagingWriteDoesNotRereadSourceOrDoubleHash()
+    {
+        byte[] content = Encoding.UTF8.GetBytes("partially-written-staging-content");
+        using TrackingReadStream source = new TrackingReadStream(
+            new MemoryStream(content),
+            canSeek: false);
+        ScriptedFileSystemPrimitives primitives = SystemFiles();
+        primitives.Enqueue<bool>("WriteAtAsync", call =>
+        {
+            // A physical side effect followed by a safe failure: only the same
+            // retained bytes may be rewritten, never a fresh source read.
+            RandomAccess.Write(call.Handle!, call.Content.Span[..5], call.Offset!.Value);
+            return ScriptedFileSystemPrimitives.NativeFailure<bool>(1117, "WriteAtAsync", call.Path);
+        });
+
+        await using PackageContentAcquisition acquisition =
+            await PackageContentAcquirer.AcquireAsync(
+                source,
+                _cacheRoot,
+                CreateLimits(content.Length),
+                reportedContentLength: null,
+                expectedSha256: null,
+                expectedSha1: HashSha1(content),
+                verifyChecksums: true,
+                directive: "example.package#1.0.0",
+                primitives.CreateContext(),
+                TestContext.Current.CancellationToken);
+
+        acquisition.ActualLength.ShouldBe(content.Length);
+        acquisition.Sha256.ShouldBe(HashSha256(content));
+        acquisition.Sha1.ShouldBe(HashSha1(content));
+        source.BytesRead.ShouldBe(content.Length);
+        source.ReadCalls.ShouldBe(2);
+        primitives.Count("WriteAtAsync").ShouldBe(2);
+        primitives.AsyncWaits.ShouldBe([10]);
+        primitives.Waits.ShouldBeEmpty();
+        (await File.ReadAllBytesAsync(
+            acquisition.ArchivePath,
+            TestContext.Current.CancellationToken)).ShouldBe(content);
+    }
+
+    [Fact]
+    public async Task Acquisition_ArchiveOpenCleanupAndOwnerReleaseUseAsyncWaits()
+    {
+        byte[] content = "retained archive"u8.ToArray();
+        using MemoryStream source = new(content);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 1);
+        PackageCacheCoordinator coordinator = new(_cacheRoot, context, NullPackageCacheContentionObserver.Instance);
+        FileStream? ownerStream = null;
+        files.Set<FileStream>("OpenFile", call =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = SystemFileSystemPrimitives.Instance.OpenFile(
+                call.Path!, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                OperatingSystem.IsMacOS() ? FileShare.None : FileShare.ReadWrite, 1, FileOptions.None);
+            ownerStream = opened.Value;
+            return opened;
+        });
+        PackageContentAcquisition acquisition = await PackageContentAcquirer.AcquireAsync(
+            source, _cacheRoot, CreateLimits(content.Length), null, null, null, false, "archive",
+            coordinator, context, TestContext.Current.CancellationToken);
+        if (OperatingSystem.IsWindows())
+        {
+            files.Enqueue("OpenFileHandle",
+                ScriptedFileSystemPrimitives.NativeFailure<SafeFileHandle>(
+                    5, "retained archive open", acquisition.ArchivePath));
+        }
+        else
+        {
+            files.Enqueue("OpenDescriptor",
+                ScriptedFileSystemPrimitives.NativeFailure<int>(5, "retained archive open", acquisition.ArchivePath));
+        }
+        try
+        {
+            await using Stream archive = await acquisition.OpenArchiveReadAsync(TestContext.Current.CancellationToken);
+            files.Enqueue("ReadAtAsync", ScriptedFileSystemPrimitives.NativeFailure<int>(
+                5, "retained archive read", acquisition.ArchivePath));
+            byte[] result = new byte[content.Length];
+            await archive.ReadExactlyAsync(result, TestContext.Current.CancellationToken);
+            result.ShouldBe(content);
+        }
+        finally
+        {
+            files.Enqueue("DeleteEntry", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "archive cleanup"));
+            files.Enqueue("Unlock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "archive owner unlock"));
+            await acquisition.DisposeAsync();
+        }
+        await acquisition.DisposeAsync();
+
+        Directory.Exists(acquisition.OperationDirectory).ShouldBeFalse();
+        ownerStream.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        files.Count("Unlock").ShouldBe(2);
+        files.Count("CloseFile").ShouldBe(2);
+        files.Count("ReadAtAsync").ShouldBe(2);
+        files.AsyncWaits.ShouldBe([10, 10, 10, 10]);
+        files.Waits.ShouldBeEmpty();
+        source.CanRead.ShouldBeTrue();
+        source.Position.ShouldBe(content.Length);
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Acquisition_DisposalCleansBeforeReleasingOwner()
+    {
+        byte[] content = "owned acquisition"u8.ToArray();
+        using TrackingReadStream source = new(new MemoryStream(content), canSeek: false);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 1);
+        PackageCacheCoordinator coordinator = new(
+            _cacheRoot, context, NullPackageCacheContentionObserver.Instance);
+        FileStream? ownerStream = null;
+        files.Set<FileStream>("OpenFile", call =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = SystemFileSystemPrimitives.Instance.OpenFile(
+                call.Path!, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                OperatingSystem.IsMacOS() ? FileShare.None : FileShare.ReadWrite, 1, FileOptions.None);
+            ownerStream = opened.Value;
+            return opened;
+        });
+        await using PackageContentAcquisition acquisition = await PackageContentAcquirer.AcquireAsync(
+            source, _cacheRoot, CreateLimits(content.Length), null, null, null, false, "archive",
+            coordinator, context, TestContext.Current.CancellationToken);
+        int ownerAcquired = files.Calls.FindIndex(call => call.Operation == "TryLock");
+        int operationCreated = files.Calls.FindIndex(call =>
+            call.Operation == "CreateDirectory" && call.Path == acquisition.OperationDirectory);
+        int archiveOpened = files.Calls.FindIndex(call =>
+            call.Operation is "OpenOwnedDescriptor" or "OpenFileHandle"
+            && call.Path == acquisition.ArchivePath);
+        ownerAcquired.ShouldBeGreaterThanOrEqualTo(0);
+        operationCreated.ShouldBeGreaterThan(ownerAcquired);
+        archiveOpened.ShouldBeGreaterThan(operationCreated);
+        acquisition.ActualLength.ShouldBe(content.Length);
+        acquisition.Sha256.ShouldBe(HashSha256(content));
+        int cleanupAttempts = 0;
+        files.Set<bool>("DeleteEntry", call =>
+        {
+            ownerStream.ShouldNotBeNull().CanRead.ShouldBeTrue();
+            PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(1);
+            using PackageCacheLease? contender = coordinator.TryAcquireOperationOwner(acquisition.OperationId);
+            contender.ShouldBeNull();
+            if (cleanupAttempts++ == 0)
+                return ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "DeleteEntry", call.Path);
+            return SystemFileSystemPrimitives.Instance.DeleteEntry(call.Path!, call.Kind!.Value);
+        });
+        files.Set<bool>("Unlock", _ =>
+        {
+            Directory.Exists(acquisition.OperationDirectory).ShouldBeFalse();
+            ownerStream.ShouldNotBeNull().CanRead.ShouldBeTrue();
+            PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(1);
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        });
+
+        await acquisition.DisposeAsync();
+        await acquisition.DisposeAsync();
+
+        int lastCleanup = files.Calls.FindLastIndex(call => call.Operation == "DeleteEntry");
+        int ownerReleased = files.Calls.FindIndex(call => call.Operation == "Unlock");
+        ownerReleased.ShouldBeGreaterThan(lastCleanup);
+        Directory.Exists(acquisition.OperationDirectory).ShouldBeFalse();
+        ownerStream.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        File.Exists(Path.Combine(
+            _cacheRoot, ".fhirpkg", "locks", "operations", $"{acquisition.OperationId}.lock"))
+            .ShouldBeTrue();
+        files.Count("Unlock").ShouldBe(1);
+        files.Count("TryLock").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10]);
+        files.Waits.ShouldBeEmpty();
+        source.BytesRead.ShouldBe(content.Length);
+        source.ReadCalls.ShouldBe(2);
+        source.WasDisposed.ShouldBeFalse();
+        source.PositionWasRead.ShouldBeFalse();
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Acquisition_CleanupUsesIndependentBudgetAfterPrimaryCancellation(
+        bool cleanupAndUnlockExhaust)
+    {
+        byte[] content = "cancelled acquisition"u8.ToArray();
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        using CancelOnReadStream source = new(new MemoryStream(content), cancellation);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 2);
+        PackageCacheCoordinator coordinator = new(
+            _cacheRoot, context, NullPackageCacheContentionObserver.Instance);
+        FileStream? ownerStream = null;
+        files.Set<FileStream>("OpenFile", call =>
+        {
+            FileSystemReplayOutcome<FileStream> opened = SystemFileSystemPrimitives.Instance.OpenFile(
+                call.Path!, FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                OperatingSystem.IsMacOS() ? FileShare.None : FileShare.ReadWrite, 1, FileOptions.None);
+            ownerStream = opened.Value;
+            return opened;
+        });
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                files.Enqueue("OpenFileHandle",
+                    ScriptedFileSystemPrimitives.NativeFailure<SafeFileHandle>(5, "acquisition open"));
+            }
+            else
+            {
+                files.Enqueue("OpenOwnedDescriptor",
+                    ScriptedFileSystemPrimitives.NativeFailure<int>(5, "acquisition open"));
+            }
+        }
+        int cleanupAttempts = 0;
+        string? cleanupPath = null;
+        files.Set<bool>("DeleteEntry", call =>
+        {
+            cancellation.IsCancellationRequested.ShouldBeTrue();
+            if (call.Kind == FileSystemEntryKind.File)
+            {
+                cleanupPath = call.Path;
+                cleanupAttempts++;
+                if (cleanupAndUnlockExhaust || cleanupAttempts <= 2)
+                    return ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "DeleteEntry", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.DeleteEntry(call.Path!, call.Kind!.Value);
+        });
+        for (int attempt = 0; attempt < (cleanupAndUnlockExhaust ? 3 : 2); attempt++)
+            files.Enqueue("Unlock", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "owner unlock"));
+        int primaryWaits = 0;
+        int independentWaits = 0;
+        files.OnWait = () =>
+        {
+            ownerStream.ShouldNotBeNull().CanRead.ShouldBeTrue();
+            PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(1);
+            if (cancellation.IsCancellationRequested)
+                independentWaits++;
+            else
+                primaryWaits++;
+        };
+
+        OperationCanceledException exception = await Should.ThrowAsync<OperationCanceledException>(() =>
+            PackageContentAcquirer.AcquireAsync(
+                source, _cacheRoot, CreateLimits(content.Length), null, null, null, false, "archive",
+                coordinator, context, cancellation.Token));
+
+        exception.CancellationToken.ShouldBe(cancellation.Token);
+        primaryWaits.ShouldBe(2);
+        independentWaits.ShouldBe(4);
+        cleanupAttempts.ShouldBe(3);
+        cleanupPath.ShouldNotBeNull();
+        File.Exists(cleanupPath).ShouldBe(cleanupAndUnlockExhaust);
+        Directory.Exists(Path.GetDirectoryName(cleanupPath)).ShouldBe(cleanupAndUnlockExhaust);
+        if (!cleanupAndUnlockExhaust)
+            AssertNoStagingOperations();
+        files.Count(OperatingSystem.IsWindows() ? "OpenFileHandle" : "OpenOwnedDescriptor").ShouldBe(3);
+        files.Count("WriteAtAsync").ShouldBe(0);
+        files.Count("CloseFile").ShouldBe(1);
+        files.Count("Unlock").ShouldBe(3);
+        files.AsyncWaits.ShouldBe([10, 10, 10, 10, 10, 10]);
+        files.Waits.ShouldBeEmpty();
+        ownerStream.ShouldNotBeNull().CanRead.ShouldBeFalse();
+        source.WasDisposed.ShouldBeFalse();
+        source.PositionWasRead.ShouldBeFalse();
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task AcquisitionFailure_PreservesPrimaryWhenAsyncOwnerUnlockExhausts()
+    {
+        byte[] content = "checksum mismatch"u8.ToArray();
+        using MemoryStream source = new(content);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 2);
+        PackageCacheCoordinator coordinator = new(_cacheRoot, context, NullPackageCacheContentionObserver.Instance);
+        files.Set<bool>("Unlock", _ => ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "owner unlock"));
+
+        PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(() =>
+            PackageContentAcquirer.AcquireAsync(
+                source, _cacheRoot, CreateLimits(content.Length), null, "wrong", null, true, "archive",
+                coordinator, context, TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(PackageInstallErrorCode.ChecksumMismatch);
+        exception.Stage.ShouldBe(PackageInstallStage.ChecksumValidation);
+        files.Count("Unlock").ShouldBe(3);
+        files.Count("WriteAtAsync").ShouldBe(1);
+        files.Count("CloseFile").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        source.CanRead.ShouldBeTrue();
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+        AssertNoStagingOperations();
+    }
+
+    private static ScriptedFileSystemPrimitives SystemFiles()
+    {
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(
+            SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<IEnumerator<string>>(
+            "CreateDirectoryEnumerator",
+            call => SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        return primitives;
     }
 
     private static PackageInstallLimits CreateLimits(long maxCompressedBytes) =>

@@ -2,6 +2,7 @@
 
 using System.Security.Cryptography;
 using FhirPkg.Cache;
+using FhirPkg.IO;
 
 namespace FhirPkg.Installation;
 
@@ -11,9 +12,6 @@ namespace FhirPkg.Installation;
 /// </summary>
 internal static class PackageContentAcquirer
 {
-    private const string OperationsDirectoryName = ".fhirpkg";
-    private const string StagingDirectoryName = "staging";
-    private const string ArchiveFileName = "archive.tgz";
     private const int BufferSize = 81_920;
 
     internal static async Task<PackageContentAcquisition> AcquireAsync(
@@ -36,8 +34,37 @@ internal static class PackageContentAcquirer
                 verifyChecksums,
                 directive,
                 coordinator: null,
+                FileSystemContext.CreateDefault(),
                 cancellationToken)
             .ConfigureAwait(false);
+
+    internal static async Task<PackageContentAcquisition> AcquireAsync(
+        Stream source,
+        string cacheRoot,
+        PackageInstallLimits limits,
+        long? reportedContentLength,
+        string? expectedSha256,
+        string? expectedSha1,
+        bool verifyChecksums,
+        string? directive,
+        FileSystemContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return await AcquireCoreAsync(
+                source,
+                cacheRoot,
+                limits,
+                reportedContentLength,
+                expectedSha256,
+                expectedSha1,
+                verifyChecksums,
+                directive,
+                coordinator: null,
+                context,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 
     internal static async Task<PackageContentAcquisition> AcquireAsync(
         Stream source,
@@ -62,6 +89,37 @@ internal static class PackageContentAcquirer
                 verifyChecksums,
                 directive,
                 coordinator,
+                FileSystemContext.CreateDefault(),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal static async Task<PackageContentAcquisition> AcquireAsync(
+        Stream source,
+        string cacheRoot,
+        PackageInstallLimits limits,
+        long? reportedContentLength,
+        string? expectedSha256,
+        string? expectedSha1,
+        bool verifyChecksums,
+        string? directive,
+        PackageCacheCoordinator coordinator,
+        FileSystemContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(coordinator);
+        ArgumentNullException.ThrowIfNull(context);
+        return await AcquireCoreAsync(
+                source,
+                cacheRoot,
+                limits,
+                reportedContentLength,
+                expectedSha256,
+                expectedSha1,
+                verifyChecksums,
+                directive,
+                coordinator,
+                context,
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -76,6 +134,7 @@ internal static class PackageContentAcquirer
         bool verifyChecksums,
         string? directive,
         PackageCacheCoordinator? coordinator,
+        FileSystemContext context,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -98,13 +157,10 @@ internal static class PackageContentAcquirer
         if (reportedContentLength > limits.MaxCompressedBytes)
             throw CompressedLimitExceeded(directive, limits.MaxCompressedBytes);
 
+        PackageCacheStagingArea stagingArea = new(cacheRoot, context);
         string operationId = Guid.NewGuid().ToString("N");
-        string stagingRoot = Path.Combine(
-            cacheRoot,
-            OperationsDirectoryName,
-            StagingDirectoryName);
-        string operationDirectory = Path.Combine(stagingRoot, operationId);
-        string archivePath = Path.Combine(operationDirectory, ArchiveFileName);
+        string operationDirectory = stagingArea.GetOperationDirectory(operationId);
+        string archivePath = stagingArea.GetArchivePath(operationId);
         PackageCacheLease? operationOwner = coordinator is null
             ? null
             : await coordinator.AcquireOperationOwnerAsync(
@@ -115,7 +171,8 @@ internal static class PackageContentAcquirer
 
         try
         {
-            Directory.CreateDirectory(operationDirectory);
+            await context.FileSystem.CreateDirectoryAsync(operationDirectory, cancellationToken)
+                .ConfigureAwait(false);
 
             using IncrementalHash sha256 = IncrementalHash.CreateHash(
                 HashAlgorithmName.SHA256);
@@ -129,33 +186,49 @@ internal static class PackageContentAcquirer
 
             try
             {
-                await using FileStream destination = new FileStream(
-                    archivePath,
-                    FileMode.CreateNew,
-                    FileAccess.Write,
-                    FileShare.None,
-                    BufferSize,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-
-                while (true)
+                // An ordinary caller file is borrowed once; downloads and other
+                // opaque sources remain one-shot, unwrapped streams.
+                Stream input = FileSystemContext.ProtectRead(source, context);
+                try
                 {
-                    int bytesRead = await source.ReadAsync(
-                            buffer.AsMemory(),
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    if (bytesRead == 0)
-                        break;
+                    await using PositionedFileStream destination =
+                        await context.FileSystem.OpenPositionedFileAsync(
+                                archivePath,
+                                FileMode.CreateNew,
+                                FileAccess.Write,
+                                FileShare.None,
+                                FileOptions.Asynchronous | FileOptions.SequentialScan,
+                                cancellationToken)
+                            .ConfigureAwait(false);
 
-                    if (bytesRead > limits.MaxCompressedBytes - actualLength)
-                        throw CompressedLimitExceeded(directive, limits.MaxCompressedBytes);
+                    while (true)
+                    {
+                        int bytesRead = await input.ReadAsync(
+                                buffer.AsMemory(),
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        if (bytesRead == 0)
+                            break;
 
-                    actualLength += bytesRead;
-                    sha256.AppendData(buffer, 0, bytesRead);
-                    sha1?.AppendData(buffer, 0, bytesRead);
-                    await destination.WriteAsync(
-                            buffer.AsMemory(0, bytesRead),
-                            cancellationToken)
-                        .ConfigureAwait(false);
+                        if (bytesRead > limits.MaxCompressedBytes - actualLength)
+                            throw CompressedLimitExceeded(directive, limits.MaxCompressedBytes);
+
+                        // The destination retains its own copy of the block until the
+                        // write succeeds; length and hashes advance exactly once after.
+                        await destination.WriteAsync(
+                                buffer.AsMemory(0, bytesRead),
+                                cancellationToken)
+                            .ConfigureAwait(false);
+
+                        actualLength += bytesRead;
+                        sha256.AppendData(buffer, 0, bytesRead);
+                        sha1?.AppendData(buffer, 0, bytesRead);
+                    }
+                }
+                finally
+                {
+                    if (!ReferenceEquals(input, source))
+                        await input.DisposeAsync().ConfigureAwait(false);
                 }
             }
             catch (IOException exception)
@@ -192,6 +265,7 @@ internal static class PackageContentAcquirer
                 actualLength,
                 actualSha256,
                 actualSha1,
+                stagingArea,
                 operationOwner);
             completed = true;
             return result;
@@ -212,8 +286,29 @@ internal static class PackageContentAcquirer
         {
             if (!completed)
             {
-                PackageContentAcquisition.TryDeleteOperationDirectory(operationDirectory);
-                operationOwner?.Dispose();
+                try
+                {
+                    await stagingArea.CleanupOwnedAsync(operationDirectory)
+                        .ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Cleanup cannot replace the failed acquisition, including cancellation.
+                }
+                finally
+                {
+                    if (operationOwner is not null)
+                    {
+                        try
+                        {
+                            await operationOwner.DisposeAsync().ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            // Releasing the owner must not replace the acquisition failure.
+                        }
+                    }
+                }
             }
         }
     }
@@ -302,18 +397,24 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
         long actualLength,
         string sha256,
         string? sha1,
+        PackageCacheStagingArea stagingArea,
         PackageCacheLease? operationOwner = null)
     {
+        ArgumentNullException.ThrowIfNull(stagingArea);
         OperationId = operationId;
         OperationDirectory = operationDirectory;
         ArchivePath = archivePath;
         ActualLength = actualLength;
         Sha256 = sha256;
         Sha1 = sha1;
+        _stagingArea = stagingArea;
         _operationOwner = operationOwner;
+        _context = stagingArea.Context;
     }
 
+    private readonly PackageCacheStagingArea _stagingArea;
     private readonly PackageCacheLease? _operationOwner;
+    private readonly FileSystemContext _context;
 
     internal string OperationId { get; }
 
@@ -327,61 +428,38 @@ internal sealed class PackageContentAcquisition : IAsyncDisposable
 
     internal string? Sha1 { get; }
 
-    internal FileStream OpenArchiveRead() =>
-        new FileStream(
-            ArchivePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            81_920,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
+    /// <summary>
+    /// Opens the staged archive with the acquisition's retained policy. Each
+    /// later read replays only its own block against the same open handle.
+    /// </summary>
+    internal Stream OpenArchiveRead() =>
+        _context.FileSystem.OpenProtectedRegularRead(ArchivePath);
 
-    public ValueTask DisposeAsync()
+    internal ValueTask<Stream> OpenArchiveReadAsync(CancellationToken cancellationToken) =>
+        _context.FileSystem.OpenProtectedRegularReadAsync(ArchivePath, cancellationToken);
+
+    public async ValueTask DisposeAsync()
     {
+        bool cleaned = false;
         try
         {
-            TryDeleteOperationDirectory(OperationDirectory);
+            await _stagingArea.CleanupOwnedAsync(OperationDirectory)
+                .ConfigureAwait(false);
+            cleaned = true;
         }
         finally
         {
-            _operationOwner?.Dispose();
-        }
-
-        return ValueTask.CompletedTask;
-    }
-
-    internal static void TryDeleteOperationDirectory(string operationDirectory)
-    {
-        try
-        {
-            if (Directory.Exists(operationDirectory))
-                Directory.Delete(operationDirectory, recursive: true);
-
-            string? stagingRoot = Path.GetDirectoryName(operationDirectory);
-            if (stagingRoot is not null
-                && Directory.Exists(stagingRoot)
-                && !Directory.EnumerateFileSystemEntries(stagingRoot).Any())
+            if (_operationOwner is not null)
             {
-                Directory.Delete(stagingRoot);
+                try
+                {
+                    await _operationOwner.DisposeAsync().ConfigureAwait(false);
+                }
+                catch when (!cleaned)
+                {
+                    // Preserve a primary cleanup failure after releasing the lease.
+                }
             }
-
-            string? operationsRoot = stagingRoot is null
-                ? null
-                : Path.GetDirectoryName(stagingRoot);
-            if (operationsRoot is not null
-                && Directory.Exists(operationsRoot)
-                && !Directory.EnumerateFileSystemEntries(operationsRoot).Any())
-            {
-                Directory.Delete(operationsRoot);
-            }
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // Cleanup must not replace the primary installation outcome.
-        }
-        catch (IOException)
-        {
-            // Cleanup must not replace the primary installation outcome.
         }
     }
 }

@@ -38,8 +38,16 @@
       Link="ReleaseContracts\build-and-test.yaml"
       CopyToOutputDirectory="PreserveNewest" />
     <None
+      Include="..\..\.github\workflows\fixture-drift.yaml"
+      Link="ReleaseContracts\fixture-drift.yaml"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
       Include="..\..\.github\workflows\nuget-generator.yaml"
       Link="ReleaseContracts\nuget-generator.yaml"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\docs\releases\approvals\*.json"
+      Link="ReleaseContracts\approvals\%(Filename)%(Extension)"
       CopyToOutputDirectory="PreserveNewest" />
     <None
       Include="..\..\test\FhirPkg.Qualification\FhirPkg.Qualification.csproj"

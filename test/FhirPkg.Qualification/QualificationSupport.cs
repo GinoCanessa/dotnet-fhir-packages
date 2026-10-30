@@ -10,6 +10,57 @@ namespace FhirPkg.Qualification;
 internal sealed class QualificationInvariantException(string message) :
     InvalidOperationException(message);
 
+internal sealed class RequiredArtifactUnavailableException(
+    string artifactId) :
+    Exception($"Required artifact '{artifactId}' was unavailable.")
+{
+    internal const string DetailName = "requiredArtifact";
+
+    internal string ArtifactId { get; } = artifactId;
+}
+
+internal static class QualificationFailureCodes
+{
+    internal const string ImmutableHashMismatch =
+        "ImmutableHashMismatch";
+
+    internal const string LocalFixtureHashMismatch =
+        "LocalFixtureHashMismatch";
+
+    internal const string SourceUnreachable = "SourceUnreachable";
+
+    internal const string RequiredArtifactUnavailable =
+        "RequiredArtifactUnavailable";
+
+    internal const string BundleFreezeBlocked = "BundleFreezeBlocked";
+
+    internal const string BundleVerificationFailed =
+        "BundleVerificationFailed";
+
+    internal const string UnroutedFixtureRequest =
+        "UnroutedFixtureRequest";
+
+    internal const string ApprovalInvalid = "ApprovalInvalid";
+
+    internal const string ApprovedBytesUnavailable =
+        "ApprovedBytesUnavailable";
+
+    internal static string? Classify(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception switch
+        {
+            HttpRequestException or TimeoutException =>
+                SourceUnreachable,
+            RequiredArtifactUnavailableException =>
+                RequiredArtifactUnavailable,
+            FixtureBundleException bundleException =>
+                bundleException.Code,
+            _ => null
+        };
+    }
+}
+
 internal static class QualificationAssert
 {
     internal static void True(bool condition, string message)

@@ -149,6 +149,9 @@ public class CliIntegrationTests : IntegrationTestBase
 
         exitCode.ShouldBe(0);
         stdout.ShouldContain("fhir-pkg");
+        stdout.ShouldContain("--fs-retry-count");
+        stdout.ShouldContain("--fs-min-delay-ms");
+        stdout.ShouldContain("--fs-jitter-max-ms");
     }
 
     [Theory]
@@ -171,6 +174,9 @@ public class CliIntegrationTests : IntegrationTestBase
 
         exitCode.ShouldBe(0, stderr);
         stdout.ShouldContain("--unmodified");
+        stdout.ShouldContain("--fs-retry-count");
+        stdout.ShouldContain("--fs-min-delay-ms");
+        stdout.ShouldContain("--fs-jitter-max-ms");
     }
 
     public static TheoryData<bool, bool, string> ArchiveModes

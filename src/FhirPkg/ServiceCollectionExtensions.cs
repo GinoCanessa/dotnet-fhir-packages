@@ -74,9 +74,7 @@ public static class ServiceCollectionExtensions
             {
                 FhirPackageManagerConfiguration configuration =
                     sp.GetRequiredService<FhirPackageManagerConfiguration>();
-                return FhirPackageManagerConfiguration.Create(
-                    configuration.Options,
-                    configuration.InstallLimits).Options;
+                return configuration.CreateOptionsSnapshot();
             });
         }
 
@@ -104,7 +102,12 @@ public static class ServiceCollectionExtensions
             ILogger<DiskPackageCache> logger = sp.GetRequiredService<ILogger<DiskPackageCache>>();
             TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
             PackageInstallLimits installLimits = configuration.InstallLimits;
-            return new DiskPackageCache(options.CachePath, logger, timeProvider, installLimits);
+            return new DiskPackageCache(
+                options.CachePath,
+                logger,
+                timeProvider,
+                installLimits,
+                configuration.FileSystemContext);
         });
         services.TryAddSingleton<IHardenedPackageCache>(sp =>
             sp.GetRequiredService<IPackageCache>()
@@ -117,8 +120,9 @@ public static class ServiceCollectionExtensions
         // Register IRegistryClient as a composite RedundantRegistryClient
         services.TryAddSingleton<IRegistryClient>(sp =>
         {
-            FhirPackageManagerOptions options =
-                sp.GetRequiredService<FhirPackageManagerConfiguration>().Options;
+            FhirPackageManagerConfiguration configuration =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>();
+            FhirPackageManagerOptions options = configuration.Options;
             IHttpClientFactory httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             HttpClient httpClient = httpClientFactory.CreateClient("FhirPackages");
             ILoggerFactory loggerFactory = sp.GetRequiredService<ILoggerFactory>();
@@ -133,12 +137,14 @@ public static class ServiceCollectionExtensions
                 options,
                 transport,
                 loggerFactory,
-                timeProvider);
+                timeProvider,
+                configuration.FileSystemContext);
         });
 
         // Register IVersionResolver as VersionResolver
         services.TryAddSingleton<IVersionResolver>(sp =>
         {
+            _ = sp.GetRequiredService<FhirPackageManagerConfiguration>();
             IRegistryClient registryClient = sp.GetRequiredService<IRegistryClient>();
             ILogger<VersionResolver> logger = sp.GetRequiredService<ILogger<VersionResolver>>();
             return new VersionResolver(registryClient, logger);
@@ -147,13 +153,14 @@ public static class ServiceCollectionExtensions
         // Register IDependencyResolver as DependencyResolver
         services.TryAddSingleton<IDependencyResolver>(sp =>
         {
+            FhirPackageManagerConfiguration configuration =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>();
             IRegistryClient registryClient = sp.GetRequiredService<IRegistryClient>();
             IVersionResolver versionResolver = sp.GetRequiredService<IVersionResolver>();
             IPackageCache cache = sp.GetRequiredService<IPackageCache>();
             ILogger<DependencyResolver> logger = sp.GetRequiredService<ILogger<DependencyResolver>>();
             TimeProvider timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
-            PackageFixupPolicy fixupPolicy =
-                sp.GetRequiredService<FhirPackageManagerConfiguration>().FixupPolicy;
+            PackageFixupPolicy fixupPolicy = configuration.FixupPolicy;
             return new DependencyResolver(
                 registryClient,
                 versionResolver,
@@ -166,8 +173,10 @@ public static class ServiceCollectionExtensions
         // Register IPackageIndexer as PackageIndexer
         services.TryAddSingleton<IPackageIndexer>(sp =>
         {
+            FhirPackageManagerConfiguration configuration =
+                sp.GetRequiredService<FhirPackageManagerConfiguration>();
             ILogger<PackageIndexer> logger = sp.GetRequiredService<ILogger<PackageIndexer>>();
-            return new PackageIndexer(logger);
+            return new PackageIndexer(logger, configuration.FileSystemContext);
         });
 
         // MemoryResourceCache is created directly in the FhirPackageManager factory
@@ -176,16 +185,25 @@ public static class ServiceCollectionExtensions
         // Register IFhirPackageManager as FhirPackageManager (DI constructor overload)
         services.TryAddSingleton<IFhirPackageManager>(sp =>
         {
-            IPackageCache cache = sp.GetRequiredService<IPackageCache>();
-            IRegistryClient registryClient = sp.GetRequiredService<IRegistryClient>();
-            IVersionResolver versionResolver = sp.GetRequiredService<IVersionResolver>();
-            IDependencyResolver dependencyResolver = sp.GetRequiredService<IDependencyResolver>();
-            IPackageIndexer packageIndexer = sp.GetRequiredService<IPackageIndexer>();
             FhirPackageManagerConfiguration configuration =
                 sp.GetRequiredService<FhirPackageManagerConfiguration>();
+            HashSet<object> visited = new(ReferenceEqualityComparer.Instance);
+
+            // Validate filesystem-free collaborators before the dependency resolver can create its cache.
+            IRegistryClient registryClient = sp.GetRequiredService<IRegistryClient>();
+            configuration.ValidateFileSystemCollaborators([registryClient], visited);
+            IVersionResolver versionResolver = sp.GetRequiredService<IVersionResolver>();
+            configuration.ValidateFileSystemCollaborators([versionResolver], visited);
+            IPackageIndexer packageIndexer = sp.GetRequiredService<IPackageIndexer>();
+            configuration.ValidateFileSystemCollaborators([packageIndexer], visited);
+
+            IDependencyResolver dependencyResolver = sp.GetRequiredService<IDependencyResolver>();
+            configuration.ValidateFileSystemCollaborators([dependencyResolver], visited);
+            IPackageCache cache = sp.GetRequiredService<IPackageCache>();
+            configuration.ValidateFileSystemCollaborators([cache], visited);
+
             FhirPackageManagerOptions options = configuration.Options;
             ILogger<FhirPackageManager> logger = sp.GetRequiredService<ILogger<FhirPackageManager>>();
-            PackageInstallLimits installLimits = configuration.InstallLimits;
             IHttpClientFactory httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             HttpClient httpClient = httpClientFactory.CreateClient("FhirPackages");
 
@@ -194,19 +212,19 @@ public static class ServiceCollectionExtensions
                 ? new MemoryResourceCache(options.ResourceCacheSize, options.ResourceCacheSafeMode)
                 : null;
 
-            return FhirPackageManager.CreateWithHttpClient(
+            return FhirPackageManager.CreateWithConfiguration(
                 cache,
                 registryClient,
                 versionResolver,
                 dependencyResolver,
                 packageIndexer,
-                options,
+                configuration,
                 logger,
                 memoryCache,
-                installLimits,
                 httpClient,
                 sp.GetRequiredService<ILoggerFactory>(),
-                redirectsControlled: true);
+                redirectsControlled: true,
+                visited);
         });
 
         services.TryAddSingleton<IHardenedFhirPackageManager>(sp =>

@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.Text.Json;
+using FhirPkg.IO;
 using FhirPkg.Models;
 
 namespace FhirPkg.Installation;
@@ -96,14 +97,30 @@ internal static class PackageIdentityValidator
         string manifestPath,
         PackageIdentityExpectation expectation,
         string? directive,
+        CancellationToken cancellationToken) =>
+        await ValidateExpectedAsync(
+                manifestPath,
+                expectation,
+                directive,
+                FileSystemContext.CreateDefault(),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    internal static async Task<PackageIdentityValidationResult> ValidateExpectedAsync(
+        string manifestPath,
+        PackageIdentityExpectation expectation,
+        string? directive,
+        FileSystemContext context,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(manifestPath);
         ArgumentNullException.ThrowIfNull(expectation);
+        ArgumentNullException.ThrowIfNull(context);
 
         PackageManifest manifest = await ReadManifestAsync(
                 manifestPath,
                 directive,
+                context,
                 cancellationToken)
             .ConfigureAwait(false);
         return ValidateExpected(manifest, expectation, directive);
@@ -179,13 +196,27 @@ internal static class PackageIdentityValidator
     internal static async Task<PackageIdentityValidationResult> DiscoverAsync(
         string manifestPath,
         string? directive,
+        CancellationToken cancellationToken) =>
+        await DiscoverAsync(
+                manifestPath,
+                directive,
+                FileSystemContext.CreateDefault(),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    internal static async Task<PackageIdentityValidationResult> DiscoverAsync(
+        string manifestPath,
+        string? directive,
+        FileSystemContext context,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(manifestPath);
+        ArgumentNullException.ThrowIfNull(context);
 
         PackageManifest manifest = await ReadManifestAsync(
                 manifestPath,
                 directive,
+                context,
                 cancellationToken)
             .ConfigureAwait(false);
         return Discover(manifest, directive);
@@ -194,17 +225,22 @@ internal static class PackageIdentityValidator
     private static async Task<PackageManifest> ReadManifestAsync(
         string manifestPath,
         string? directive,
+        FileSystemContext context,
         CancellationToken cancellationToken)
     {
         try
         {
-            await using FileStream stream = new FileStream(
-                manifestPath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                16_384,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            // Open and each later read block are independent replay units over one
+            // retained handle; JSON parsing is never part of a retry.
+            await using PositionedFileStream stream =
+                await context.FileSystem.OpenPositionedFileAsync(
+                        manifestPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.Read,
+                        FileOptions.Asynchronous | FileOptions.SequentialScan,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             PackageManifest? manifest =
                 await JsonSerializer.DeserializeAsync<PackageManifest>(
                         stream,

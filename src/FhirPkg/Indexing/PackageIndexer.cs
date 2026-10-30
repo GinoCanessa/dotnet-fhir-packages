@@ -6,6 +6,7 @@ using System.Collections.ObjectModel;
 using System.Text.Json;
 
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using Microsoft.Extensions.Logging;
 
@@ -61,16 +62,42 @@ public class PackageIndexer :
         new(StringComparer.Ordinal);
 
     private readonly ILogger _logger;
+    private readonly FileSystemContext _context;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PackageIndexer"/> class.
     /// </summary>
     /// <param name="logger">Logger for diagnostic output.</param>
     public PackageIndexer(ILogger logger)
+        : this(logger, new FileSystemRetryOptions())
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="PackageIndexer"/> class whose
+    /// filesystem work uses the supplied retry policy.
+    /// </summary>
+    /// <param name="logger">Logger for diagnostic output.</param>
+    /// <param name="fileSystemRetry">The required bounded filesystem retry options.</param>
+    public PackageIndexer(
+        ILogger logger,
+        FileSystemRetryOptions fileSystemRetry)
+        : this(logger, new FileSystemContext(fileSystemRetry))
+    {
+    }
+
+    internal PackageIndexer(
+        ILogger logger,
+        FileSystemContext context)
     {
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(context);
         _logger = logger;
+        _context = context;
     }
+
+    // Effective filesystem policy view for later cross-component checks.
+    internal FileSystemContext FileSystemContext => _context;
 
     /// <inheritdoc />
     public async Task<PackageIndex> IndexPackageAsync(
@@ -80,7 +107,7 @@ public class PackageIndexer :
     {
         ArgumentNullException.ThrowIfNull(packageContentPath);
 
-        if (!Directory.Exists(packageContentPath))
+        if (!await DirectoryExistsAsync(packageContentPath, cancellationToken).ConfigureAwait(false))
             throw new DirectoryNotFoundException(
                 $"Package content directory not found: {packageContentPath}");
 
@@ -94,7 +121,8 @@ public class PackageIndexer :
             if (existingIndex is not null)
             {
                 _logger.LogDebug("Using existing .index.json from '{Path}'.", packageContentPath);
-                RegisterLegacyIndex(packageContentPath, existingIndex);
+                await RegisterLegacyIndexAsync(packageContentPath, existingIndex, cancellationToken)
+                    .ConfigureAwait(false);
                 return existingIndex;
             }
         }
@@ -103,7 +131,7 @@ public class PackageIndexer :
         _logger.LogInformation("Generating index for package at '{Path}'.", packageContentPath);
         PackageIndex index = await BuildIndexAsync(packageContentPath, cancellationToken).ConfigureAwait(false);
 
-        RegisterLegacyIndex(packageContentPath, index);
+        await RegisterLegacyIndexAsync(packageContentPath, index, cancellationToken).ConfigureAwait(false);
 
         return index;
     }
@@ -114,7 +142,10 @@ public class PackageIndexer :
     {
         ArgumentNullException.ThrowIfNull(package);
         _ = PackageCacheKey.Create(package.Reference);
-        if (!Directory.Exists(package.ContentPath))
+        if (!await DirectoryExistsAsync(
+                package.ContentPath,
+                cancellationToken)
+            .ConfigureAwait(false))
         {
             throw new DirectoryNotFoundException(
                 $"Package content directory not found: {package.ContentPath}");
@@ -285,20 +316,45 @@ public class PackageIndexer :
         CancellationToken cancellationToken)
     {
         string indexPath = Path.Combine(packageContentPath, IndexFileName);
-        if (!File.Exists(indexPath))
-            return null;
 
         try
         {
-            await using FileStream stream = File.OpenRead(indexPath);
+            // An absent optional index is explicit and must not consume retry budget.
+            string fullIndexPath = await _context.FileSystem
+                .GetFullPathAsync(indexPath, cancellationToken)
+                .ConfigureAwait(false);
+            FileSystemProbeResult probe = await _context.FileSystem.ExecuteAsync(
+                    "ProbeFollowing",
+                    () => _context.Primitives.Probe(fullIndexPath, followLinks: true),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (probe.Kind is FileSystemEntryKind.Missing
+                or FileSystemEntryKind.Directory
+                or FileSystemEntryKind.DirectorySymbolicLink)
+            {
+                return null;
+            }
+
+            await using Stream stream = await _context.FileSystem
+                .OpenPositionedFileAsync(
+                    fullIndexPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    FileOptions.None,
+                    cancellationToken)
+                .ConfigureAwait(false);
             PackageIndex? index = await JsonSerializer.DeserializeAsync<PackageIndex>(stream, s_readOptions, cancellationToken)
                 .ConfigureAwait(false);
-            string? failureReason = null;
-            if (index is not null
-                && PackageIndexValidation.TryValidateReferencedFiles(
-                    index,
-                    packageContentPath,
-                    out failureReason))
+            (bool isValid, string? failureReason) = index is null
+                ? (false, null)
+                : await PackageIndexValidation.TryValidateReferencedFilesAsync(
+                        index,
+                        packageContentPath,
+                        _context,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (isValid)
             {
                 return index;
             }
@@ -321,8 +377,58 @@ public class PackageIndexer :
         }
         catch (IOException ex)
         {
-            _logger.LogWarning(ex, "Failed to read .index.json at '{Path}'. Will regenerate.", indexPath);
+            _logger.LogWarning(
+                ex,
+                "Failed to read .index.json at '{Path}': {Reason} Will regenerate.",
+                indexPath,
+                FileSystemFailureContext.FormatMessage(ex));
             return null;
+        }
+    }
+
+    private async ValueTask<bool> DirectoryExistsAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        string fullPath = await _context.FileSystem.GetFullPathAsync(path, cancellationToken)
+            .ConfigureAwait(false);
+        FileSystemProbeResult probe = await _context.FileSystem.ExecuteAsync(
+                "ProbeFollowing",
+                () => _context.Primitives.Probe(fullPath, followLinks: true),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return probe.Kind is FileSystemEntryKind.Directory
+            or FileSystemEntryKind.DirectorySymbolicLink;
+    }
+
+    /// <summary>
+    /// Determines whether a snapshot entry may be a JSON file candidate. Only a
+    /// confirmed directory or vanished entry is excluded; an exhausted probe falls
+    /// through to the file read so no new failure path is introduced.
+    /// </summary>
+    private async ValueTask<bool> IsCandidateFileAsync(
+        string filePath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            string fullPath = await _context.FileSystem.GetFullPathAsync(filePath, cancellationToken)
+                .ConfigureAwait(false);
+            FileSystemProbeResult probe = await _context.FileSystem.ExecuteAsync(
+                    "ProbeFollowing",
+                    () => _context.Primitives.Probe(fullPath, followLinks: true),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return probe.Kind is not (FileSystemEntryKind.Missing
+                or FileSystemEntryKind.Directory
+                or FileSystemEntryKind.DirectorySymbolicLink);
+        }
+        catch (IOException)
+        {
+            return true;
         }
     }
 
@@ -335,7 +441,16 @@ public class PackageIndexer :
         CancellationToken cancellationToken)
     {
         List<ResourceIndexEntry> entries = [];
-        string[] jsonFiles = Directory.GetFiles(packageContentPath, "*.json", SearchOption.TopDirectoryOnly);
+        string[] snapshot = await _context.FileSystem
+            .SnapshotDirectoryAsync(packageContentPath, cancellationToken)
+            .ConfigureAwait(false);
+        StringComparison nameComparison =
+            OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+        string[] jsonFiles = snapshot
+            .Where(path => Path.GetFileName(path).EndsWith(".json", nameComparison))
+            .ToArray();
         Array.Sort(jsonFiles, StringComparer.Ordinal);
 
         foreach (string filePath in jsonFiles)
@@ -350,6 +465,10 @@ public class PackageIndexer :
             {
                 continue;
             }
+
+            // Directory entries named like JSON files are not resources.
+            if (!await IsCandidateFileAsync(filePath, cancellationToken).ConfigureAwait(false))
+                continue;
 
             ResourceIndexEntry? entry = await TryIndexFileAsync(filePath, fileName, cancellationToken).ConfigureAwait(false);
             if (entry is not null)
@@ -379,7 +498,15 @@ public class PackageIndexer :
     {
         try
         {
-            await using FileStream stream = File.OpenRead(filePath);
+            await using Stream stream = await _context.FileSystem
+                .OpenPositionedFileAsync(
+                    filePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    FileOptions.None,
+                    cancellationToken)
+                .ConfigureAwait(false);
             using JsonDocument doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
 
@@ -453,7 +580,11 @@ public class PackageIndexer :
         }
         catch (IOException ex)
         {
-            _logger.LogWarning(ex, "Could not read file '{FileName}'.", fileName);
+            _logger.LogWarning(
+                ex,
+                "Could not read file '{FileName}': {Reason}",
+                fileName,
+                FileSystemFailureContext.FormatMessage(ex));
             return null;
         }
     }
@@ -507,16 +638,17 @@ public class PackageIndexer :
     /// Registers an index's entries in the in-memory store, converting them to <see cref="ResourceInfo"/>
     /// enriched with package metadata extracted from the content path.
     /// </summary>
-    private void RegisterLegacyIndex(
+    private async ValueTask RegisterLegacyIndexAsync(
         string packageContentPath,
-        PackageIndex index)
+        PackageIndex index,
+        CancellationToken cancellationToken)
     {
         (string? packageName, string? packageVersion) = ExtractPackageIdentity(packageContentPath);
         PackageReference reference = new(
             packageName ?? string.Empty,
             packageVersion);
         string key = packageVersion is null
-            ? $"path:{Path.GetFullPath(packageContentPath)}"
+            ? $"path:{await _context.FileSystem.GetFullPathAsync(packageContentPath, cancellationToken).ConfigureAwait(false)}"
             : $"identity:{packageName}#{packageVersion}";
         RegisterIndex(
             _legacyIndexedPackages,

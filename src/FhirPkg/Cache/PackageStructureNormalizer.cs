@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using FhirPkg.Installation;
+using FhirPkg.IO;
 
 namespace FhirPkg.Cache;
 
@@ -17,13 +18,20 @@ internal static class PackageStructureNormalizer
         ArgumentException.ThrowIfNullOrWhiteSpace(extractedPath);
         ArgumentNullException.ThrowIfNull(fileOperations);
 
-        string stagingPath = Path.GetFullPath(extractedPath);
+        // Only a relative path needs OS-backed resolution; a context-bound adapter
+        // resolves it under its own policy, other adapters keep pure resolution.
+        string stagingPath = !Path.IsPathFullyQualified(extractedPath)
+            && fileOperations is SystemPackageCacheFileOperations systemOperations
+                ? systemOperations.Context.FileSystem.GetFullPath(extractedPath, cancellationToken)
+                : Path.GetFullPath(extractedPath);
         string siblingPath = Path.Combine(
             Path.GetDirectoryName(stagingPath)!,
             $"legacy-{Guid.NewGuid():N}");
 
         // Keep the complete tree together, including any incidental package entry.
         // The final staging path must remain expanded for transaction recovery.
+        // Each step is its own protected operation; a later failure never repeats
+        // an earlier completed move.
         cancellationToken.ThrowIfCancellationRequested();
         fileOperations.MoveDirectory(stagingPath, siblingPath);
         cancellationToken.ThrowIfCancellationRequested();
@@ -35,13 +43,83 @@ internal static class PackageStructureNormalizer
         cancellationToken.ThrowIfCancellationRequested();
     }
 
+    internal static async ValueTask WrapLegacyRootAsync(
+        string extractedPath,
+        IPackageCacheFileOperations fileOperations,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(extractedPath);
+        ArgumentNullException.ThrowIfNull(fileOperations);
+        string stagingPath = !Path.IsPathFullyQualified(extractedPath)
+            && fileOperations is SystemPackageCacheFileOperations systemOperations
+                ? await systemOperations.Context.FileSystem.GetFullPathAsync(extractedPath, cancellationToken)
+                    .ConfigureAwait(false)
+                : Path.GetFullPath(extractedPath);
+        string siblingPath = Path.Combine(
+            Path.GetDirectoryName(stagingPath)!,
+            $"legacy-{Guid.NewGuid():N}");
+
+        // Match the synchronous boundary: finish each mutation's required
+        // barriers before observing cancellation between the three operations.
+        cancellationToken.ThrowIfCancellationRequested();
+        await fileOperations.MoveDirectoryAsync(stagingPath, siblingPath, CancellationToken.None)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        await fileOperations.CreateDirectoryAsync(stagingPath, CancellationToken.None).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        await fileOperations.MoveDirectoryAsync(
+                siblingPath, Path.Combine(stagingPath, PackageDirectoryName), CancellationToken.None)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
     internal static PackageArchiveLayoutResult ValidateAndNormalize(
         string extractedPath,
         PackageArchiveInventory inventory,
-        string? directive)
+        string? directive) =>
+        ValidateAndNormalize(
+            extractedPath,
+            inventory,
+            directive,
+            FileSystemContext.CreateDefault());
+
+    internal static PackageArchiveLayoutResult ValidateAndNormalize(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive,
+        FileSystemContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        PackageArchiveLayoutResult layout = ValidateLayout(extractedPath, inventory, directive, out bool normalizeRoots);
+        if (normalizeRoots)
+            _ = NormalizeRootEntries(extractedPath, context);
+        return layout;
+    }
+
+    internal static async ValueTask<PackageArchiveLayoutResult> ValidateAndNormalizeAsync(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive,
+        FileSystemContext context,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        cancellationToken.ThrowIfCancellationRequested();
+        PackageArchiveLayoutResult layout = ValidateLayout(extractedPath, inventory, directive, out bool normalizeRoots);
+        if (normalizeRoots)
+            await NormalizeRootEntriesAsync(extractedPath, context, cancellationToken).ConfigureAwait(false);
+        return layout;
+    }
+
+    private static PackageArchiveLayoutResult ValidateLayout(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive,
+        out bool normalizeRoots)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(extractedPath);
         ArgumentNullException.ThrowIfNull(inventory);
+        normalizeRoots = false;
 
         List<PackageArchiveInventoryNode> manifestNodes = inventory.Nodes
             .Where(node =>
@@ -110,9 +188,8 @@ internal static class PackageStructureNormalizer
                 }
             }
 
-            string contentPath = ancillaryRoots.Count > 0
-                ? NormalizeRootEntries(extractedPath)
-                : Path.Combine(extractedPath, PackageDirectoryName);
+            normalizeRoots = ancillaryRoots.Count > 0;
+            string contentPath = Path.Combine(extractedPath, PackageDirectoryName);
             return new PackageArchiveLayoutResult(
                 PackageArchiveLayout.Standard,
                 contentPath,
@@ -129,7 +206,8 @@ internal static class PackageStructureNormalizer
                     "Legacy package archives must not contain a package/ subtree or second manifest.");
             }
 
-            string contentPath = NormalizeRootEntries(extractedPath);
+            normalizeRoots = true;
+            string contentPath = Path.Combine(extractedPath, PackageDirectoryName);
             return new PackageArchiveLayoutResult(
                 PackageArchiveLayout.Legacy,
                 contentPath,
@@ -154,31 +232,61 @@ internal static class PackageStructureNormalizer
             ManifestFileName,
             StringComparison.Ordinal);
 
-    private static string NormalizeRootEntries(string extractedPath)
+    private static string NormalizeRootEntries(
+        string extractedPath,
+        FileSystemContext context)
     {
+        ResilientFileSystem fileSystem = context.FileSystem;
         string contentPath = Path.Combine(
             extractedPath,
             PackageDirectoryName);
-        Directory.CreateDirectory(contentPath);
+        fileSystem.CreateDirectory(contentPath);
 
-        foreach (string entryPath in Directory.EnumerateFileSystemEntries(extractedPath)
-            .Where(path => !string.Equals(
-                path,
-                contentPath,
-                StringComparison.OrdinalIgnoreCase))
-            .ToList())
+        // The snapshot is complete before the first move. Each move is then its own
+        // operation: a completed child is never revisited when a later one fails.
+        string[] entryPaths = fileSystem.SnapshotDirectory(extractedPath);
+        foreach (string entryPath in entryPaths)
         {
-            string destinationPath = Path.Combine(
-                contentPath,
-                Path.GetFileName(entryPath));
-            FileAttributes attributes = File.GetAttributes(entryPath);
-            if ((attributes & FileAttributes.Directory) != 0)
-                Directory.Move(entryPath, destinationPath);
-            else
-                File.Move(entryPath, destinationPath);
+            string entryName = Path.GetFileName(entryPath);
+            if (string.Equals(
+                entryName,
+                PackageDirectoryName,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string destinationPath = Path.Combine(contentPath, entryName);
+            // Directories and files share the one move operation, which rejects an
+            // occupied destination instead of merging.
+            fileSystem.MovePath(entryPath, destinationPath);
         }
 
         return contentPath;
+    }
+
+    private static async ValueTask NormalizeRootEntriesAsync(
+        string extractedPath,
+        FileSystemContext context,
+        CancellationToken cancellationToken)
+    {
+        ResilientFileSystem fileSystem = context.FileSystem;
+        string contentPath = Path.Combine(extractedPath, PackageDirectoryName);
+        cancellationToken.ThrowIfCancellationRequested();
+        await fileSystem.CreateDirectoryAsync(contentPath, CancellationToken.None).ConfigureAwait(false);
+        string[] entryPaths = await fileSystem.SnapshotDirectoryAsync(extractedPath, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (string entryPath in entryPaths)
+        {
+            string entryName = Path.GetFileName(entryPath);
+            if (string.Equals(entryName, PackageDirectoryName, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            cancellationToken.ThrowIfCancellationRequested();
+            await fileSystem.MovePathAsync(
+                    entryPath, Path.Combine(contentPath, entryName), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
     }
 
     private static PackageInstallException InvalidLayout(

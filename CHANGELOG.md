@@ -10,7 +10,49 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
-## [2026.1016.1417] - 2026-10-16
+### Added
+
+### Changed
+
+### Fixed
+- Corrected Unix native creation and descriptor-control argument delivery on
+  macOS arm64, preserving requested file permissions and descriptor options.
+- Allowed abandoned-staging cleanup to finish when the staging parent
+  disappeared during its bounded directory snapshot, while preserving unrelated
+  filesystem failures and cancellation.
+
+## [2026.1029.15100] - 2026-10-29
+
+### Added
+- Added a weekly, dispatchable fixture drift check
+  (`.github/workflows/fixture-drift.yaml`) that downloaded and verified every
+  pinned qualification fixture and froze a hash-addressed fixture bundle only
+  from a passing check, plus a separate, non-gating LIVE registry
+  interoperability job.
+- Added release recovery for already-published GitHub Releases: a dispatch at
+  the release tag finished the original run without rebuilding, re-qualified
+  its candidate on the original frozen inputs plus any release-scoped approval
+  under `docs/releases/approvals/`, and published through the same protected
+  job.
+- Added runtime-configurable bounded filesystem retries across the SDK and CLI,
+  with construction-time manager/component snapshots, standalone helper
+  coverage, and `--fs-retry-count`, `--fs-min-delay-ms`, and
+  `--fs-jitter-max-ms` flags plus their `FHIRPKG_FS_*` environment overrides.
+  Defaults allowed five retries after the first attempt with a 10 ms minimum
+  delay and fresh inclusive 0–10 ms additive jitter; zero allowed one attempt.
+
+### Changed
+- Release and validation runs required a frozen fixture bundle for their exact
+  qualification corpus, failed before building without one, and qualified
+  every case offline from that bundle.
+- Qualification jobs wrote job summaries and error annotations that listed
+  rejected artifacts and separated dependent from independent case failures.
+- Unified safely replayable managed/native filesystem faults under one
+  scheduler, retaining file bytes, offsets, mutation/barrier progress, async
+  waits, and final diagnostics without replaying parsing or HTTP requests.
+  Preserved cache/journal formats, Corrupt/Repair outcomes, linked resource/index
+  reads, direct INI reader sharing, caller-stream ownership, and separate normal
+  cache-lock coordination.
 
 ### Added
 - Added opt-in SDK `FhirPackageManagerOptions.Unmodified` and
@@ -43,6 +85,7 @@ qualification evidence) lives alongside this file under
 - Corrected `PackageRecord.SizeBytes` accounting to include expanded bytes from
   the whole archive, including siblings and publisher-supplied indexes, without
   recounting later derived indexes.
+- Fixed concurrent cache test recording in tests.
 
 ## [2026.901.1609] - 2026-09-01
 

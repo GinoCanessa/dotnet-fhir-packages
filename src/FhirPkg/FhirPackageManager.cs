@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
@@ -52,6 +53,7 @@ public sealed class FhirPackageManager :
     private readonly FhirPackageManagerOptions _options;
     private readonly PackageInstallLimits _managerInstallLimits;
     private readonly PackageFixupPolicy _fixupPolicy;
+    private readonly FileSystemContext _context;
     private readonly ILogger<FhirPackageManager> _logger;
     private readonly ILoggerFactory _loggerFactory;
     private readonly HttpClient _httpClient;
@@ -98,6 +100,7 @@ public sealed class FhirPackageManager :
         _options = options;
         _managerInstallLimits = managerInstallLimits;
         _fixupPolicy = configuration.FixupPolicy;
+        _context = configuration.FileSystemContext;
         ILoggerFactory factory = loggerFactory ?? NullLoggerFactory.Instance;
         _loggerFactory = factory;
         _logger = factory.CreateLogger<FhirPackageManager>();
@@ -108,6 +111,9 @@ public sealed class FhirPackageManager :
             logger: null,
             timeProvider: null,
             installLimits: managerInstallLimits,
+            context: _context,
+            fileOperations: new SystemPackageCacheFileOperations(_context),
+            faultObserver: NullPackageCacheFaultObserver.Instance,
             contentionObserver: contentionObserver);
 
         // Build HTTP client with configured timeout and redirect policy
@@ -130,7 +136,9 @@ public sealed class FhirPackageManager :
         _registryClient = RegistryClientFactory.BuildRegistryClient(
             options,
             _registryTransport,
-            factory);
+            factory,
+            timeProvider: null,
+            _context);
 
         // Build resolvers
         _versionResolver = new VersionResolver(_registryClient, _logger);
@@ -142,13 +150,14 @@ public sealed class FhirPackageManager :
             _fixupPolicy);
 
         // Build indexer
-        _packageIndexer = new PackageIndexer(factory.CreateLogger<PackageIndexer>());
+        _packageIndexer = new PackageIndexer(factory.CreateLogger<PackageIndexer>(), _context);
         _managedPackageBuilder =
             _packageIndexer as IManagedPackageIndexer;
         _managedPackageIndexer =
             _managedPackageBuilder
             ?? new PackageIndexer(
-                factory.CreateLogger<PackageIndexer>());
+                factory.CreateLogger<PackageIndexer>(),
+                _context);
 
         // Build optional memory cache
         if (options.ResourceCacheSize > 0)
@@ -172,6 +181,11 @@ public sealed class FhirPackageManager :
             FhirPackageManagerConfiguration.Create(options),
             loggerFactory,
             contentionObserver);
+
+    internal static FhirPackageManager CreateResolved(
+        FhirPackageManagerConfiguration configuration,
+        ILoggerFactory? loggerFactory = null) =>
+        new(configuration, loggerFactory, NullPackageCacheContentionObserver.Instance);
 
     /// <summary>
     /// Initializes a new <see cref="FhirPackageManager"/> with externally provided dependencies.
@@ -221,13 +235,10 @@ public sealed class FhirPackageManager :
             versionResolver,
             dependencyResolver,
             packageIndexer,
-            ValidateUnmodifiedCollaborators(
-                configuration,
-                cache,
-                packageIndexer),
+            configuration,
             logger,
             memoryCache,
-            CreateDirectHttpClient(configuration.Options),
+            httpClient: null,
             ownsHttpClient: true,
             loggerFactory: null,
             redirectsControlled: true)
@@ -273,6 +284,36 @@ public sealed class FhirPackageManager :
         FhirPackageManagerConfiguration configuration =
             FhirPackageManagerConfiguration.Create(options, managerInstallLimits);
 
+        return CreateWithConfiguration(
+            cache,
+            registryClient,
+            versionResolver,
+            dependencyResolver,
+            packageIndexer,
+            configuration,
+            logger,
+            memoryCache,
+            httpClient,
+            loggerFactory,
+            redirectsControlled);
+    }
+
+    internal static FhirPackageManager CreateWithConfiguration(
+        IPackageCache cache,
+        IRegistryClient registryClient,
+        IVersionResolver versionResolver,
+        IDependencyResolver dependencyResolver,
+        IPackageIndexer packageIndexer,
+        FhirPackageManagerConfiguration configuration,
+        ILogger<FhirPackageManager> logger,
+        MemoryResourceCache? memoryCache,
+        HttpClient httpClient,
+        ILoggerFactory? loggerFactory = null,
+        bool redirectsControlled = false,
+        ISet<object>? visited = null)
+    {
+        ArgumentNullException.ThrowIfNull(httpClient);
+
         return new FhirPackageManager(
             cache,
             registryClient,
@@ -285,7 +326,8 @@ public sealed class FhirPackageManager :
             httpClient,
             ownsHttpClient: false,
             loggerFactory,
-            redirectsControlled);
+            redirectsControlled,
+            visited);
     }
 
     private FhirPackageManager(
@@ -297,10 +339,11 @@ public sealed class FhirPackageManager :
         FhirPackageManagerConfiguration configuration,
         ILogger<FhirPackageManager> logger,
         MemoryResourceCache? memoryCache,
-        HttpClient httpClient,
+        HttpClient? httpClient,
         bool ownsHttpClient,
         ILoggerFactory? loggerFactory,
-        bool redirectsControlled)
+        bool redirectsControlled,
+        ISet<object>? visited = null)
     {
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(registryClient);
@@ -309,8 +352,10 @@ public sealed class FhirPackageManager :
         ArgumentNullException.ThrowIfNull(packageIndexer);
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(logger);
-        ArgumentNullException.ThrowIfNull(httpClient);
 
+        configuration.ValidateFileSystemCollaborators(
+            [cache, registryClient, versionResolver, dependencyResolver, packageIndexer],
+            visited ?? new HashSet<object>(ReferenceEqualityComparer.Instance));
         _ = ValidateUnmodifiedCollaborators(
             configuration,
             cache,
@@ -318,6 +363,7 @@ public sealed class FhirPackageManager :
 
         FhirPackageManagerOptions options = configuration.Options;
         PackageInstallLimits managerInstallLimits = configuration.InstallLimits;
+        _context = configuration.FileSystemContext;
 
         _cache = cache;
         _registryClient = registryClient;
@@ -328,21 +374,21 @@ public sealed class FhirPackageManager :
             packageIndexer as IManagedPackageIndexer;
         _managedPackageIndexer =
             _managedPackageBuilder
-            ?? new PackageIndexer(logger);
+            ?? new PackageIndexer(logger, _context);
         _options = options;
         _managerInstallLimits = managerInstallLimits;
         _fixupPolicy = configuration.FixupPolicy;
         _logger = logger;
         _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         _memoryCache = memoryCache;
-        _httpClient = httpClient;
-        _ownedHttpClient = ownsHttpClient ? httpClient : null;
+        _httpClient = httpClient ?? CreateDirectHttpClient(options);
+        _ownedHttpClient = ownsHttpClient ? _httpClient : null;
         _registryTransport = redirectsControlled
             ? RegistryHttpTransport.CreateRedirectControlled(
-                httpClient,
+                _httpClient,
                 options.HttpTimeout,
                 options.MaxRedirects)
-            : RegistryHttpTransport.CreateUnverified(httpClient);
+            : RegistryHttpTransport.CreateUnverified(_httpClient);
         _cacheMutationSubscription =
             cache is IPackageCacheMutationPublisher mutationPublisher
                 ? mutationPublisher.Subscribe(
@@ -544,7 +590,10 @@ public sealed class FhirPackageManager :
             effectiveOptions);
         _ = RequireHardenedCache();
 
-        string fullProjectPath = Path.GetFullPath(projectPath);
+        string fullProjectPath = await _context.FileSystem.GetFullPathAsync(
+                projectPath,
+                cancellationToken)
+            .ConfigureAwait(false);
         _logger.LogInformation(
             "RestoreAsync starting for project at '{ProjectPath}'.",
             fullProjectPath);
@@ -553,13 +602,26 @@ public sealed class FhirPackageManager :
         string manifestPath = Path.Combine(
             fullProjectPath,
             ManifestFileName);
-        if (!File.Exists(manifestPath))
+        if (!await FileExistsAsync(manifestPath, cancellationToken).ConfigureAwait(false))
         {
             throw new FileNotFoundException(
                 $"Package manifest not found at '{manifestPath}'.", manifestPath);
         }
 
-        string manifestJson = await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false);
+        string manifestJson;
+        await using (PositionedFileStream manifestStream =
+            await _context.FileSystem.OpenPositionedFileAsync(
+                    manifestPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan,
+                    cancellationToken)
+                .ConfigureAwait(false))
+        {
+            using StreamReader reader = new(manifestStream, leaveOpen: true);
+            manifestJson = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+        }
         PackageManifest manifest = JsonSerializer.Deserialize<PackageManifest>(manifestJson, s_jsonOptions)
             ?? throw new InvalidOperationException($"Failed to deserialize manifest at '{manifestPath}'.");
 
@@ -950,7 +1012,11 @@ public sealed class FhirPackageManager :
         ArgumentNullException.ThrowIfNull(registry);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        if (!File.Exists(tarballPath))
+        string fullTarballPath = await _context.FileSystem.GetFullPathAsync(
+                tarballPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!await FileExistsAsync(fullTarballPath, cancellationToken).ConfigureAwait(false))
         {
             throw new FileNotFoundException($"Tarball not found at '{tarballPath}'.", tarballPath);
         }
@@ -958,13 +1024,15 @@ public sealed class FhirPackageManager :
         _logger.LogInformation("Publishing tarball '{TarballPath}' to registry '{RegistryUrl}'.",
             tarballPath, registry.Url);
 
-        await using FileStream tarballStream = new FileStream(
-            tarballPath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            81_920,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using PositionedFileStream tarballStream =
+            await _context.FileSystem.OpenPositionedFileAsync(
+                    fullTarballPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan,
+                    cancellationToken)
+                .ConfigureAwait(false);
         PackageReference reference =
             await ExtractReferenceFromTarballAsync(
                     tarballStream,
@@ -978,7 +1046,10 @@ public sealed class FhirPackageManager :
                 registry,
                 _registryTransport,
                 _loggerFactory,
-                _managerInstallLimits);
+                _managerInstallLimits,
+                timeProvider: null,
+                gitHubToken: null,
+                _context);
 
         tarballStream.Position = 0;
         PublishResult result = await targetClient.PublishAsync(reference, tarballStream, cancellationToken).ConfigureAwait(false);
@@ -1231,8 +1302,9 @@ public sealed class FhirPackageManager :
         {
             _logger.LogWarning(
                 exception,
-                "Package {Directive} was installed, but its derivative resource index could not be generated.",
-                package.Reference.FhirDirective);
+                "Package {Directive} was installed, but its derivative resource index could not be generated: {Failure}",
+                package.Reference.FhirDirective,
+                FileSystemFailureContext.FormatMessage(exception));
             return package;
         }
     }
@@ -2515,16 +2587,16 @@ public sealed class FhirPackageManager :
                 exception,
                 "Package '{Directive}' committed, but dependency installation failed.",
                 directive);
-            return new PackageInstallResult
+            return AttachInstallFailure(new PackageInstallResult
             {
                 Directive = directive,
                 Package = exception.RootPackage,
                 Status = PackageInstallStatus.Failed,
-                ErrorMessage = exception.Message,
+                ErrorMessage = FileSystemFailureContext.FormatMessage(exception),
                 ErrorCode = exception.ErrorCode,
                 ErrorStage = exception.Stage,
                 DependencyFailures = exception.DependencyFailures
-            };
+            }, exception);
         }
         catch (PackageInstallException exception)
         {
@@ -2532,14 +2604,14 @@ public sealed class FhirPackageManager :
                 exception,
                 "Failed to install '{Directive}'.",
                 directive);
-            return new PackageInstallResult
+            return AttachInstallFailure(new PackageInstallResult
             {
                 Directive = directive,
                 Status = PackageInstallStatus.Failed,
-                ErrorMessage = exception.Message,
+                ErrorMessage = FileSystemFailureContext.FormatMessage(exception),
                 ErrorCode = exception.ErrorCode,
                 ErrorStage = exception.Stage
-            };
+            }, exception);
         }
         catch (ArgumentException exception)
         {
@@ -2551,7 +2623,7 @@ public sealed class FhirPackageManager :
             {
                 Directive = directive,
                 Status = PackageInstallStatus.Failed,
-                ErrorMessage = exception.Message,
+                ErrorMessage = FileSystemFailureContext.FormatMessage(exception),
                 ErrorCode =
                     PackageInstallErrorCode.InvalidPackageIdentity,
                 ErrorStage = PackageInstallStage.IdentityValidation
@@ -2706,7 +2778,7 @@ public sealed class FhirPackageManager :
         new PackageInstallException(
             PackageInstallErrorCode.CorruptCache,
             PackageInstallStage.CacheInspection,
-            $"The cache entry for '{cacheKey.MetadataKey}' could not be inspected: {exception.Message}",
+            $"The cache entry for '{cacheKey.MetadataKey}' could not be inspected: {FileSystemFailureContext.FormatMessage(exception)}",
             cacheKey.DisplayReference.FhirDirective,
             exception);
 
@@ -2913,9 +2985,17 @@ public sealed class FhirPackageManager :
                 continue;
             }
 
-            if (!attemptedPackages.Add(
-                    CreateDependencyReferenceKey(reference)))
+            string referenceKey = CreateDependencyReferenceKey(reference);
+            if (!attemptedPackages.Add(referenceKey))
             {
+                continue;
+            }
+
+            if (bootstrapFailures.TryGetValue(referenceKey, out PackageInstallResult? bootstrapFailure)
+                && FileSystemFailureContext.TryGetResult(bootstrapFailure, out _))
+            {
+                if (!failures.Contains(bootstrapFailure))
+                    failures.Add(bootstrapFailure);
                 continue;
             }
 
@@ -3014,16 +3094,16 @@ public sealed class FhirPackageManager :
             throw new DependencyInstallationException(
                 record,
                 [
-                    new PackageInstallResult
+                    AttachInstallFailure(new PackageInstallResult
                     {
                         Directive = record.Reference.FhirDirective,
                         Status = PackageInstallStatus.Failed,
-                        ErrorMessage = exception.Message,
+                        ErrorMessage = FileSystemFailureContext.FormatMessage(exception),
                         ErrorCode =
                             PackageInstallErrorCode.DependencyInstallationFailed,
                         ErrorStage =
                             PackageInstallStage.DependencyInstallation
-                    }
+                    }, exception)
                 ]);
         }
     }
@@ -3069,15 +3149,35 @@ public sealed class FhirPackageManager :
 
     private static PackageInstallResult CreateResolverExceptionResult(
         PackageInstallException exception) =>
-        new()
+        AttachInstallFailure(new PackageInstallResult
         {
             Directive = exception.Directive
                 ?? "dependency closure",
             Status = PackageInstallStatus.Failed,
-            ErrorMessage = exception.Message,
+            ErrorMessage = FileSystemFailureContext.FormatMessage(exception),
             ErrorCode = exception.ErrorCode,
             ErrorStage = exception.Stage
-        };
+        }, exception);
+
+    private static PackageInstallResult AttachInstallFailure(
+        PackageInstallResult result,
+        Exception exception)
+    {
+        if (exception is DependencyInstallationException dependencyException)
+        {
+            foreach (PackageInstallResult failure in dependencyException.DependencyFailures)
+            {
+                if (FileSystemFailureContext.TryGetResult(failure, out FileSystemFailureContext? context))
+                {
+                    return FileSystemFailureContext.AttachToResult(
+                        result with { ErrorMessage = $"{result.ErrorMessage} ({context.Format()})" },
+                        context);
+                }
+            }
+        }
+
+        return FileSystemFailureContext.AttachToResult(result, exception);
+    }
 
     /// <summary>
     /// Installs all packages referenced in a closure that are not already cached.
@@ -3214,9 +3314,17 @@ public sealed class FhirPackageManager :
         foreach (PackageReference reference in references)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!attemptedReferences.Add(
-                    CreateDependencyReferenceKey(reference)))
+            string referenceKey = CreateDependencyReferenceKey(reference);
+            if (!attemptedReferences.Add(referenceKey))
             {
+                continue;
+            }
+
+            if (bootstrapFailures.TryGetValue(referenceKey, out PackageInstallResult? bootstrapFailure)
+                && FileSystemFailureContext.TryGetResult(bootstrapFailure, out _))
+            {
+                if (!results.Contains(bootstrapFailure))
+                    results.Add(bootstrapFailure);
                 continue;
             }
 
@@ -3345,10 +3453,11 @@ public sealed class FhirPackageManager :
     /// Extracts a <see cref="PackageReference"/> from a tarball by reading its manifest.
     /// </summary>
     private async Task<PackageReference> ExtractReferenceFromTarballAsync(
-        FileStream tarballStream,
+        Stream tarballStream,
         CancellationToken cancellationToken)
     {
-        long archiveLength = tarballStream.Length;
+        long archiveLength = await FileSystemContext.GetLengthAsync(tarballStream, cancellationToken)
+            .ConfigureAwait(false);
         if (archiveLength > _managerInstallLimits.MaxCompressedBytes)
         {
             throw new PackageInstallException(
@@ -3359,7 +3468,7 @@ public sealed class FhirPackageManager :
         }
 
         // Create a temporary directory (prefer system temp, fall back to cache)
-        string tempDir = TempDirectory.Create("fhirpkg", _cache.CacheDirectory);
+        string tempDir = await CreatePublishWorkspaceAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ArchiveExtractionMetrics metrics =
@@ -3368,6 +3477,7 @@ public sealed class FhirPackageManager :
                         tempDir,
                         _managerInstallLimits,
                         "package publish",
+                        _context,
                         cancellationToken)
                     .ConfigureAwait(false);
             PackageArchiveInventory inventory = metrics.Inventory
@@ -3377,14 +3487,18 @@ public sealed class FhirPackageManager :
                     "Package archive inventory was not produced.",
                     "package publish");
             PackageArchiveLayoutResult layout =
-                TarballExtractor.ValidateAndNormalizePackageStructure(
-                    tempDir,
-                    inventory,
-                    "package publish");
+                await TarballExtractor.ValidateAndNormalizePackageStructureAsync(
+                        tempDir,
+                        inventory,
+                        "package publish",
+                        _context,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             PackageIdentityValidationResult identity =
                 await PackageIdentityValidator.DiscoverAsync(
                         layout.ManifestPath,
                         "package publish",
+                        _context,
                         cancellationToken)
                     .ConfigureAwait(false);
             return identity.ManifestReference;
@@ -3392,9 +3506,65 @@ public sealed class FhirPackageManager :
         finally
         {
             // Clean up temp directory
-            try { Directory.Delete(tempDir, recursive: true); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Failed to clean up temp directory '{TempDir}'", tempDir); }
+            try
+            {
+                await _context.FileSystem.DeleteAsync(
+                        tempDir,
+                        FileSystemEntryKind.Directory,
+                        recursive: true,
+                        missingAllowed: false,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "Failed to clean up temp directory '{TempDir}': {Failure}",
+                    tempDir,
+                    FileSystemFailureContext.FormatMessage(exception));
+            }
         }
+    }
+
+    private async Task<bool> FileExistsAsync(
+        string fullPath,
+        CancellationToken cancellationToken)
+    {
+        // These legacy probes follow links, just as File.Exists did. Required
+        // cache payload reads retain their separate no-follow protections.
+        FileSystemProbeResult probe = await _context.FileSystem.ExecuteAsync(
+                "ProbeFollowing",
+                () => _context.Primitives.Probe(fullPath, followLinks: true),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return probe.Exists
+            && probe.Kind is not (FileSystemEntryKind.Directory or FileSystemEntryKind.DirectorySymbolicLink);
+    }
+
+    private async Task<string> CreatePublishWorkspaceAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            string tempRoot = await _context.FileSystem.GetTempPathAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(tempRoot))
+            {
+                string path = Path.Combine(tempRoot, $"fhirpkg-{Guid.NewGuid():N}");
+                await _context.FileSystem.CreateDirectoryAsync(path, cancellationToken).ConfigureAwait(false);
+                return path;
+            }
+        }
+        catch (Exception exception)
+            when (exception is IOException or UnauthorizedAccessException
+                || FileSystemFailureContext.TryGetOrigin(exception, out _))
+        {
+            // A distinct fallback destination, never a second system-temp sequence.
+        }
+
+        string fallback = Path.Combine(_cache.CacheDirectory, ".temp", $"fhirpkg-{Guid.NewGuid():N}");
+        await _context.FileSystem.CreateDirectoryAsync(fallback, cancellationToken).ConfigureAwait(false);
+        return fallback;
     }
 
     /// <summary>

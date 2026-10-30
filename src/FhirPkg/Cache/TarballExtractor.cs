@@ -3,6 +3,7 @@
 using System.Formats.Tar;
 using System.IO.Compression;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 
 namespace FhirPkg.Cache;
 
@@ -43,6 +44,7 @@ public static class TarballExtractor
                 destinationPath,
                 limits,
                 directive: null,
+                FileSystemContext.CreateDefault(),
                 ct)
             .ConfigureAwait(false);
     }
@@ -52,16 +54,66 @@ public static class TarballExtractor
         string destinationPath,
         PackageInstallLimits limits,
         string? directive,
+        CancellationToken ct) =>
+        await ExtractAsync(
+                tarballStream,
+                destinationPath,
+                limits,
+                directive,
+                FileSystemContext.CreateDefault(),
+                ct)
+            .ConfigureAwait(false);
+
+    internal static async Task<ArchiveExtractionMetrics> ExtractAsync(
+        Stream tarballStream,
+        string destinationPath,
+        PackageInstallLimits limits,
+        string? directive,
+        FileSystemContext context,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(tarballStream);
         ArgumentNullException.ThrowIfNull(destinationPath);
         ArgumentNullException.ThrowIfNull(limits);
+        ArgumentNullException.ThrowIfNull(context);
         limits.Validate();
 
-        Directory.CreateDirectory(destinationPath);
-        string fullDestination = Path.GetFullPath(destinationPath);
+        ResilientFileSystem fileSystem = context.FileSystem;
+        await fileSystem.CreateDirectoryAsync(destinationPath, ct).ConfigureAwait(false);
+        string fullDestination = await fileSystem.GetFullPathAsync(destinationPath, ct)
+            .ConfigureAwait(false);
 
+        // An ordinary caller file is borrowed below gzip/tar, so a failed file
+        // read never replays parsing. Other streams are consumed once, as before.
+        Stream source = FileSystemContext.ProtectRead(tarballStream, context);
+        bool ownsSource = !ReferenceEquals(source, tarballStream);
+        try
+        {
+            return await ExtractCoreAsync(
+                    source,
+                    fullDestination,
+                    limits,
+                    directive,
+                    fileSystem,
+                    ct)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            // A borrowed adapter never closes the caller's stream.
+            if (ownsSource)
+                await source.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<ArchiveExtractionMetrics> ExtractCoreAsync(
+        Stream tarballStream,
+        string fullDestination,
+        PackageInstallLimits limits,
+        string? directive,
+        ResilientFileSystem fileSystem,
+        CancellationToken ct)
+    {
         await using GZipStream gzipStream = new GZipStream(tarballStream, CompressionMode.Decompress, leaveOpen: true);
         using TarMetadataPreflightStream preflightStream =
             new TarMetadataPreflightStream(gzipStream, limits, directive);
@@ -147,7 +199,7 @@ public static class TarballExtractor
 
             if (isDirectory)
             {
-                Directory.CreateDirectory(targetPath);
+                await fileSystem.CreateDirectoryAsync(targetPath, ct).ConfigureAwait(false);
                 continue;
             }
 
@@ -162,16 +214,18 @@ public static class TarballExtractor
 
             string? parentDir = Path.GetDirectoryName(targetPath);
             if (parentDir is not null)
-                Directory.CreateDirectory(parentDir);
+                await fileSystem.CreateDirectoryAsync(parentDir, ct).ConfigureAwait(false);
 
             long entryBytes = 0;
-            await using (FileStream destination = new FileStream(
-                targetPath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                buffer.Length,
-                FileOptions.Asynchronous | FileOptions.SequentialScan))
+            await using (PositionedFileStream destination =
+                await fileSystem.OpenPositionedFileAsync(
+                        targetPath,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        FileOptions.Asynchronous | FileOptions.SequentialScan,
+                        ct)
+                    .ConfigureAwait(false))
             {
                 Stream? dataStream = entry.DataStream;
                 if (dataStream is null)
@@ -202,12 +256,14 @@ public static class TarballExtractor
                                 limits.MaxExpandedBytes);
                         }
 
-                        entryBytes += bytesRead;
-                        expandedBytes += bytesRead;
+                        // The destination retains its own copy of the block until the
+                        // write succeeds; counters advance once, after it.
                         await destination.WriteAsync(
                                 buffer.AsMemory(0, bytesRead),
                                 ct)
                             .ConfigureAwait(false);
+                        entryBytes += bytesRead;
+                        expandedBytes += bytesRead;
                     }
                 }
             }
@@ -345,14 +401,17 @@ public static class TarballExtractor
     public static void NormalizePackageStructure(string extractedPath)
     {
         ArgumentNullException.ThrowIfNull(extractedPath);
+        FileSystemContext context = FileSystemContext.CreateDefault();
         PackageArchiveInventory inventory =
             PackageArchiveInventory.FromFileSystem(
                 extractedPath,
-                directive: null);
+                directive: null,
+                context);
         _ = PackageStructureNormalizer.ValidateAndNormalize(
             extractedPath,
             inventory,
-            directive: null);
+            directive: null,
+            context);
     }
 
     /// <summary>
@@ -368,6 +427,30 @@ public static class TarballExtractor
             extractedPath,
             inventory,
             directive);
+
+    internal static PackageArchiveLayoutResult ValidateAndNormalizePackageStructure(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive,
+        FileSystemContext context) =>
+        PackageStructureNormalizer.ValidateAndNormalize(
+            extractedPath,
+            inventory,
+            directive,
+            context);
+
+    internal static ValueTask<PackageArchiveLayoutResult> ValidateAndNormalizePackageStructureAsync(
+        string extractedPath,
+        PackageArchiveInventory inventory,
+        string? directive,
+        FileSystemContext context,
+        CancellationToken cancellationToken) =>
+        PackageStructureNormalizer.ValidateAndNormalizeAsync(
+            extractedPath,
+            inventory,
+            directive,
+            context,
+            cancellationToken);
 
     private static bool IsRegularFile(TarEntryType entryType) =>
         entryType is TarEntryType.RegularFile

@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
@@ -25,6 +26,58 @@ public sealed class FhirPackageManagerIndexingTests : IDisposable
     private readonly string _cacheRoot = Path.Combine(
         AppContext.BaseDirectory,
         $"fhir-manager-resources-{Guid.NewGuid():N}");
+
+    [Fact]
+    public async Task ManagerOwnedCacheAndIndexer_RetryPhysicalReadsWithTheSameContext()
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 1);
+        FhirPackageManagerOptions options = new()
+        {
+            CachePath = _cacheRoot,
+            IncludeCiBuilds = false,
+            IncludeHl7WebsiteFallback = false,
+        };
+        using FhirPackageManager manager = FhirPackageManager.CreateResolved(
+            FhirPackageManagerConfiguration.CreateResolved(options, context));
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package/package.json", """{"name":"indexed.package","version":"1.0.0"}"""),
+            ArbitraryTarBuilder.File("package/patient.json", """{"resourceType":"Patient","id":"shared"}"""));
+        PackageRecord record = await manager.ImportAsync(
+            archive, options: null, TestContext.Current.CancellationToken);
+        string resourcePath = Path.Combine(record.ContentPath, "patient.json");
+        bool failed = false;
+        files.Set<int>("ReadAtAsync", call =>
+        {
+            if (call.Path == resourcePath && !failed)
+            {
+                failed = true;
+                return ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "index resource read", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.ReadAt(
+                call.Handle!, call.Buffer, call.Offset!.Value, call.Path!);
+        });
+        files.Calls.Clear();
+        options.FileSystemRetry.RetryCount = 0;
+
+        PackageIndex? index = await manager.IndexPackageAsync(
+            record.Reference, new IndexingOptions { ForceReindex = true }, TestContext.Current.CancellationToken);
+        IReadOnlyList<ResourceInfo> resources = await manager.FindByResourceTypeAsync(
+            "Patient", record.Reference.FhirDirective, TestContext.Current.CancellationToken);
+
+        index!.Files.Single().Id.ShouldBe("shared");
+        resources.ShouldHaveSingleItem().Id.ShouldBe("shared");
+        files.AsyncWaits.ShouldBe([10]);
+        files.Waits.ShouldBeEmpty();
+        FileSystemPrimitiveCall[] reads = files.Calls.Where(call =>
+            call.Operation == "ReadAtAsync" && call.Path == resourcePath).ToArray();
+        reads.Count(call => call.Offset == 0).ShouldBe(2);
+        reads.Select(call => call.Handle).Distinct().Count().ShouldBe(1);
+        files.Calls.ShouldContain(call => call.Operation == "ReadAtAsync"
+            && call.Path!.EndsWith("package.json", StringComparison.Ordinal));
+        files.Calls.ShouldContain(call => call.Operation == "WriteAtAsync");
+        File.Exists(Path.Combine(record.ContentPath, ".index.json")).ShouldBeTrue();
+    }
 
     public static TheoryData<bool, bool, string, string> IndexModes
     {

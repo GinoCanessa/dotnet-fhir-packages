@@ -6,6 +6,7 @@ using System.IO.Compression;
 using System.Text;
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Tests.Support;
 using Shouldly;
@@ -606,6 +607,102 @@ public class TarballExtractorLimitTests : IDisposable
         exception.ErrorCode.ShouldBe(PackageInstallErrorCode.InvalidArchive);
         exception.Stage.ShouldBe(PackageInstallStage.ArchiveValidation);
         exception.InnerException.ShouldBeOfType<InvalidDataException>();
+    }
+
+    [Fact]
+    public async Task Extract_PartialWriteCountsExpandedBytesOnce()
+    {
+        byte[] content = Encoding.UTF8.GetBytes("partial write content");
+        using MemoryStream archive = CreateArchive(("package/a.txt", content));
+        ScriptedFileSystemPrimitives primitives = SystemFiles();
+        primitives.Enqueue<bool>("WriteAtAsync", call =>
+        {
+            RandomAccess.Write(call.Handle!, call.Content.Span[..4], call.Offset!.Value);
+            return ScriptedFileSystemPrimitives.NativeFailure<bool>(1117, "WriteAtAsync", call.Path);
+        });
+        string destination = GetDestination();
+
+        ArchiveExtractionMetrics metrics = await TarballExtractor.ExtractAsync(
+            archive,
+            destination,
+            CreateLimits(),
+            "example.package#1.0.0",
+            primitives.CreateContext(),
+            TestContext.Current.CancellationToken);
+
+        metrics.ExpandedBytes.ShouldBe(content.Length);
+        metrics.LargestEntryBytes.ShouldBe(content.Length);
+        primitives.Count("WriteAtAsync").ShouldBeGreaterThanOrEqualTo(2);
+        (await File.ReadAllBytesAsync(
+            Path.Combine(destination, "package", "a.txt"),
+            TestContext.Current.CancellationToken)).ShouldBe(content);
+    }
+
+    [Fact]
+    public async Task Extract_FileInputLeavesCallerOpenAtCurrentPosition()
+    {
+        byte[] content = Encoding.UTF8.GetBytes("file input");
+        Directory.CreateDirectory(_testRoot);
+        string archivePath = Path.Combine(_testRoot, "input.tgz");
+        using (MemoryStream archive = CreateArchive(("package/a.txt", content)))
+        {
+            await File.WriteAllBytesAsync(
+                archivePath,
+                archive.ToArray(),
+                TestContext.Current.CancellationToken);
+        }
+
+        await using FileStream input = new FileStream(
+            archivePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            4096,
+            FileOptions.Asynchronous);
+        ScriptedFileSystemPrimitives primitives = SystemFiles();
+
+        await TarballExtractor.ExtractAsync(
+            input,
+            GetDestination(),
+            CreateLimits(),
+            "example.package#1.0.0",
+            primitives.CreateContext(),
+            TestContext.Current.CancellationToken);
+
+        input.CanRead.ShouldBeTrue();
+        input.Position.ShouldBe(input.Length);
+    }
+
+    [Fact]
+    public async Task Extract_MalformedArchiveDoesNotInvokeRetryScheduler()
+    {
+        using MemoryStream archive = CreateTruncatedArchive();
+        ScriptedFileSystemPrimitives primitives = SystemFiles();
+
+        PackageInstallException exception =
+            await Should.ThrowAsync<PackageInstallException>(
+                () => TarballExtractor.ExtractAsync(
+                    archive,
+                    GetDestination(),
+                    CreateLimits(),
+                    "example.package#1.0.0",
+                    primitives.CreateContext(),
+                    TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(PackageInstallErrorCode.InvalidArchive);
+        primitives.Waits.ShouldBeEmpty();
+        primitives.AsyncWaits.ShouldBeEmpty();
+    }
+
+    private static ScriptedFileSystemPrimitives SystemFiles()
+    {
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(
+            SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<IEnumerator<string>>(
+            "CreateDirectoryEnumerator",
+            call => SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        return primitives;
     }
 
     private async Task AssertNativeTreeAsync(

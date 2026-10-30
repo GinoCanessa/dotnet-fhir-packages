@@ -13,7 +13,7 @@ namespace FhirPkg.Qualification;
 internal sealed class QualificationRunner
 {
     private readonly QualificationArguments _arguments;
-    private readonly QualificationCorpus _corpus;
+    private QualificationCorpus _corpus;
     private readonly QualificationBuildSnapshot _build;
     private readonly ReportSanitizer _sanitizer;
     private readonly QualificationReport _report;
@@ -21,9 +21,12 @@ internal sealed class QualificationRunner
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, QualificationArtifactResult>
         _artifactResults = new(StringComparer.Ordinal);
+    private readonly HttpMessageHandler? _acquisitionHandler;
     private readonly string _workspaceRoot;
     private readonly string _downloadRoot;
     private readonly string _fixtureRoot;
+    private QualificationManagerFactory _managerFactory = new();
+    private FixtureRequestLog? _requestLog;
 
     internal QualificationRunner(
         QualificationArguments arguments,
@@ -31,7 +34,9 @@ internal sealed class QualificationRunner
         QualificationBuildSnapshot build,
         ReportSanitizer sanitizer,
         DateTimeOffset startedUtc,
-        string corpusSha256)
+        string corpusSha256,
+        HttpMessageHandler? acquisitionHandler = null,
+        FixtureRequestLog? requestLog = null)
     {
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentNullException.ThrowIfNull(corpus);
@@ -40,6 +45,8 @@ internal sealed class QualificationRunner
         _corpus = corpus;
         _build = build;
         _sanitizer = sanitizer;
+        _acquisitionHandler = acquisitionHandler;
+        _requestLog = requestLog;
         _workspaceRoot = Path.Combine(
             arguments.CacheRoot,
             ".qualification");
@@ -80,46 +87,151 @@ internal sealed class QualificationRunner
         CancellationToken cancellationToken)
     {
         EnsureEmptyRoot();
-        Directory.CreateDirectory(_downloadRoot);
-        Directory.CreateDirectory(_fixtureRoot);
-
-        await AcquireLocalFixtureAsync(cancellationToken)
+        await AcquireArtifactsAsync(
+                _acquisitionHandler,
+                cancellationToken)
             .ConfigureAwait(false);
-        using (ArtifactDownloader downloader = new(
-            _downloadRoot,
-            _arguments.HttpTimeout))
-        {
-            foreach (ImmutableArtifactDefinition artifact in
-                _corpus.ImmutableArtifacts.OrderBy(
-                    artifact => artifact.Id,
-                    StringComparer.Ordinal))
-            {
-                await AcquireRemoteArtifactAsync(
-                        downloader,
-                        "immutable",
-                        artifact.Id,
-                        artifact.Uri,
-                        artifact.Sha256,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
+        await RunQualificationCasesAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return FinalizeReport();
+    }
 
-            foreach (MutableArtifactDefinition artifact in
-                _corpus.MutableArtifacts.OrderBy(
-                    artifact => artifact.Id,
-                    StringComparer.Ordinal))
-            {
-                await AcquireRemoteArtifactAsync(
-                        downloader,
-                        "mutable",
-                        artifact.Id,
-                        artifact.Uri,
-                        expectedSha256: null,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
+    internal async Task<QualificationReport> ValidateOnlyAsync(
+        CancellationToken cancellationToken)
+    {
+        await RunCaseAsync(
+                "validate-only",
+                ValidateOnlyCoreAsync,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return FinalizeReport();
+    }
+
+    internal async Task<QualificationReport> FreezeAsync(
+        CancellationToken cancellationToken)
+    {
+        string bundlePath = _arguments.FreezeBundlePath
+            ?? throw new QualificationInvariantException(
+                "Freeze mode requires a bundle output directory.");
+        EnsureEmptyRoot();
+        await AcquireArtifactsAsync(
+                _acquisitionHandler,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await RunCaseAsync(
+                FixtureBundle.FreezeCaseId,
+                (context, token) => FreezeBundleAsync(
+                    context,
+                    bundlePath,
+                    token),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return FinalizeReport();
+    }
+
+    internal async Task<QualificationReport> DeriveAsync(
+        CancellationToken cancellationToken)
+    {
+        string derivedPath = _arguments.DeriveBundlePath
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires a bundle output directory.");
+        string bundlePath = _arguments.BundlePath
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires a base bundle.");
+        string bundleSha256 = _arguments.BundleSha256
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires the expected base bundle SHA-256.");
+        string approvalPath = _arguments.ApprovalPath
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires an approval file.");
+        string approvalCommit = _arguments.ApprovalCommit
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires the approval commit.");
+        string releaseTag = _arguments.ReleaseTag
+            ?? throw new QualificationInvariantException(
+                "Derive mode requires the release tag.");
+        EnsureEmptyRoot();
+        await RunCaseAsync(
+                FixtureBundle.DeriveCaseId,
+                (context, token) => DeriveBundleAsync(
+                    context,
+                    derivedPath,
+                    bundlePath,
+                    bundleSha256,
+                    approvalPath,
+                    approvalCommit,
+                    releaseTag,
+                    token),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return FinalizeReport();
+    }
+
+    internal Task<QualificationReport> RunBundleAsync(
+        string bundlePath,
+        string bundleSha256,
+        CancellationToken cancellationToken) =>
+        RunBundleAsync(
+            bundlePath,
+            bundleSha256,
+            _arguments.ReleaseTag,
+            cancellationToken);
+
+    internal async Task<QualificationReport> RunBundleAsync(
+        string bundlePath,
+        string bundleSha256,
+        string? releaseTag,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(bundlePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bundleSha256);
+        EnsureEmptyRoot();
+        VerifiedFixtureBundle? verified = null;
+        FixtureRoutes? routes = null;
+        await RunCaseAsync(
+                FixtureBundle.VerifyCaseId,
+                async (context, token) =>
+                {
+                    VerifiedFixtureBundle bundle = await VerifyBundleAsync(
+                            context,
+                            bundlePath,
+                            bundleSha256,
+                            releaseTag,
+                            token)
+                        .ConfigureAwait(false);
+                    routes = await FixtureRoutes.CreateAsync(
+                            bundle,
+                            token)
+                        .ConfigureAwait(false);
+                    verified = bundle;
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (verified is null || routes is null)
+            return FinalizeReport();
+
+        _corpus = verified.EffectiveCorpus;
+        FixtureRequestLog log = new();
+        _requestLog = log;
+        _managerFactory = new QualificationManagerFactory(routes, log);
+        using (FixtureRegistryHandler handler = new(routes, log))
+        {
+            await AcquireArtifactsAsync(
+                    handler,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
+        // A request the routes could not serve already failed its artifact.
+        _ = log.Drain();
+        await RunQualificationCasesAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return FinalizeReport();
+    }
+
+    private async Task RunQualificationCasesAsync(
+        CancellationToken cancellationToken)
+    {
         await RunCaseAsync(
             "01-immutable-expected-stream",
             InstallImmutableCorpusAsync,
@@ -168,22 +280,341 @@ internal sealed class QualificationRunner
             "12-process-host",
             VerifyProcessHostAsync,
             cancellationToken).ConfigureAwait(false);
-
-        return FinalizeReport();
     }
 
-    internal async Task<QualificationReport> ValidateOnlyAsync(
+    private async Task AcquireArtifactsAsync(
+        HttpMessageHandler? handler,
         CancellationToken cancellationToken)
     {
-        await RunCaseAsync(
-                "validate-only",
-                ValidateOnlyCoreAsync,
-                cancellationToken)
+        Directory.CreateDirectory(_downloadRoot);
+        Directory.CreateDirectory(_fixtureRoot);
+
+        await AcquireLocalFixtureAsync(cancellationToken)
             .ConfigureAwait(false);
-        return FinalizeReport();
+        using (ArtifactDownloader downloader = new(
+            _downloadRoot,
+            _arguments.HttpTimeout,
+            handler))
+        {
+            foreach (ImmutableArtifactDefinition artifact in
+                _corpus.ImmutableArtifacts.OrderBy(
+                    artifact => artifact.Id,
+                    StringComparer.Ordinal))
+            {
+                await AcquireRemoteArtifactAsync(
+                        downloader,
+                        "immutable",
+                        artifact.Id,
+                        artifact.Uri,
+                        artifact.Sha256,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            foreach (MutableArtifactDefinition artifact in
+                _corpus.MutableArtifacts.OrderBy(
+                    artifact => artifact.Id,
+                    StringComparer.Ordinal))
+            {
+                await AcquireRemoteArtifactAsync(
+                        downloader,
+                        "mutable",
+                        artifact.Id,
+                        artifact.Uri,
+                        expectedSha256: null,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
     }
 
-    private QualificationReport FinalizeReport()
+    private async Task FreezeBundleAsync(
+        QualificationCaseContext context,
+        string bundlePath,
+        CancellationToken cancellationToken)
+    {
+        QualificationArtifactResult[] failed = _artifactResults.Values
+            .Where(result => !result.Success)
+            .OrderBy(
+                result => result.Kind,
+                StringComparer.Ordinal)
+            .ThenBy(
+                result => result.Id,
+                StringComparer.Ordinal)
+            .ToArray();
+        if (failed.Length > 0)
+        {
+            context.Detail(
+                FixtureBundle.BlockedArtifactsDetailName,
+                string.Join(
+                    ",",
+                    failed.Select(result => result.Id)));
+            throw new FixtureBundleException(
+                QualificationFailureCodes.BundleFreezeBlocked,
+                $"No bundle was frozen because {failed.Length} artifact(s) failed: {string.Join(", ", failed.Select(DescribeBlockedArtifact))}.");
+        }
+
+        string bundleSha256 = await FixtureBundleWriter.WriteFrozenAsync(
+                bundlePath,
+                _corpus,
+                _report.CorpusSha256,
+                _artifacts,
+                cancellationToken)
+            .ConfigureAwait(false);
+        context.Detail(
+            FixtureBundle.BundleSha256DetailName,
+            bundleSha256);
+    }
+
+    private static string DescribeBlockedArtifact(
+        QualificationArtifactResult result) =>
+        $"{result.Id} ({result.Failure?.Code ?? "unclassified"})";
+
+    private async Task DeriveBundleAsync(
+        QualificationCaseContext context,
+        string derivedPath,
+        string bundlePath,
+        string bundleSha256,
+        string approvalPath,
+        string approvalCommit,
+        string releaseTag,
+        CancellationToken cancellationToken)
+    {
+        // A recovery bundle derives only from a frozen bundle, so the base is
+        // verified with no release tag and therefore carries no approvals.
+        VerifiedFixtureBundle baseBundle = await FixtureBundleVerifier
+            .VerifyAsync(
+                bundlePath,
+                bundleSha256,
+                _corpus,
+                _report.CorpusSha256,
+                releaseTag: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+        context.Detail(
+            FixtureBundle.BaseBundleSha256DetailName,
+            baseBundle.Digest);
+
+        FixtureApproval approval = await ReadApprovalAsync(
+                approvalPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        approval.ValidateStructure();
+        approval.ValidateAgainst(_corpus, releaseTag);
+        foreach (FixtureApprovalReplacement replacement in
+            approval.Replacements)
+        {
+            FixtureBundleArtifact entry =
+                baseBundle.GetArtifact(replacement.Artifact);
+            if (!string.Equals(
+                    entry.Sha256,
+                    replacement.PinnedSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new FixtureBundleException(
+                    QualificationFailureCodes.ApprovalInvalid,
+                    $"Approval for '{replacement.Artifact}' records pinned SHA-256 {replacement.PinnedSha256}, but the base bundle holds {entry.Sha256}.");
+            }
+        }
+
+        foreach (FixtureBundleApproval applied in
+            approval.ToBundleApprovals(approvalCommit))
+        {
+            context.Detail(
+                FixtureBundle.GetApprovalDetailName(applied.Artifact),
+                FixtureBundle.DescribeApproval(applied));
+        }
+
+        Dictionary<string, DownloadedArtifact> approvedArtifacts =
+            await FetchApprovedArtifactsAsync(
+                    approval,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        string derivedSha256 = await FixtureBundleWriter.WriteDerivedAsync(
+                derivedPath,
+                baseBundle,
+                _corpus,
+                _report.CorpusSha256,
+                approval,
+                approvalCommit,
+                releaseTag,
+                approvedArtifacts,
+                cancellationToken)
+            .ConfigureAwait(false);
+        context.Detail(
+            FixtureBundle.DerivedBundleSha256DetailName,
+            derivedSha256);
+    }
+
+    private static async Task<FixtureApproval> ReadApprovalAsync(
+        string approvalPath,
+        CancellationToken cancellationToken)
+    {
+        byte[] content;
+        try
+        {
+            content = await File.ReadAllBytesAsync(
+                    approvalPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+            when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new FixtureBundleException(
+                QualificationFailureCodes.ApprovalInvalid,
+                $"The approval file could not be read: {exception.Message}");
+        }
+
+        return FixtureApproval.Parse(content);
+    }
+
+    // Fetches each approved artifact once, live, from its corpus URI.
+    private async Task<Dictionary<string, DownloadedArtifact>>
+        FetchApprovedArtifactsAsync(
+            FixtureApproval approval,
+            CancellationToken cancellationToken)
+    {
+        Dictionary<string, DownloadedArtifact> fetched =
+            new(StringComparer.Ordinal);
+        List<string> unavailable = [];
+        using (ArtifactDownloader downloader = new(
+            _downloadRoot,
+            _arguments.HttpTimeout,
+            _acquisitionHandler))
+        {
+            foreach (FixtureApprovalReplacement replacement in
+                approval.Replacements.OrderBy(
+                    replacement => replacement.Artifact,
+                    StringComparer.Ordinal))
+            {
+                ImmutableArtifactDefinition definition =
+                    _corpus.GetImmutable(replacement.Artifact);
+                DownloadedArtifact? artifact =
+                    await FetchApprovedArtifactAsync(
+                            downloader,
+                            definition,
+                            replacement.ApprovedSha256,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                if (artifact is not null)
+                {
+                    fetched[definition.Id] = artifact;
+                    continue;
+                }
+
+                QualificationFailure? failure =
+                    _artifactResults[definition.Id].Failure;
+                unavailable.Add(
+                    failure?.Code
+                        == QualificationFailureCodes.ApprovedBytesUnavailable
+                        ? failure.Message
+                        : $"upstream no longer serves the approved bytes for {definition.Id}: {failure?.Message ?? "no failure was recorded"}");
+            }
+        }
+
+        if (unavailable.Count > 0)
+        {
+            throw new FixtureBundleException(
+                QualificationFailureCodes.ApprovedBytesUnavailable,
+                string.Join("; ", unavailable));
+        }
+
+        return fetched;
+    }
+
+    private async Task<DownloadedArtifact?> FetchApprovedArtifactAsync(
+        ArtifactDownloader downloader,
+        ImmutableArtifactDefinition definition,
+        string approvedSha256,
+        CancellationToken cancellationToken)
+    {
+        QualificationArtifactResult result = new()
+        {
+            Kind = FixtureBundle.ImmutableKind,
+            Id = definition.Id,
+            SourceUri = definition.Uri,
+            ExpectedSha256 = approvedSha256,
+            Success = false
+        };
+        _artifactResults[definition.Id] = result;
+        try
+        {
+            DownloadedArtifact artifact =
+                await downloader.DownloadAsync(
+                        definition.Id,
+                        new Uri(definition.Uri),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            bool hashMatch = string.Equals(
+                approvedSha256,
+                artifact.ActualSha256,
+                StringComparison.Ordinal);
+            RecordDownload(result, artifact, hashMatch);
+            if (hashMatch)
+                return artifact;
+
+            result.Failure = new QualificationFailure
+            {
+                Code = QualificationFailureCodes.ApprovedBytesUnavailable,
+                ExceptionType = nameof(FixtureBundleException),
+                Message =
+                    $"upstream no longer serves the approved bytes for {definition.Id}: observed {artifact.ActualSha256}"
+            };
+        }
+        catch (Exception exception)
+        {
+            result.Failure = CreateFailure(exception);
+        }
+
+        return null;
+    }
+
+    private async Task<VerifiedFixtureBundle> VerifyBundleAsync(
+        QualificationCaseContext context,
+        string bundlePath,
+        string bundleSha256,
+        string? releaseTag,
+        CancellationToken cancellationToken)
+    {
+        VerifiedFixtureBundle bundle = await FixtureBundleVerifier
+            .VerifyAsync(
+                bundlePath,
+                bundleSha256,
+                _corpus,
+                _report.CorpusSha256,
+                releaseTag,
+                cancellationToken)
+            .ConfigureAwait(false);
+        context.Detail(
+            FixtureBundle.BundleSha256DetailName,
+            bundle.Digest);
+        context.Detail(
+            FixtureBundle.CorpusSha256DetailName,
+            bundle.Manifest.CorpusSha256);
+        IReadOnlyList<FixtureBundleApproval> approvals = bundle.Approvals;
+        if (approvals.Count == 0)
+        {
+            context.Detail(
+                FixtureBundle.ApprovalsDetailName,
+                FixtureBundle.NoApprovals);
+            return bundle;
+        }
+
+        context.Detail(
+            FixtureBundle.ApprovalsDetailName,
+            approvals.Count);
+        foreach (FixtureBundleApproval approval in approvals)
+        {
+            context.Detail(
+                FixtureBundle.GetApprovalDetailName(approval.Artifact),
+                FixtureBundle.DescribeApproval(approval));
+        }
+
+        return bundle;
+    }
+
+    internal QualificationReport FinalizeReport()
     {
         _report.Artifacts.AddRange(
             _artifactResults.Values
@@ -352,7 +783,8 @@ internal sealed class QualificationRunner
             {
                 result.Failure = new QualificationFailure
                 {
-                    Code = "LocalFixtureHashMismatch",
+                    Code = QualificationFailureCodes
+                        .LocalFixtureHashMismatch,
                     ExceptionType =
                         nameof(QualificationInvariantException),
                     Message =
@@ -397,18 +829,7 @@ internal sealed class QualificationRunner
                     expectedSha256,
                     artifact.ActualSha256,
                     StringComparison.Ordinal);
-            result.FinalUri = artifact.FinalUri?.AbsoluteUri;
-            result.ActualSha256 = artifact.ActualSha256;
-            result.HashMatch = hashMatch;
-            result.CompressedBytes = artifact.CompressedBytes;
-            result.ExpandedBytes = artifact.Metrics.ExpandedBytes;
-            result.LargestEntryBytes =
-                artifact.Metrics.LargestEntryBytes;
-            result.EntryCount = artifact.Metrics.EntryCount;
-            result.PublicationUtc = artifact.PublicationDate?
-                .ToUniversalTime()
-                .ToString("O");
-            result.Success = hashMatch is not false;
+            RecordDownload(result, artifact, hashMatch);
             if (result.Success)
             {
                 _artifacts[id] = artifact;
@@ -417,7 +838,8 @@ internal sealed class QualificationRunner
             {
                 result.Failure = new QualificationFailure
                 {
-                    Code = "ImmutableHashMismatch",
+                    Code = QualificationFailureCodes
+                        .ImmutableHashMismatch,
                     ExceptionType =
                         nameof(QualificationInvariantException),
                     Message =
@@ -431,7 +853,26 @@ internal sealed class QualificationRunner
         }
     }
 
-    private async Task RunCaseAsync(
+    private static void RecordDownload(
+        QualificationArtifactResult result,
+        DownloadedArtifact artifact,
+        bool? hashMatch)
+    {
+        result.FinalUri = artifact.FinalUri?.AbsoluteUri;
+        result.ActualSha256 = artifact.ActualSha256;
+        result.HashMatch = hashMatch;
+        result.CompressedBytes = artifact.CompressedBytes;
+        result.ExpandedBytes = artifact.Metrics.ExpandedBytes;
+        result.LargestEntryBytes =
+            artifact.Metrics.LargestEntryBytes;
+        result.EntryCount = artifact.Metrics.EntryCount;
+        result.PublicationUtc = artifact.PublicationDate?
+            .ToUniversalTime()
+            .ToString("O");
+        result.Success = hashMatch is not false;
+    }
+
+    internal async Task RunCaseAsync(
         string id,
         Func<QualificationCaseContext, CancellationToken, Task> action,
         CancellationToken cancellationToken)
@@ -461,6 +902,8 @@ internal sealed class QualificationRunner
         }
         finally
         {
+            RecordUnroutedRequests(result);
+            _managerFactory.DisposeTracked();
             stopwatch.Stop();
             result.DurationMilliseconds =
                 stopwatch.ElapsedMilliseconds;
@@ -471,6 +914,25 @@ internal sealed class QualificationRunner
                         right.Name));
             _report.Cases.Add(result);
         }
+    }
+
+    private void RecordUnroutedRequests(QualificationCaseResult result)
+    {
+        if (_requestLog is null)
+            return;
+
+        IReadOnlyList<string> unrouted = _requestLog.Drain();
+        if (unrouted.Count == 0)
+            return;
+
+        result.Failures.Add(new QualificationFailure
+        {
+            Code = QualificationFailureCodes.UnroutedFixtureRequest,
+            ExceptionType = nameof(QualificationInvariantException),
+            Message = _sanitizer.Sanitize(
+                $"Unrouted fixture request(s): {string.Join("; ", unrouted)}")
+        });
+        result.Success = false;
     }
 
     private async Task InstallImmutableCorpusAsync(
@@ -583,7 +1045,8 @@ internal sealed class QualificationRunner
         ImmutableArtifactDefinition expectedDefinition =
             _corpus.GetImmutable("hl7.fhir.r4b.core#4.3.0");
         string expectedCache = context.CreateEmptyCache("expected");
-        using (FhirPackageManager manager = CreateManager(expectedCache))
+        using (FhirPackageManager manager =
+            CreateRegistryManager(expectedCache))
         {
             QualificationProgress progress = new();
             PackageRecord record = await manager.InstallAsync(
@@ -623,7 +1086,8 @@ internal sealed class QualificationRunner
             _corpus.GetImmutable("hl7.terminology#7.2.0");
         string discoveryCache =
             context.CreateEmptyCache("discovery");
-        using (FhirPackageManager manager = CreateManager(discoveryCache))
+        using (FhirPackageManager manager =
+            CreateRegistryManager(discoveryCache))
         {
             PackageRecord record = await manager.ImportAsync(
                     new Uri(discoveryDefinition.Uri),
@@ -888,7 +1352,7 @@ internal sealed class QualificationRunner
             string directiveCache = context.CreateEmptyCache(
                 $"directive-{definition.Id}");
             using FhirPackageManager directiveManager =
-                CreateManager(directiveCache);
+                CreateRegistryManager(directiveCache);
             QualificationProgress directiveProgress = new();
             PackageRecord? directiveRecord =
                 await directiveManager.InstallAsync(
@@ -1284,14 +1748,25 @@ internal sealed class QualificationRunner
         string cachePath,
         CorruptCacheBehavior corruptCacheBehavior =
             CorruptCacheBehavior.Repair) =>
-        new(new FhirPackageManagerOptions
+        new(CreateManagerOptions(cachePath, corruptCacheBehavior));
+
+    private FhirPackageManager CreateRegistryManager(string cachePath) =>
+        _managerFactory.CreateRegistryManager(
+            CreateManagerOptions(
+                cachePath,
+                CorruptCacheBehavior.Repair));
+
+    private FhirPackageManagerOptions CreateManagerOptions(
+        string cachePath,
+        CorruptCacheBehavior corruptCacheBehavior) =>
+        new()
         {
             CachePath = cachePath,
             CorruptCacheBehavior = corruptCacheBehavior,
             HttpTimeout = _arguments.HttpTimeout,
             MaxParallelRegistryQueries = 3,
             ResourceCacheSize = 0
-        });
+        };
 
     private FhirPackageManager CreateSecondaryRegistryManager(
         string cachePath,
@@ -1310,7 +1785,7 @@ internal sealed class QualificationRunner
             VerifyChecksums = verifyChecksums
         };
         options.Registries.Add(RegistryEndpoint.FhirSecondary);
-        return new FhirPackageManager(options);
+        return _managerFactory.CreateRegistryManager(options);
     }
 
     private static FileStream OpenArtifact(
@@ -1417,6 +1892,7 @@ internal sealed class QualificationRunner
 
         return new QualificationFailure
         {
+            Code = QualificationFailureCodes.Classify(exception),
             ExceptionType = exception.GetType().Name,
             Message = _sanitizer.Sanitize(exception.Message)
         };
@@ -1447,8 +1923,10 @@ internal sealed class QualificationRunner
                 return artifact;
             }
 
-            throw new QualificationInvariantException(
-                $"Required artifact '{id}' was unavailable.");
+            Detail(
+                RequiredArtifactUnavailableException.DetailName,
+                id);
+            throw new RequiredArtifactUnavailableException(id);
         }
 
         internal string CreateEmptyCache(string? suffix = null)

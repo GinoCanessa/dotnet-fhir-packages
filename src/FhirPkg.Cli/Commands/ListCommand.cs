@@ -2,6 +2,7 @@
 
 using System.CommandLine;
 using FhirPkg.Cli.Formatting;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using Spectre.Console;
 
@@ -52,8 +53,8 @@ internal static class ListCommand
 
             try
             {
-                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
-                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
+                CliInvocationContext invocation = await CliInvocationContext.CreateAsync(globalOpts, ct);
+                FhirPackageManager manager = ManagerFactory.Create(invocation);
 
                 if (globalOpts.Verbose)
                 {
@@ -85,13 +86,12 @@ internal static class ListCommand
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, $"Cache error: {ex.Message}");
+                CommandHelpers.WriteErrorOutput(globalOpts, $"Cache error: {FileSystemFailureContext.FormatMessage(ex)}");
                 return ExitCodes.CacheError;
             }
             catch (Exception ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
-                return ExitCodes.GeneralError;
+                return CommandHelpers.WriteException(globalOpts, ex);
             }
         });
 

@@ -6,6 +6,7 @@ using System.Text;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
@@ -20,6 +21,169 @@ namespace FhirPkg.Tests;
 [Collection("EnvironmentVariable")]
 public sealed class FhirPackageManagerSourceTests
 {
+    [Fact]
+    public async Task Restore_ExhaustedManifestReadRetainsContext()
+    {
+        using TestDirectory directory = new();
+        string manifestPath = Path.Combine(directory.Path, "package.json");
+        await File.WriteAllTextAsync(
+            manifestPath, """{"name":"project.package","version":"1.0.0"}""",
+            TestContext.Current.CancellationToken);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(directory.Path);
+        files.Set<int>("ReadAtAsync", call =>
+            ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "ReadAtAsync", call.Path));
+        FileSystemContext context = files.CreateContext(retries: 2);
+        FhirPackageManagerConfiguration configuration = FhirPackageManagerConfiguration.CreateResolved(
+            new FhirPackageManagerOptions { CachePath = Path.Combine(directory.Path, "unused-cache") },
+            context);
+        Mock<IHardenedPackageCache> cache = new(MockBehavior.Strict);
+        Mock<IDependencyResolver> dependencies = new(MockBehavior.Strict);
+        using HttpClient http = new(new RejectingHttpMessageHandler());
+        using FhirPackageManager manager = FhirPackageManager.CreateWithConfiguration(
+            cache.Object,
+            new Mock<IRegistryClient>(MockBehavior.Strict).Object,
+            new Mock<IVersionResolver>(MockBehavior.Strict).Object,
+            dependencies.Object,
+            new Mock<IPackageIndexer>(MockBehavior.Strict).Object,
+            configuration, NullLogger<FhirPackageManager>.Instance, null, http);
+
+        IOException exception = await Should.ThrowAsync<IOException>(() => manager.RestoreAsync(
+            directory.Path, cancellationToken: TestContext.Current.CancellationToken));
+
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? failure).ShouldBeTrue();
+        failure!.Operation.ShouldBe("ReadAtAsync");
+        failure.Path.ShouldBe(manifestPath);
+        failure.AttemptCount.ShouldBe(3);
+        failure.RetriesUsed.ShouldBe(2);
+        failure.NativeErrorCode.ShouldBe(1117);
+        failure.Termination.ShouldBe(FileSystemFailureTermination.Exhausted);
+        FileSystemFailureContext.FormatMessage(exception).ShouldContain(manifestPath);
+        FileSystemFailureContext.FormatMessage(exception).ShouldContain("attempts 3, retries 2");
+        FileSystemPrimitiveCall[] reads = files.Calls.Where(call => call.Operation == "ReadAtAsync").ToArray();
+        reads.Length.ShouldBe(3);
+        reads.ShouldAllBe(call => call.Path == manifestPath && call.Offset == 0);
+        reads.Select(call => call.Handle).Distinct().Count().ShouldBe(1);
+        reads[0].Handle!.IsClosed.ShouldBeTrue();
+        files.Count("OpenFileHandle").ShouldBe(1);
+        files.Count("CloseFile").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        dependencies.VerifyNoOtherCalls();
+        cache.VerifyNoOtherCalls();
+        Directory.Exists(configuration.Options.CachePath).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Restore_MissingManifestDoesNotSpendFaultRetries()
+    {
+        using TestDirectory directory = new();
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(directory.Path);
+        FhirPackageManagerConfiguration configuration = FhirPackageManagerConfiguration.CreateResolved(
+            new FhirPackageManagerOptions { CachePath = Path.Combine(directory.Path, "cache") },
+            files.CreateContext());
+        using HttpClient http = new(new RejectingHttpMessageHandler());
+        using FhirPackageManager manager = FhirPackageManager.CreateWithConfiguration(
+            new Mock<IHardenedPackageCache>().Object,
+            new Mock<IRegistryClient>().Object,
+            new Mock<IVersionResolver>().Object,
+            new Mock<IDependencyResolver>().Object,
+            new Mock<IPackageIndexer>().Object,
+            configuration, NullLogger<FhirPackageManager>.Instance, null, http);
+
+        FileNotFoundException exception = await Should.ThrowAsync<FileNotFoundException>(() =>
+            manager.RestoreAsync(directory.Path, cancellationToken: TestContext.Current.CancellationToken));
+
+        exception.FileName.ShouldBe(Path.Combine(directory.Path, "package.json"));
+        FileSystemFailureContext.TryGetTerminal(exception, out _).ShouldBeFalse();
+        files.Count("Probe").ShouldBe(1);
+        files.Count("OpenFileHandle").ShouldBe(0);
+        files.AsyncWaits.ShouldBeEmpty();
+        files.Waits.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task CallerFile_ReadRetryPreservesCurrentPositionOwnershipAndReadWriteCompatibility()
+    {
+        using TestDirectory directory = new();
+        using MemoryStream archive = CreatePackageArchive("file.package", "1.0.0");
+        string path = Path.Combine(directory.Path, "caller.tgz");
+        await File.WriteAllBytesAsync(
+            path, [0x10, 0x20, 0x30, .. archive.ToArray()], TestContext.Current.CancellationToken);
+        using FileStream caller = new(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        caller.Position = 3;
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(directory.Path);
+        files.Enqueue("GetPosition", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "caller checkpoint", path));
+        files.Enqueue<int>("ReadBorrowedAsync", call =>
+        {
+            call.Stream!.ReadByte().ShouldBeGreaterThanOrEqualTo(0);
+            return ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "caller read", call.Path);
+        });
+        FhirPackageManagerConfiguration configuration = FhirPackageManagerConfiguration.CreateResolved(
+            new FhirPackageManagerOptions
+            {
+                CachePath = Path.Combine(directory.Path, "cache"),
+                IncludeCiBuilds = false,
+                IncludeHl7WebsiteFallback = false,
+            },
+            files.CreateContext(retries: 2));
+        using FhirPackageManager manager = FhirPackageManager.CreateResolved(configuration);
+
+        PackageRecord record = await manager.ImportAsync(
+            caller, options: null, TestContext.Current.CancellationToken);
+
+        record.Reference.ShouldBe(new PackageReference("file.package", "1.0.0"));
+        caller.CanRead.ShouldBeTrue();
+        caller.CanWrite.ShouldBeTrue();
+        caller.Position.ShouldBe(caller.Length);
+        files.Count("PrepareBorrowedRead").ShouldBe(1);
+        files.Calls.ShouldContain(call => call.Operation == "SetPosition" && call.Offset == 3);
+        files.Calls.ShouldNotContain(call => call.Operation == "OpenFileHandle" && call.Path == path);
+        files.Calls.Count(call => (call.Operation == "OpenDescriptor"
+                || (call.Operation == "OpenFileHandle" && call.Mode == FileMode.Open))
+            && Path.GetFileName(call.Path) == "archive.tgz").ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task ThirdPartyCache_ReceivesOriginalCallerFileWithoutManagerWrapping()
+    {
+        using TestDirectory directory = new();
+        string path = Path.Combine(directory.Path, "caller.tgz");
+        await File.WriteAllBytesAsync(path, [1, 2, 3], TestContext.Current.CancellationToken);
+        using FileStream caller = File.OpenRead(path);
+        caller.Position = 1;
+        PackageReference reference = new("external.package", "1.0.0");
+        PackageRecord record = new()
+        {
+            Reference = reference,
+            Manifest = new PackageManifest { Name = reference.Name, Version = reference.Version! },
+            DirectoryPath = directory.Path,
+            ContentPath = directory.Path,
+            Index = new PackageIndex { Files = [] },
+        };
+        Mock<IHardenedPackageCache> cache = new(MockBehavior.Strict);
+        cache.Setup(value => value.InstallAsync(
+                reference, caller, It.IsAny<InstallCacheOptions?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(record);
+        ScriptedFileSystemPrimitives files = new();
+        FhirPackageManagerConfiguration configuration = FhirPackageManagerConfiguration.CreateResolved(
+            new FhirPackageManagerOptions(), files.CreateContext(retries: 0));
+        using HttpClient http = new(new RejectingHttpMessageHandler());
+        using FhirPackageManager manager = FhirPackageManager.CreateWithConfiguration(
+            cache.Object, new Mock<IRegistryClient>().Object, new Mock<IVersionResolver>().Object,
+            new Mock<IDependencyResolver>().Object, new Mock<IPackageIndexer>().Object,
+            configuration, NullLogger<FhirPackageManager>.Instance, null, http);
+
+        (await manager.InstallAsync(
+            reference, caller, options: null, TestContext.Current.CancellationToken)).Reference.ShouldBe(reference);
+
+        cache.VerifyAll();
+        files.Calls.ShouldBeEmpty();
+        caller.Position.ShouldBe(1);
+        caller.CanRead.ShouldBeTrue();
+    }
+
     [Fact]
     public async Task ExpectedStream_UsesCurrentPositionAndLeavesCallerStreamOpen()
     {

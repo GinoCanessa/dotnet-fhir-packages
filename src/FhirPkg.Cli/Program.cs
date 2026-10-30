@@ -1,9 +1,9 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using System.CommandLine;
-using System.Text.Json;
+using System.CommandLine.Invocation;
+using System.CommandLine.Parsing;
 using FhirPkg.Cli.Commands;
-using FhirPkg.Cli.Formatting;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 
@@ -24,7 +24,10 @@ internal static class Program
     {
         RootCommand rootCommand = BuildRootCommand();
         ParseResult parseResult = rootCommand.Parse(args);
-        return await parseResult.InvokeAsync(new InvocationConfiguration(), CancellationToken.None);
+        bool retryOptionError = parseResult.Action is ParseErrorAction
+            && parseResult.Errors.Any(IsRetryOptionError);
+        int exitCode = await parseResult.InvokeAsync(new InvocationConfiguration(), CancellationToken.None);
+        return retryOptionError ? ExitCodes.InvalidArgs : exitCode;
     }
 
     /// <summary>
@@ -83,6 +86,24 @@ internal static class Program
             Recursive = true
         };
 
+        Option<int?> fsRetryCountOption = new Option<int?>("--fs-retry-count")
+        {
+            Description = "Filesystem retries after the first attempt (flag overrides environment, then SDK default).",
+            Recursive = true
+        };
+
+        Option<int?> fsMinimumDelayOption = new Option<int?>("--fs-min-delay-ms")
+        {
+            Description = "Minimum filesystem retry delay in milliseconds.",
+            Recursive = true
+        };
+
+        Option<int?> fsMaximumJitterOption = new Option<int?>("--fs-jitter-max-ms")
+        {
+            Description = "Inclusive maximum additive filesystem retry jitter in milliseconds.",
+            Recursive = true
+        };
+
         rootCommand.Add(cachePathOption);
         rootCommand.Add(unmodifiedOption);
         rootCommand.Add(verboseOption);
@@ -90,6 +111,9 @@ internal static class Program
         rootCommand.Add(noColorOption);
         rootCommand.Add(jsonOption);
         rootCommand.Add(gitHubTokenOption);
+        rootCommand.Add(fsRetryCountOption);
+        rootCommand.Add(fsMinimumDelayOption);
+        rootCommand.Add(fsMaximumJitterOption);
 
         // Store option references so command handlers can retrieve them
         GlobalOptionsBinder.CachePathOption = cachePathOption;
@@ -99,6 +123,9 @@ internal static class Program
         GlobalOptionsBinder.NoColorOption = noColorOption;
         GlobalOptionsBinder.JsonOption = jsonOption;
         GlobalOptionsBinder.GitHubTokenOption = gitHubTokenOption;
+        GlobalOptionsBinder.FileSystemRetryCountOption = fsRetryCountOption;
+        GlobalOptionsBinder.FileSystemMinimumDelayOption = fsMinimumDelayOption;
+        GlobalOptionsBinder.FileSystemMaximumJitterOption = fsMaximumJitterOption;
 
         // Add subcommands
         rootCommand.Add(InstallCommand.Build());
@@ -112,6 +139,24 @@ internal static class Program
         rootCommand.Add(PublishCommand.Build());
 
         return rootCommand;
+    }
+
+    private static bool IsRetryOptionError(ParseError error)
+    {
+        // Conversion errors belong to an argument below the option; missing-value
+        // errors belong to the option itself. Do not remap unrelated parse errors.
+        for (SymbolResult? result = error.SymbolResult; result is not null; result = result.Parent)
+        {
+            if (result is OptionResult optionResult
+                && optionResult.Option.Name is "--fs-retry-count"
+                    or "--fs-min-delay-ms"
+                    or "--fs-jitter-max-ms")
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool isTruthy(string? value) =>
@@ -187,6 +232,15 @@ internal sealed record GlobalOptions
     /// </summary>
     public string? GitHubToken { get; init; }
 
+    /// <summary>Explicit filesystem retry count, or <c>null</c> when unspecified.</summary>
+    public int? FileSystemRetryCount { get; init; }
+
+    /// <summary>Explicit minimum retry delay, or <c>null</c> when unspecified.</summary>
+    public int? FileSystemMinimumDelayMilliseconds { get; init; }
+
+    /// <summary>Explicit maximum additive jitter, or <c>null</c> when unspecified.</summary>
+    public int? FileSystemMaximumJitterMilliseconds { get; init; }
+
     /// <summary>Optional config loader override for isolated command tests; <c>null</c> restores file loading.</summary>
     internal static Func<ConfigFile?>? ConfigLoaderOverride { get; set; }
 
@@ -195,12 +249,13 @@ internal sealed record GlobalOptions
     /// with optional <c>.fhir-pkg.json</c> config files.
     /// </summary>
     /// <returns>A configured <see cref="FhirPackageManagerOptions"/> instance.</returns>
-    public FhirPackageManagerOptions BuildManagerOptions()
+    public FhirPackageManagerOptions BuildManagerOptions() =>
+        CliInvocationContext.Create(this).CreateManagerOptions();
+
+    internal FhirPackageManagerOptions MergeManagerOptions(ConfigFile? configFromFile)
     {
         FhirPackageManagerOptions options = new FhirPackageManagerOptions();
 
-        // Load optional config file (current directory first, then home directory)
-        ConfigFile? configFromFile = loadConfigFile();
         if (configFromFile is not null)
         {
             mergeConfig(options, configFromFile);
@@ -223,45 +278,6 @@ internal sealed record GlobalOptions
         }
 
         return options;
-    }
-
-    private static ConfigFile? loadConfigFile()
-    {
-        if (ConfigLoaderOverride is Func<ConfigFile?> loader)
-        {
-            return loader();
-        }
-
-        string[] candidates =
-        [
-            Path.Combine(Directory.GetCurrentDirectory(), ".fhir-pkg.json"),
-            Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".fhir-pkg.json")
-        ];
-
-        JsonSerializerOptions jso = new()
-        {
-            PropertyNameCaseInsensitive = true
-        };
-
-        foreach (string? path in candidates)
-        {
-            if (!File.Exists(path)) continue;
-
-            try
-            {
-                string json = File.ReadAllText(path);
-                return JsonSerializer.Deserialize<ConfigFile>(json, jso);
-            }
-            catch (Exception ex)
-            {
-                // Log warning for malformed config files when verbose output is available
-                Console.Error.WriteLine($"Warning: Failed to parse config file '{path}': {ex.Message}");
-            }
-        }
-
-        return null;
     }
 
     private static void mergeConfig(FhirPackageManagerOptions target, ConfigFile config)
@@ -374,6 +390,9 @@ internal static class GlobalOptionsBinder
     private static Option<bool>? _noColorOption;
     private static Option<bool>? _jsonOption;
     private static Option<string?>? _gitHubTokenOption;
+    private static Option<int?>? _fileSystemRetryCountOption;
+    private static Option<int?>? _fileSystemMinimumDelayOption;
+    private static Option<int?>? _fileSystemMaximumJitterOption;
 
     /// <summary>The --package-cache-folder option.</summary>
     public static Option<string?> CachePathOption
@@ -423,6 +442,27 @@ internal static class GlobalOptionsBinder
         get => _gitHubTokenOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
         set => _gitHubTokenOption = value;
     }
+
+    /// <summary>The --fs-retry-count option.</summary>
+    public static Option<int?> FileSystemRetryCountOption
+    {
+        get => _fileSystemRetryCountOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _fileSystemRetryCountOption = value;
+    }
+
+    /// <summary>The --fs-min-delay-ms option.</summary>
+    public static Option<int?> FileSystemMinimumDelayOption
+    {
+        get => _fileSystemMinimumDelayOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _fileSystemMinimumDelayOption = value;
+    }
+
+    /// <summary>The --fs-jitter-max-ms option.</summary>
+    public static Option<int?> FileSystemMaximumJitterOption
+    {
+        get => _fileSystemMaximumJitterOption ?? throw new InvalidOperationException("GlobalOptionsBinder has not been initialized. Call BuildRootCommand first.");
+        set => _fileSystemMaximumJitterOption = value;
+    }
 }
 
 /// <summary>
@@ -452,7 +492,10 @@ internal static class ParseResultExtensions
             Quiet = parseResult.GetValue(GlobalOptionsBinder.QuietOption),
             NoColor = noColor,
             Json = parseResult.GetValue(GlobalOptionsBinder.JsonOption),
-            GitHubToken = parseResult.GetValue(GlobalOptionsBinder.GitHubTokenOption)
+            GitHubToken = parseResult.GetValue(GlobalOptionsBinder.GitHubTokenOption),
+            FileSystemRetryCount = parseResult.GetValue(GlobalOptionsBinder.FileSystemRetryCountOption),
+            FileSystemMinimumDelayMilliseconds = parseResult.GetValue(GlobalOptionsBinder.FileSystemMinimumDelayOption),
+            FileSystemMaximumJitterMilliseconds = parseResult.GetValue(GlobalOptionsBinder.FileSystemMaximumJitterOption)
         };
     }
 }

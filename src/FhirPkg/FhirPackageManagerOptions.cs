@@ -17,6 +17,20 @@ namespace FhirPkg;
 public class FhirPackageManagerOptions
 {
     /// <summary>
+    /// Bounded retries for safely replayable filesystem work. Explicit properties
+    /// override environment values; unspecified properties use the environment and
+    /// then the documented defaults.
+    /// </summary>
+    /// <remarks>
+    /// Resolved once before manager-owned filesystem work. Later option or
+    /// environment changes do not reconfigure the manager or its owned components.
+    /// Assigning any retry property also requires injected built-in collaborators
+    /// to have matching effective settings. An untouched options object, including
+    /// environment-only configuration, does not impose that requirement.
+    /// </remarks>
+    public FileSystemRetryOptions FileSystemRetry { get; set; } = new FileSystemRetryOptions();
+
+    /// <summary>
     /// Finite package-processing limits. Explicit values override environment
     /// values; unspecified values use the environment and then documented defaults.
     /// </summary>

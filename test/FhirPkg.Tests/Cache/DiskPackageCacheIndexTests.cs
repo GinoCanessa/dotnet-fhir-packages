@@ -6,6 +6,7 @@ using System.Text.Json;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Tests.Support;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -55,6 +56,142 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
 
             return cases;
         }
+    }
+
+    [Fact]
+    public async Task GetIndex_MissingOptionalIndex_DoesNotOpenOrSpendFaultRetries()
+    {
+        string indexPath = GetIndexPath();
+        string contentPath = Path.GetDirectoryName(indexPath)!;
+        Directory.CreateDirectory(contentPath);
+        await File.WriteAllTextAsync(
+            Path.Combine(contentPath, "package.json"),
+            """{"name":"example.package","version":"1.0.0"}""",
+            TestContext.Current.CancellationToken);
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        FileSystemContext context = files.CreateContext(retries: 2);
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), context);
+        files.Calls.Clear();
+
+        PackageIndex? index = await cache.GetIndexAsync(
+            s_reference, TestContext.Current.CancellationToken);
+
+        index.ShouldBeNull();
+        File.Exists(indexPath).ShouldBeFalse();
+        FileSystemPrimitiveCall probe = files.Calls
+            .Where(call => call.Path == indexPath)
+            .ShouldHaveSingleItem();
+        probe.Operation.ShouldBe("Probe");
+        probe.Flags.ShouldBe(0);
+        files.Waits.ShouldBeEmpty();
+        files.AsyncWaits.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task InternalReadPort_ProtectsIndexLengthAndReadsWithItsContext()
+    {
+        Directory.CreateDirectory(_cacheRoot);
+        string path = Path.Combine(_cacheRoot, ".index.json");
+        byte[] content = """{"index-version":2,"files":[]}"""u8.ToArray();
+        File.WriteAllBytes(path, content);
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        FileSystemContext context = primitives.CreateContext();
+        SystemPackageCacheFileOperations operations = new SystemPackageCacheFileOperations(context);
+        await using Stream stream = await operations.OpenReadAsync(path, TestContext.Current.CancellationToken);
+        stream.ShouldBeOfType<PositionedFileStream>().Context.ShouldBeSameAs(context);
+        primitives.Enqueue("GetHandleLength", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "index length", path));
+        primitives.Enqueue<int>("ReadAtAsync", call =>
+        {
+            RandomAccess.Read(call.Handle!, call.Buffer.Span[..2], call.Offset!.Value).ShouldBe(2);
+            return ScriptedFileSystemPrimitives.NativeFailure<int>(1117, "index read", path);
+        });
+
+        (await FileSystemContext.GetLengthAsync(stream, TestContext.Current.CancellationToken)).ShouldBe(content.Length);
+        byte[] result = new byte[content.Length];
+        (await stream.ReadAsync(result.AsMemory(), TestContext.Current.CancellationToken)).ShouldBe(content.Length);
+
+        result.ShouldBe(content);
+        primitives.Count("GetHandleLength").ShouldBe(2);
+        primitives.Count("ReadAtAsync").ShouldBe(2);
+        primitives.Count("PrepareBorrowedRead").ShouldBe(0);
+        primitives.Waits.ShouldBeEmpty();
+        primitives.AsyncWaits.ShouldBe([10, 10]);
+    }
+
+    [Theory]
+    [InlineData("existing", 1)]
+    [InlineData("memory", 2)]
+    [InlineData("persisted", 3)]
+    public async Task IndexMetadataAndReferences_WaitAsynchronouslyThroughCacheCallers(string mode, int referenceChecks)
+    {
+        string indexPath = GetIndexPath();
+        string contentPath = Path.GetDirectoryName(indexPath)!;
+        string patientPath = Path.Combine(contentPath, "patient.json");
+        Directory.CreateDirectory(contentPath);
+        File.WriteAllText(Path.Combine(contentPath, "package.json"),
+            """{"name":"example.package","version":"1.0.0"}""");
+        File.WriteAllText(patientPath, """{"resourceType":"Patient","id":"one"}""");
+        if (mode == "existing")
+            File.WriteAllText(indexPath, CreateIndexJson("stored"));
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), files.CreateContext(retries: 1));
+        files.Enqueue("GetHandleLength", ScriptedFileSystemPrimitives.NativeFailure<long>(5, "index length", indexPath));
+        bool failedProbe = false;
+        files.Set<FileSystemProbeResult>("Probe", call =>
+        {
+            if (call.Path == patientPath && !failedProbe)
+            {
+                failedProbe = true;
+                return ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "index reference", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.Probe(call.Path!, call.Flags == 1);
+        });
+        int referenceMetadata = 0;
+        if (OperatingSystem.IsWindows())
+        {
+            files.Set<FileAttributes>("GetAttributes", call =>
+                call.Path == patientPath && referenceMetadata++ == 0
+                    ? ScriptedFileSystemPrimitives.NativeFailure<FileAttributes>(5, "reference attributes", call.Path)
+                    : SystemFileSystemPrimitives.Instance.GetAttributes(call.Path!));
+            files.Set<FileStream>("OpenFile", call => SystemFileSystemPrimitives.Instance.OpenFile(
+                call.Path!, call.Path == patientPath ? FileMode.Open : FileMode.OpenOrCreate,
+                call.Path == patientPath ? FileAccess.Read : FileAccess.ReadWrite,
+                call.Path == patientPath ? FileShare.Read : FileShare.ReadWrite, 1, FileOptions.None));
+        }
+        else
+        {
+            files.Set<FileSystemProbeResult>("InspectDescriptor", call =>
+                call.Path == patientPath && referenceMetadata++ == 0
+                    ? ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "reference descriptor", call.Path)
+                    : SystemFileSystemPrimitives.Instance.InspectDescriptor(call.Descriptor!.Value, call.Path));
+        }
+        int generations = 0;
+        int registrations = 0;
+
+        PackageIndex? index = mode == "existing"
+            ? await cache.GetIndexAsync(s_reference, TestContext.Current.CancellationToken)
+            : await ((IPackageCacheIndexStore)cache).GetOrCreateIndexAsync(
+                s_reference, forceReindex: true, persistIndex: mode == "persisted",
+                (_, _) =>
+                {
+                    generations++;
+                    return Task.FromResult(CreateIndex("generated"));
+                },
+                TestContext.Current.CancellationToken,
+                (_, _) => registrations++);
+
+        index.ShouldNotBeNull().Files.ShouldHaveSingleItem().Id.ShouldBe(mode == "existing" ? "stored" : "generated");
+        generations.ShouldBe(mode == "existing" ? 0 : 1);
+        registrations.ShouldBe(mode == "existing" ? 0 : 1);
+        referenceMetadata.ShouldBe(referenceChecks + 1);
+        files.Calls.Count(call => call.Operation == (OperatingSystem.IsWindows() ? "OpenFile" : "OpenDescriptor")
+            && call.Path == patientPath).ShouldBe(referenceChecks);
+        files.AsyncWaits.ShouldBe(mode == "memory" ? [10, 10] : [10, 10, 10]);
+        files.Waits.ShouldBeEmpty();
+        File.Exists(indexPath).ShouldBe(mode != "memory");
     }
 
     [Theory]
@@ -187,7 +324,8 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         if (!persistIndex || reusesPublisherIndex)
         {
             fileOperations.AssertNoPayloadWrites(installed.DirectoryPath);
-            fileOperations.ReadPaths.Count(path => path == indexPath).ShouldBe(1);
+            fileOperations.ReadPaths.Count(path => path == indexPath)
+                .ShouldBe(state == "missing" ? 0 : 1);
             if (state == "valid")
             {
                 (await File.ReadAllBytesAsync(indexPath, TestContext.Current.CancellationToken))
@@ -985,14 +1123,26 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
         public bool FileExists(string path) =>
             _inner.FileExists(path);
 
-        public FileStream OpenRead(string path)
+        public Stream OpenRead(string path)
         {
             ReadPaths.Enqueue(path);
             return _inner.OpenRead(path);
         }
 
+        public ValueTask<Stream> OpenReadAsync(string path, CancellationToken cancellationToken)
+        {
+            ReadPaths.Enqueue(path);
+            return _inner.OpenReadAsync(path, cancellationToken);
+        }
+
+        public ValueTask<string> GetFullPathAsync(string path, CancellationToken cancellationToken) =>
+            _inner.GetFullPathAsync(path, cancellationToken);
+
         public void CreateDirectory(string path) =>
             _inner.CreateDirectory(path);
+
+        public ValueTask CreateDirectoryAsync(string path, CancellationToken cancellationToken) =>
+            _inner.CreateDirectoryAsync(path, cancellationToken);
 
         public void MoveDirectory(
             string sourcePath,
@@ -1016,6 +1166,12 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
             _inner.DeleteFile(path);
         }
 
+        public ValueTask DeleteFileAsync(string path, CancellationToken cancellationToken)
+        {
+            DeletedPaths.Enqueue(path);
+            return _inner.DeleteFileAsync(path, cancellationToken);
+        }
+
         public async ValueTask WriteFileAndFlushAsync(
             string path,
             ReadOnlyMemory<byte> content,
@@ -1029,21 +1185,28 @@ public sealed class DiskPackageCacheIndexTests : IDisposable
                 .ConfigureAwait(false);
         }
 
-        public async ValueTask AtomicReplaceFileAsync(
+        public ValueTask AtomicReplaceFileAsync(
             string sourcePath,
             string destinationPath,
+            CancellationToken cancellationToken) =>
+            AtomicReplaceFileAsync(new DurableFileReplacement(sourcePath, destinationPath), cancellationToken);
+
+        public async ValueTask AtomicReplaceFileAsync(
+            DurableFileReplacement replacement,
             CancellationToken cancellationToken)
         {
-            AtomicDestinations.Enqueue(destinationPath);
+            AtomicDestinations.Enqueue(replacement.DestinationPath);
             await _inner.AtomicReplaceFileAsync(
-                    sourcePath,
-                    destinationPath,
+                    replacement,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
 
         public void SynchronizeDirectory(string directoryPath) =>
             _inner.SynchronizeDirectory(directoryPath);
+
+        public ValueTask SynchronizeDirectoryAsync(string directoryPath, CancellationToken cancellationToken) =>
+            _inner.SynchronizeDirectoryAsync(directoryPath, cancellationToken);
 
         public PackageCacheArtifactKind GetArtifactKind(string path) =>
             _inner.GetArtifactKind(path);

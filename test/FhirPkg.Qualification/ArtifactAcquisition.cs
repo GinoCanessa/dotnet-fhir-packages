@@ -33,23 +33,36 @@ internal sealed class ArtifactDownloader : IDisposable
 
     internal ArtifactDownloader(
         string downloadRoot,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        HttpMessageHandler? handler = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(downloadRoot);
         _downloadRoot = downloadRoot;
         _timeout = timeout;
         Directory.CreateDirectory(_downloadRoot);
-        HttpClientHandler handler = new()
+        if (handler is null)
         {
-            AllowAutoRedirect = true,
-            MaxAutomaticRedirections = 10
-        };
-        _httpClient = new HttpClient(
-            handler,
-            disposeHandler: true)
+            HttpClientHandler ownedHandler = new()
+            {
+                AllowAutoRedirect = true,
+                MaxAutomaticRedirections = 10
+            };
+            _httpClient = new HttpClient(
+                ownedHandler,
+                disposeHandler: true)
+            {
+                Timeout = Timeout.InfiniteTimeSpan
+            };
+        }
+        else
         {
-            Timeout = Timeout.InfiniteTimeSpan
-        };
+            _httpClient = new HttpClient(
+                handler,
+                disposeHandler: false)
+            {
+                Timeout = Timeout.InfiniteTimeSpan
+            };
+        }
     }
 
     internal async Task<DownloadedArtifact> DownloadAsync(

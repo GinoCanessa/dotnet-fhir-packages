@@ -73,18 +73,20 @@ internal static class SearchCommand
 
             try
             {
-                FhirPackageManagerOptions mgrOptions = globalOpts.BuildManagerOptions();
-
-                if (registry is not null)
-                {
-                    mgrOptions.Registries.Insert(0, new RegistryEndpoint
+                CliInvocationContext invocation = await CliInvocationContext.CreateAsync(
+                    globalOpts, ct, mgrOptions =>
                     {
-                        Url = registry,
-                        Type = RegistryType.FhirNpm
+                        if (registry is not null)
+                        {
+                            mgrOptions.Registries.Insert(0, new RegistryEndpoint
+                            {
+                                Url = registry,
+                                Type = RegistryType.FhirNpm
+                            });
+                        }
                     });
-                }
 
-                FhirPackageManager manager = ManagerFactory.Create(mgrOptions);
+                FhirPackageManager manager = ManagerFactory.Create(invocation);
 
                 PackageSearchCriteria criteria = new PackageSearchCriteria
                 {
@@ -142,8 +144,7 @@ internal static class SearchCommand
             }
             catch (Exception ex)
             {
-                CommandHelpers.WriteErrorOutput(globalOpts, ex.Message);
-                return ExitCodes.GeneralError;
+                return CommandHelpers.WriteException(globalOpts, ex);
             }
         });
 

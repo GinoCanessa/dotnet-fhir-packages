@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 
 namespace FhirPkg.Cache;
@@ -27,6 +28,9 @@ internal sealed record PackageCacheInspection
     internal PackageManifest? Manifest { get; init; }
 
     internal string? CorruptionReason { get; init; }
+
+    // Final filesystem evidence for a physical read failure; the state is never remapped from it.
+    internal FileSystemFailureContext? FailureContext { get; init; }
 
     internal bool IsRepairable { get; init; } = true;
 }

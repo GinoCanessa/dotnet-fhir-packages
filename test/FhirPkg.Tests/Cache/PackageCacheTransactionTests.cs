@@ -2,10 +2,12 @@
 
 using FhirPkg.Cache;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Tests.Support;
 using FhirPkg.Utilities;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using Shouldly;
 using Xunit;
@@ -207,18 +209,52 @@ public sealed class PackageCacheTransactionTests : IDisposable
         using (MemoryStream replacement = CreateGenerationArchive("new", newRawRoot))
         {
             await Should.ThrowAsync<PackageCacheInjectedFaultException>(
-                () => faultingCache.InstallAsync(
-                    s_reference,
-                    replacement,
-                    new InstallCacheOptions
+                async () =>
+                {
+                    try
                     {
-                        VerifyChecksum = false,
-                        OverwriteExisting = true,
-                        Unmodified = newRawRoot,
-                        ArchiveSha256 = "new-hash",
-                        SourcePublicationDate = GenerationPublicationDate("new")
-                    },
-                    TestContext.Current.CancellationToken));
+                        await faultingCache.InstallAsync(
+                            s_reference,
+                            replacement,
+                            new InstallCacheOptions
+                            {
+                                VerifyChecksum = false,
+                                OverwriteExisting = true,
+                                Unmodified = newRawRoot,
+                                ArchiveSha256 = "new-hash",
+                                SourcePublicationDate = GenerationPublicationDate("new")
+                            },
+                            TestContext.Current.CancellationToken);
+                    }
+                    catch (Exception exception) when (exception is not PackageCacheInjectedFaultException)
+                    {
+                        try
+                        {
+                            ITestOutputHelper? output = TestContext.Current.TestOutputHelper;
+                            if (output is not null)
+                            {
+                                output.WriteLine(
+                                    $"Unexpected installation exception in {nameof(Overwrite_InjectedCrash_RecoversCoherentState)}: " +
+                                    $"(pointName: \"{pointName}\", stateName: \"{stateName}\", " +
+                                    $"expectedValue: \"{expectedValue}\", oldRawRoot: {oldRawRoot}, newRawRoot: {newRawRoot})");
+                                output.WriteLine(
+                                    $"UTC: {DateTimeOffset.UtcNow:O}; ProcessId: {Environment.ProcessId}; " +
+                                    $"Runtime: {RuntimeInformation.FrameworkDescription}");
+                                output.WriteLine($"CacheRoot: {_cacheRoot}");
+                                if (observer.OperationId is string operationId)
+                                    output.WriteLine($"OperationId: {operationId}");
+                                output.WriteLine(exception.ToString());
+                                WriteExceptionDetails(output, exception, "Exception");
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Best-effort diagnostics must not replace the installation exception.
+                        }
+
+                        throw;
+                    }
+                });
         }
 
         using DiskPackageCache recoveredCache = CreateCache();
@@ -841,6 +877,69 @@ public sealed class PackageCacheTransactionTests : IDisposable
     }
 
     [Fact]
+    public void WindowsPathRename_FailureRetainsPathsFlagsAndNativeError()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        Directory.CreateDirectory(_cacheRoot);
+        string sourcePath = Path.Combine(_cacheRoot, "missing-source");
+        string destinationPath = Path.Combine(_cacheRoot, "destination");
+
+        IOException exception = Should.Throw<IOException>(() =>
+            SystemPackageCacheFileOperations.Instance.MoveDirectory(
+                sourcePath,
+                destinationPath));
+
+        AssertWindowsRenameFailure(exception, sourcePath, destinationPath);
+        Directory.Exists(sourcePath).ShouldBeFalse();
+        Directory.Exists(destinationPath).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void WindowsPathRename_NonDeleteSharedHandleBlocksMoveUntilReleased()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        string sourcePath = Path.Combine(_cacheRoot, "source");
+        string destinationPath = Path.Combine(_cacheRoot, "destination");
+        Directory.CreateDirectory(Path.Combine(sourcePath, "empty"));
+        File.WriteAllText(Path.Combine(sourcePath, "value.txt"), "payload");
+
+        // Open the directory itself: a child file handle need not block an
+        // ancestor rename. Successful open, move, disposal and move are ordered
+        // on this thread; no timing window or assumed native error is needed.
+        SafeFileHandle blocker = OpenDirectoryWithoutDeleteSharing(sourcePath);
+        using (blocker)
+        {
+            blocker.IsInvalid.ShouldBeFalse();
+            blocker.IsClosed.ShouldBeFalse();
+            IOException exception = Should.Throw<IOException>(() =>
+                SystemPackageCacheFileOperations.Instance.MoveDirectory(
+                    sourcePath,
+                    destinationPath));
+
+            AssertWindowsRenameFailure(exception, sourcePath, destinationPath);
+            Directory.Exists(sourcePath).ShouldBeTrue();
+            Directory.Exists(destinationPath).ShouldBeFalse();
+            File.ReadAllText(Path.Combine(sourcePath, "value.txt")).ShouldBe("payload");
+        }
+
+        blocker.IsClosed.ShouldBeTrue();
+        SystemPackageCacheFileOperations.Instance.MoveDirectory(
+            sourcePath,
+            destinationPath);
+
+        Directory.Exists(sourcePath).ShouldBeFalse();
+        Directory.Exists(Path.Combine(destinationPath, "empty")).ShouldBeTrue();
+        File.ReadAllText(Path.Combine(destinationPath, "value.txt")).ShouldBe("payload");
+        TestContext.Current.TestOutputHelper?.WriteLine(
+            "The identical MoveDirectory succeeded after disposing the owned directory handle. " +
+            "This establishes a mechanism, not ownership of the reported intermittent failure.");
+    }
+
+    [Fact]
     public async Task WindowsFileReplace_RetriesTransientErrorsAsynchronously()
     {
         TaskCompletionSource delayStarted =
@@ -868,7 +967,8 @@ public sealed class PackageCacheTransactionTests : IDisposable
                     CancellationToken cancellationToken) =>
                 {
                     delayCalls++;
-                    delay.ShouldBe(TimeSpan.FromMilliseconds(10));
+                    delay.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(10));
+                    delay.ShouldBeLessThanOrEqualTo(TimeSpan.FromMilliseconds(20));
                     delayStarted.TrySetResult();
                     await releaseDelay.Task.WaitAsync(cancellationToken)
                         .ConfigureAwait(false);
@@ -888,7 +988,7 @@ public sealed class PackageCacheTransactionTests : IDisposable
     }
 
     [Fact]
-    public async Task WindowsFileReplace_NonTransientErrorFailsImmediately()
+    public async Task WindowsFileReplace_BroadSafeErrorsUseSharedBudget()
     {
         int attempts = 0;
         int delayCalls = 0;
@@ -915,11 +1015,14 @@ public sealed class PackageCacheTransactionTests : IDisposable
                     CancellationToken.None)
                 .AsTask());
 
-        attempts.ShouldBe(1);
-        delayCalls.ShouldBe(0);
+        attempts.ShouldBe(6);
+        delayCalls.ShouldBe(5);
         Win32Exception nativeException =
             exception.InnerException.ShouldBeOfType<Win32Exception>();
         nativeException.NativeErrorCode.ShouldBe(87);
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? failure).ShouldBeTrue();
+        failure!.RetriesUsed.ShouldBe(5);
+        failure.NativeFlags.ShouldBe(0x00000009);
     }
 
     [Fact]
@@ -941,18 +1044,19 @@ public sealed class PackageCacheTransactionTests : IDisposable
                         attempts++;
                         return false;
                     },
-                    () => attempts == 20 ? 33 : 5,
+                    () => attempts == 6 ? 33 : 5,
                     (TimeSpan delay, CancellationToken cancellationToken) =>
                     {
                         delayCalls++;
-                        delay.ShouldBe(TimeSpan.FromMilliseconds(10));
+                        delay.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(10));
+                        delay.ShouldBeLessThanOrEqualTo(TimeSpan.FromMilliseconds(20));
                         return ValueTask.CompletedTask;
                     },
                     CancellationToken.None)
                 .AsTask());
 
-        attempts.ShouldBe(20);
-        delayCalls.ShouldBe(19);
+        attempts.ShouldBe(6);
+        delayCalls.ShouldBe(5);
         Win32Exception nativeException =
             exception.InnerException.ShouldBeOfType<Win32Exception>();
         nativeException.NativeErrorCode.ShouldBe(33);
@@ -994,21 +1098,25 @@ public sealed class PackageCacheTransactionTests : IDisposable
                     source.Token)
                 .AsTask());
 
-        attempts.ShouldBe(1);
-        delayCalls.ShouldBe(1);
+        attempts.ShouldBe(0);
+        delayCalls.ShouldBe(0);
     }
 
     [Fact]
-    public async Task JournalRead_WindowsSharingViolationIsRetried()
+    public async Task JournalRead_UsesOnlyCommonBudget()
     {
         if (!OperatingSystem.IsWindows())
             return;
 
         PackageCacheKey cacheKey = PackageCacheKey.Create(s_reference);
         string operationId = Guid.NewGuid().ToString("N");
+        ScriptedFileSystemPrimitives scripted = new(FileSystemPlatform.Windows);
+        scripted.UseSystemFiles();
+        FileSystemContext context = scripted.CreateContext(retries: 5);
         PackageCacheJournalStore store = new(
             _cacheRoot,
-            SystemPackageCacheFileOperations.Instance,
+            context,
+            new SystemPackageCacheFileOperations(context),
             NullPackageCacheFaultObserver.Instance);
         PackageCacheTransactionJournal journal = new()
         {
@@ -1037,28 +1145,157 @@ public sealed class PackageCacheTransactionTests : IDisposable
             journal,
             TestContext.Current.CancellationToken);
         string journalPath = store.GetJournalPath(cacheKey);
-        Task<PackageCacheTransactionJournal?> readTask;
-        using (FileStream blocker = new(
+        FileStream? blocker = new(
             journalPath,
             FileMode.Open,
             FileAccess.ReadWrite,
-            FileShare.None))
+            FileShare.None);
+        scripted.OnWait = () =>
         {
-            readTask = store.ReadAsync(
+            blocker?.Dispose();
+            blocker = null;
+        };
+        PackageCacheTransactionJournal? result;
+        try
+        {
+            result = await store.ReadAsync(
                 cacheKey,
                 TestContext.Current.CancellationToken);
-            await Task.Delay(
-                TimeSpan.FromMilliseconds(75),
-                TestContext.Current.CancellationToken);
-            readTask.IsCompleted.ShouldBeFalse();
+        }
+        finally
+        {
+            blocker?.Dispose();
         }
 
-        PackageCacheTransactionJournal? result =
-            await readTask.WaitAsync(
-                TimeSpan.FromSeconds(5),
-                TestContext.Current.CancellationToken);
+        // The sharing violation is retried only from the common filesystem budget.
+        scripted.AsyncWaits.Count.ShouldBe(1);
         result.ShouldNotBeNull();
         result!.OperationId.ShouldBe(operationId);
+    }
+
+    [Fact]
+    public async Task Commit_PostRenameSyncFailureDoesNotRepeatPromotion()
+    {
+        ScriptedFileSystemPrimitives scripted = CreatePromotionPrimitives();
+        string targetPath = PackageCacheKey.Create(s_reference).GetPackageDirectoryPath(_cacheRoot);
+        // The rename has already happened when the first parent barrier fails.
+        scripted.Enqueue(
+            "SynchronizeDescriptor",
+            ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(5, "fsync"));
+        using DiskPackageCache cache = CreateCache(
+            fileOperations: new ScriptedPromotionFileOperations(scripted));
+        using MemoryStream archive = CreateArchive("new");
+
+        PackageRecord record = await cache.InstallAsync(
+            s_reference,
+            archive,
+            new InstallCacheOptions { VerifyChecksum = false, ArchiveSha256 = "new-hash" },
+            TestContext.Current.CancellationToken);
+
+        record.Manifest.Version.ShouldBe("1.0.0");
+        FileSystemPrimitiveCall[] promotions = scripted.Calls
+            .Where(call => call.Operation == "MovePath")
+            .ToArray();
+        promotions.Length.ShouldBe(1);
+        promotions[0].DestinationPath.ShouldBe(targetPath);
+        // Retry visited only the unfinished barrier: failed sync, repeated sync, destination barrier.
+        scripted.Count("SynchronizeDescriptor").ShouldBe(3);
+        scripted.AsyncWaits.Count.ShouldBe(1);
+        (await cache.GetFileContentAsync(
+            s_reference, "value.txt", TestContext.Current.CancellationToken)).ShouldBe("new");
+        AssertNoOperationArtifacts();
+    }
+
+    [Fact]
+    public async Task Commit_AfterBoundaryRetriesIgnoreCallerCancellation()
+    {
+        await InstallInitialAsync();
+        ScriptedFileSystemPrimitives scripted = CreatePromotionPrimitives();
+        string targetPath = PackageCacheKey.Create(s_reference).GetPackageDirectoryPath(_cacheRoot);
+        using CancellationTokenSource source = new();
+        // The scripted wait throws for a cancelled token, so a promotion retry that
+        // honored the caller token would abandon the commit after the original moved.
+        scripted.Enqueue(
+            "SynchronizeDescriptor",
+            ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(5, "fsync"));
+        scripted.Enqueue(
+            "SynchronizeDescriptor",
+            ScriptedFileSystemPrimitives.NativeFailure<FileSystemDirectorySyncOutcome>(5, "fsync"));
+        using DiskPackageCache cache = CreateCache(
+            new CancelAtPointObserver(source, PackageCacheFaultPoint.OriginalRenamed),
+            new ScriptedPromotionFileOperations(scripted));
+        using MemoryStream replacement = CreateArchive("new");
+
+        PackageRecord record = await cache.InstallAsync(
+            s_reference,
+            replacement,
+            new InstallCacheOptions
+            {
+                VerifyChecksum = false,
+                OverwriteExisting = true,
+                ArchiveSha256 = "new-hash"
+            },
+            source.Token);
+
+        source.IsCancellationRequested.ShouldBeTrue();
+        record.Manifest.Version.ShouldBe("1.0.0");
+        scripted.Calls.Count(call => call.Operation == "MovePath").ShouldBe(1);
+        scripted.Calls.Single(call => call.Operation == "MovePath").DestinationPath.ShouldBe(targetPath);
+        scripted.AsyncWaits.Count.ShouldBe(2);
+        (await cache.GetFileContentAsync(
+            s_reference, "value.txt", CancellationToken.None)).ShouldBe("new");
+        AssertNoOperationArtifacts();
+    }
+
+    [Fact]
+    public async Task Commit_DirectoryExistenceAndPostCommitCleanupUseAsyncWaits()
+    {
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        using DiskPackageCache cache = new(
+            _cacheRoot, null, null, new PackageInstallLimits(), files.CreateContext(retries: 1));
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        string stagingRoot = Path.Combine(_cacheRoot, ".fhirpkg", "staging");
+        string targetPath = PackageCacheKey.Create(s_reference).GetPackageDirectoryPath(_cacheRoot);
+        int stagingProbes = 0;
+        int cleanupProbes = 0;
+        files.Set<FileSystemProbeResult>("Probe", call =>
+        {
+            if (call.Flags == 1 && Path.GetFileName(call.Path) == "expanded"
+                && File.Exists(Path.Combine(call.Path!, "package", "package.json")) && stagingProbes++ == 0)
+                return ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "commit staging", call.Path);
+            if (call.Flags == 1 && Path.GetDirectoryName(call.Path) == stagingRoot
+                && files.Calls.Any(previous => previous.Operation == "MovePath" && previous.DestinationPath == targetPath)
+                && cleanupProbes++ == 0)
+            {
+                cancellation.Cancel();
+                return ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "committed cleanup", call.Path);
+            }
+            return SystemFileSystemPrimitives.Instance.Probe(call.Path!, call.Flags == 1);
+        });
+        using MemoryStream archive = CreateArchive("new");
+
+        PackageRecord record = await cache.InstallAsync(
+            s_reference, archive, new InstallCacheOptions { VerifyChecksum = false }, cancellation.Token);
+
+        record.Manifest.Version.ShouldBe("1.0.0");
+        stagingProbes.ShouldBe(2);
+        cleanupProbes.ShouldBe(2);
+        cancellation.IsCancellationRequested.ShouldBeTrue();
+        files.Calls.Count(call => call.Operation == "MovePath" && call.Flags == 0).ShouldBe(1);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+        PackageCacheCoordinator.GetProcessLockEntryCount(_cacheRoot).ShouldBe(0);
+        AssertNoOperationArtifacts();
+    }
+
+    private static ScriptedFileSystemPrimitives CreatePromotionPrimitives()
+    {
+        // Linux semantics (explicit directory barriers) over real rename/probe work.
+        ScriptedFileSystemPrimitives scripted = new(FileSystemPlatform.Linux);
+        scripted.UseSystemFiles();
+        scripted.EnableDirectorySynchronization();
+        return scripted;
     }
 
     [Fact]
@@ -1674,6 +1911,109 @@ public sealed class PackageCacheTransactionTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    private static void AssertWindowsRenameFailure(
+        IOException exception,
+        string sourcePath,
+        string destinationPath)
+    {
+        Win32Exception nativeException =
+            exception.InnerException.ShouldBeOfType<Win32Exception>();
+        nativeException.NativeErrorCode.ShouldNotBe(0);
+        exception.Data["SourcePath"].ShouldBe(sourcePath);
+        exception.Data["DestinationPath"].ShouldBe(destinationPath);
+        exception.Data["Operation"].ShouldBe("MoveFileExW");
+        exception.Data["NativeFlags"].ShouldBe(0x00000008u);
+        exception.Data["NativeErrorCode"].ShouldBe(nativeException.NativeErrorCode);
+        exception.Message.ShouldContain(sourcePath);
+        exception.Message.ShouldContain(destinationPath);
+        exception.Message.ShouldContain("MoveFileExW");
+        exception.Message.ShouldContain("0x00000008");
+        exception.Message.ShouldContain($"NativeErrorCode: {nativeException.NativeErrorCode}");
+
+        ITestOutputHelper? output = TestContext.Current.TestOutputHelper;
+        if (output is not null)
+        {
+            output.WriteLine(
+                $"UTC: {DateTimeOffset.UtcNow:O}; ProcessId: {Environment.ProcessId}; " +
+                $"Runtime: {RuntimeInformation.FrameworkDescription}");
+            output.WriteLine(exception.ToString());
+            WriteExceptionDetails(output, exception, "Exception");
+        }
+    }
+
+    private static SafeFileHandle OpenDirectoryWithoutDeleteSharing(string path)
+    {
+        const uint GenericRead = 0x80000000;
+        const uint OpenExisting = 3;
+        const uint FileFlagBackupSemantics = 0x02000000;
+        SafeFileHandle handle = CreateFile(
+            path,
+            GenericRead,
+            FileShare.ReadWrite,
+            IntPtr.Zero,
+            OpenExisting,
+            FileFlagBackupSemantics,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            int error = Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            throw new IOException(
+                "The test directory handle could not be opened.",
+                new Win32Exception(error));
+        }
+
+        return handle;
+    }
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "CreateFileW",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        FileShare shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    private static void WriteExceptionDetails(
+        ITestOutputHelper output,
+        Exception exception,
+        string path)
+    {
+        output.WriteLine(
+            $"{path}: {exception.GetType().FullName}; HResult: {exception.HResult} (0x{exception.HResult:X8})");
+        if (exception is PackageInstallException installException)
+        {
+            output.WriteLine(
+                $"{path}: ErrorCode: {installException.ErrorCode}; Stage: {installException.Stage}; " +
+                $"Directive: {installException.Directive ?? "<null>"}");
+        }
+        if (exception is Win32Exception win32Exception)
+            output.WriteLine($"{path}: NativeErrorCode: {win32Exception.NativeErrorCode}");
+        foreach (System.Collections.DictionaryEntry entry in exception.Data)
+            output.WriteLine($"{path}.Data[{entry.Key}]: {entry.Value ?? "<null>"}");
+
+        if (exception is AggregateException aggregateException)
+        {
+            for (int index = 0; index < aggregateException.InnerExceptions.Count; index++)
+            {
+                WriteExceptionDetails(
+                    output,
+                    aggregateException.InnerExceptions[index],
+                    $"{path}.InnerExceptions[{index}]");
+            }
+        }
+        else if (exception.InnerException is Exception innerException)
+        {
+            WriteExceptionDetails(output, innerException, $"{path}.InnerException");
+        }
+    }
+
     private async Task CreateCorruptTargetAsync()
     {
         string contentPath = Path.Combine(
@@ -1915,6 +2255,130 @@ public sealed class PackageCacheTransactionTests : IDisposable
         }
     }
 
+    private sealed class CancelAtPointObserver : IPackageCacheFaultObserver
+    {
+        private readonly CancellationTokenSource _source;
+        private readonly PackageCacheFaultPoint _point;
+
+        internal CancelAtPointObserver(
+            CancellationTokenSource source,
+            PackageCacheFaultPoint point)
+        {
+            _source = source;
+            _point = point;
+        }
+
+        public ValueTask OnEventAsync(
+            PackageCacheFaultEvent faultEvent,
+            CancellationToken cancellationToken)
+        {
+            if (faultEvent.Point == _point)
+                _source.Cancel();
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    // Delegates everything to the system adapter except replacement promotion,
+    // which runs through scripted primitives so its barriers can be faulted.
+    private sealed class ScriptedPromotionFileOperations : IPackageCacheFileOperations
+    {
+        private readonly SystemPackageCacheFileOperations _inner = new(FileSystemContext.CreateDefault());
+        private readonly ResilientFileSystem _promotion;
+
+        internal ScriptedPromotionFileOperations(ScriptedFileSystemPrimitives scripted) =>
+            _promotion = scripted.CreateContext().FileSystem;
+
+        public bool FileExists(string path) => _inner.FileExists(path);
+
+        public ValueTask<string> GetFullPathAsync(string path, CancellationToken cancellationToken) =>
+            _inner.GetFullPathAsync(path, cancellationToken);
+
+        public void CreateDirectory(string path) => _inner.CreateDirectory(path);
+
+        public ValueTask CreateDirectoryAsync(string path, CancellationToken cancellationToken) =>
+            _inner.CreateDirectoryAsync(path, cancellationToken);
+
+        public void DeleteFile(string path) => _inner.DeleteFile(path);
+
+        public ValueTask DeleteFileAsync(string path, CancellationToken cancellationToken) =>
+            _inner.DeleteFileAsync(path, cancellationToken);
+
+        public ValueTask WriteFileAndFlushAsync(
+            string path, ReadOnlyMemory<byte> content, CancellationToken cancellationToken) =>
+            _inner.WriteFileAndFlushAsync(path, content, cancellationToken);
+
+        public ValueTask AtomicReplaceFileAsync(
+            string sourcePath, string destinationPath, CancellationToken cancellationToken) =>
+            _inner.AtomicReplaceFileAsync(sourcePath, destinationPath, cancellationToken);
+
+        public ValueTask AtomicReplaceFileAsync(
+            DurableFileReplacement replacement, CancellationToken cancellationToken) =>
+            _inner.AtomicReplaceFileAsync(replacement, cancellationToken);
+
+        public void SynchronizeDirectory(string directoryPath) => _inner.SynchronizeDirectory(directoryPath);
+
+        public ValueTask SynchronizeDirectoryAsync(string directoryPath, CancellationToken cancellationToken) =>
+            _inner.SynchronizeDirectoryAsync(directoryPath, cancellationToken);
+
+        public bool DirectoryExists(string path) => _inner.DirectoryExists(path);
+
+        public Stream OpenRead(string path) => _inner.OpenRead(path);
+
+        public ValueTask<Stream> OpenReadAsync(string path, CancellationToken cancellationToken) =>
+            _inner.OpenReadAsync(path, cancellationToken);
+
+        public void MoveDirectory(string sourcePath, string destinationPath) =>
+            _inner.MoveDirectory(sourcePath, destinationPath);
+
+        public void MoveFile(string sourcePath, string destinationPath) =>
+            _inner.MoveFile(sourcePath, destinationPath);
+
+        public void DeleteDirectory(string path, bool recursive) => _inner.DeleteDirectory(path, recursive);
+
+        public PackageCacheArtifactKind GetArtifactKind(string path) => _inner.GetArtifactKind(path);
+
+        public bool ArtifactExists(string path, PackageCacheArtifactKind artifactKind) =>
+            _inner.ArtifactExists(path, artifactKind);
+
+        public void MoveArtifact(
+            string sourcePath, string destinationPath, PackageCacheArtifactKind artifactKind) =>
+            _inner.MoveArtifact(sourcePath, destinationPath, artifactKind);
+
+        public void DeleteArtifact(string path, PackageCacheArtifactKind artifactKind) =>
+            _inner.DeleteArtifact(path, artifactKind);
+
+        public ValueTask<bool> DirectoryExistsAsync(string path, CancellationToken cancellationToken) =>
+            _inner.DirectoryExistsAsync(path, cancellationToken);
+
+        public ValueTask MoveDirectoryAsync(
+            string sourcePath, string destinationPath, CancellationToken cancellationToken) =>
+            _promotion.MovePathAsync(sourcePath, destinationPath, cancellationToken);
+
+        public ValueTask DeleteDirectoryAsync(
+            string path, bool recursive, CancellationToken cancellationToken) =>
+            _inner.DeleteDirectoryAsync(path, recursive, cancellationToken);
+
+        public ValueTask<PackageCacheArtifactKind> GetArtifactKindAsync(
+            string path, CancellationToken cancellationToken) =>
+            _inner.GetArtifactKindAsync(path, cancellationToken);
+
+        public ValueTask<bool> ArtifactExistsAsync(
+            string path, PackageCacheArtifactKind artifactKind, CancellationToken cancellationToken) =>
+            _inner.ArtifactExistsAsync(path, artifactKind, cancellationToken);
+
+        public ValueTask MoveArtifactAsync(
+            string sourcePath,
+            string destinationPath,
+            PackageCacheArtifactKind artifactKind,
+            CancellationToken cancellationToken) =>
+            _inner.MoveArtifactAsync(sourcePath, destinationPath, artifactKind, cancellationToken);
+
+        public ValueTask DeleteArtifactAsync(
+            string path, PackageCacheArtifactKind artifactKind, CancellationToken cancellationToken) =>
+            _inner.DeleteArtifactAsync(path, artifactKind, cancellationToken);
+    }
+
     private sealed class RenameBarrierObserver :
         IPackageCacheFaultObserver
     {
@@ -1975,16 +2439,34 @@ public sealed class PackageCacheTransactionTests : IDisposable
             return _inner.FileExists(path);
         }
 
-        public FileStream OpenRead(string path)
+        public Stream OpenRead(string path)
         {
             Before("OpenRead", isMutating: false);
             return _inner.OpenRead(path);
+        }
+
+        public ValueTask<Stream> OpenReadAsync(string path, CancellationToken cancellationToken)
+        {
+            Before("OpenRead", isMutating: false);
+            return _inner.OpenReadAsync(path, cancellationToken);
+        }
+
+        public ValueTask<string> GetFullPathAsync(string path, CancellationToken cancellationToken)
+        {
+            Before("GetFullPath", isMutating: false);
+            return _inner.GetFullPathAsync(path, cancellationToken);
         }
 
         public void CreateDirectory(string path)
         {
             Before("CreateDirectory");
             _inner.CreateDirectory(path);
+        }
+
+        public ValueTask CreateDirectoryAsync(string path, CancellationToken cancellationToken)
+        {
+            Before("CreateDirectory");
+            return _inner.CreateDirectoryAsync(path, cancellationToken);
         }
 
         public void MoveDirectory(
@@ -2016,6 +2498,13 @@ public sealed class PackageCacheTransactionTests : IDisposable
             _inner.DeleteFile(path);
         }
 
+        public ValueTask DeleteFileAsync(string path, CancellationToken cancellationToken)
+        {
+            Before("DeleteFile");
+            DeletedFiles.Add(path);
+            return _inner.DeleteFileAsync(path, cancellationToken);
+        }
+
         public async ValueTask WriteFileAndFlushAsync(
             string path,
             ReadOnlyMemory<byte> content,
@@ -2029,23 +2518,36 @@ public sealed class PackageCacheTransactionTests : IDisposable
                 .ConfigureAwait(false);
         }
 
-        public async ValueTask AtomicReplaceFileAsync(
+        public ValueTask AtomicReplaceFileAsync(
             string sourcePath,
             string destinationPath,
+            CancellationToken cancellationToken) =>
+            AtomicReplaceFileAsync(new DurableFileReplacement(sourcePath, destinationPath), cancellationToken);
+
+        public async ValueTask AtomicReplaceFileAsync(
+            DurableFileReplacement replacement,
             CancellationToken cancellationToken)
         {
             Before("AtomicReplaceFile");
             await _inner.AtomicReplaceFileAsync(
-                    sourcePath,
-                    destinationPath,
+                    replacement,
                     cancellationToken)
                 .ConfigureAwait(false);
+            // The port includes the parent barrier. Domain crashes remain above
+            // the executor, here at that completed durability boundary.
+            Before("SynchronizeDirectory");
         }
 
         public void SynchronizeDirectory(string directoryPath)
         {
             Before("SynchronizeDirectory");
             _inner.SynchronizeDirectory(directoryPath);
+        }
+
+        public ValueTask SynchronizeDirectoryAsync(string directoryPath, CancellationToken cancellationToken)
+        {
+            Before("SynchronizeDirectory");
+            return _inner.SynchronizeDirectoryAsync(directoryPath, cancellationToken);
         }
 
         public PackageCacheArtifactKind GetArtifactKind(string path)

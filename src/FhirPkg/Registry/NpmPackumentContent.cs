@@ -7,6 +7,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using FhirPkg.IO;
 
 namespace FhirPkg.Registry;
 
@@ -17,18 +18,31 @@ internal sealed class NpmPackumentContent : HttpContent
     private readonly byte[] _prefix;
     private readonly byte[] _suffix;
     private readonly long _contentLength;
+    private readonly FileSystemContext _context;
 
     internal NpmPackumentContent(
         string archivePath,
         long archiveLength,
         JsonObject packument,
         string dataMarker)
+        : this(archivePath, archiveLength, packument, dataMarker, FileSystemContext.CreateDefault())
+    {
+    }
+
+    internal NpmPackumentContent(
+        string archivePath,
+        long archiveLength,
+        JsonObject packument,
+        string dataMarker,
+        FileSystemContext context)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(archivePath);
         ArgumentNullException.ThrowIfNull(packument);
         ArgumentException.ThrowIfNullOrWhiteSpace(dataMarker);
         ArgumentOutOfRangeException.ThrowIfNegative(archiveLength);
+        ArgumentNullException.ThrowIfNull(context);
 
+        _context = context;
         _archivePath = archivePath;
         byte[] serialized = JsonSerializer.SerializeToUtf8Bytes(packument);
         byte[] marker = Encoding.UTF8.GetBytes(dataMarker);
@@ -73,13 +87,15 @@ internal sealed class NpmPackumentContent : HttpContent
     {
         await stream.WriteAsync(_prefix, cancellationToken)
             .ConfigureAwait(false);
-        await using FileStream archive = new FileStream(
-            _archivePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            Base64InputBufferSize,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using PositionedFileStream archive =
+            await _context.FileSystem.OpenPositionedFileAsync(
+                    _archivePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan,
+                    cancellationToken)
+                .ConfigureAwait(false);
         await WriteBase64Async(
                 archive,
                 stream,

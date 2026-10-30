@@ -1,8 +1,13 @@
 // Copyright (c) Gino Canessa. All rights reserved.
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
+using System.Net;
+using System.Text.Json;
+using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
+using FhirPkg.Tests.Support;
 using Shouldly;
 using Moq;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -36,6 +41,14 @@ public class RedundantRegistryClientTests
             RegistryHttpTransport transport,
             RegistryEndpoint endpoint)
             : base(transport, endpoint, NullLogger.Instance)
+        {
+        }
+
+        public PublishingRegistryClient(
+            RegistryHttpTransport transport,
+            RegistryEndpoint endpoint,
+            FileSystemContext context)
+            : base(transport, endpoint, NullLogger.Instance, context)
         {
         }
 
@@ -1262,6 +1275,299 @@ public class RedundantRegistryClientTests
 
         actual.ShouldBeSameAs(expected);
         await expected.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Publish_TerminalLocalExceptionDoesNotTryNextRegistry()
+    {
+        using PublicationWorkspace workspace = new();
+        string path = workspace.CreateFile("raw gzip bytes"u8.ToArray());
+        using FileStream caller = File.OpenRead(path);
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        IOException failure = new("terminal caller file read");
+        primitives.Set<int>("ReadBorrowedAsync", call =>
+        {
+            call.Stream!.ReadByte().ShouldBe((int)'r');
+            return ScriptedFileSystemPrimitives.Fail<int>(failure, "publish caller read", path);
+        });
+        FileSystemContext context = primitives.CreateContext(retries: 2);
+        BoundaryPublishHandler handler = new();
+        using HttpClient http = new(handler);
+        RegistryHttpTransport transport = PublicationTestSupport.Transport(http);
+        PublishingRegistryClient first = new(transport, CreateEndpoint("first"), context);
+        PublishingRegistryClient second = new(transport, CreateEndpoint("second"), context);
+        RedundantRegistryClient composite = new([first, second], 3, null, context);
+
+        HttpRequestException exception = await Should.ThrowAsync<HttpRequestException>(() => composite.PublishAsync(
+            new PackageReference("example.package", "1.0.0"), caller, TestContext.Current.CancellationToken));
+
+        exception.ShouldBeSameAs(handler.BodyFailure);
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? terminal).ShouldBeTrue();
+        terminal!.RetriesUsed.ShouldBe(2);
+        terminal.Operation.ShouldBe("publish caller read");
+        handler.RequestCount.ShouldBe(1);
+        handler.Bodies.ShouldBeEmpty();
+        primitives.Count("ReadBorrowedAsync").ShouldBe(3);
+        primitives.Count("PrepareBorrowedRead").ShouldBe(1);
+        primitives.Calls.Where(call => call.Operation == "SetPosition")
+            .Select(call => call.Offset).ShouldBe([0L, 0L, 0L]);
+        primitives.AsyncWaits.ShouldBe([10, 10]);
+        primitives.Waits.ShouldBeEmpty();
+        caller.Position.ShouldBe(1);
+        caller.CanRead.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Publish_HttpWrappedLocalFailureResultDoesNotTryNextRegistry(bool npm)
+    {
+        using PublicationWorkspace workspace = new();
+        using MemoryStream archive = ArbitraryTarBuilder.Create(
+            ArbitraryTarBuilder.File("package/package.json", """{"name":"example.package","version":"1.0.0"}"""));
+        byte[] bytes = archive.ToArray();
+        string path = workspace.CreateFile(bytes);
+        using Stream caller = npm ? new MemoryStream(bytes) : File.OpenRead(path);
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        FileSystemContext context = primitives.CreateContext(retries: 2);
+        IOException failure = new("terminal deferred file read");
+        int failingReads = 0;
+        BoundaryPublishHandler handler = new()
+        {
+            BeforeSerialization = () =>
+            {
+                primitives.Set<int>(npm ? "ReadAtAsync" : "ReadBorrowedAsync", call =>
+                {
+                    failingReads++;
+                    return ScriptedFileSystemPrimitives.Fail<int>(failure, "attachment or caller read", call.Path);
+                });
+            },
+        };
+        using HttpClient http = new(handler);
+        RegistryHttpTransport transport = PublicationTestSupport.Transport(http);
+        IRegistryClient leaf = npm
+            ? new NpmRegistryClient(
+                transport,
+                CreateEndpoint("first") with { Type = RegistryType.Npm },
+                NullLogger<NpmRegistryClient>.Instance,
+                new PackageInstallLimits(),
+                context,
+                () => Path.Combine(workspace.Root, "npm-publish"))
+            : new FhirNpmRegistryClient(
+                transport, CreateEndpoint("first"), NullLogger<FhirNpmRegistryClient>.Instance, context);
+        PublishResult? capturedResult = null;
+        Mock<IRegistryClient> first = CreateMockClient(leaf.Endpoint);
+        first.Setup(client => client.PublishAsync(
+                It.IsAny<PackageReference>(), It.IsAny<Stream>(), It.IsAny<CancellationToken>()))
+            .Returns(async (PackageReference reference, Stream input, CancellationToken token) =>
+            {
+                capturedResult = await leaf.PublishAsync(reference, input, token);
+                return capturedResult;
+            });
+        FhirNpmRegistryClient second = new(
+            transport, CreateEndpoint("second"), NullLogger<FhirNpmRegistryClient>.Instance, context);
+        RedundantRegistryClient composite = new([first.Object, second], 3, null, context);
+
+        PublishResult result = await composite.PublishAsync(
+            new PackageReference("example.package", "1.0.0"), caller, TestContext.Current.CancellationToken);
+
+        result.ShouldBeSameAs(capturedResult);
+        result.Success.ShouldBeFalse();
+        result.StatusCode.ShouldBe(HttpStatusCode.InternalServerError);
+        handler.RequestCount.ShouldBe(1);
+        failingReads.ShouldBe(3);
+        primitives.AsyncWaits.ShouldBe([10, 10]);
+        primitives.Waits.ShouldBeEmpty();
+        FileSystemFailureContext.TryGetTerminal(handler.BodyFailure!, out FileSystemFailureContext? exceptionContext)
+            .ShouldBeTrue();
+        FileSystemFailureContext.TryGetResult(result, out FileSystemFailureContext? resultContext).ShouldBeTrue();
+        resultContext.ShouldBeSameAs(exceptionContext);
+        // Borrowed reads also execute two checkpoint-restoration continuations.
+        resultContext!.AttemptCount.ShouldBe(npm ? 3 : 5);
+        resultContext.RetriesUsed.ShouldBe(2);
+        resultContext.Termination.ShouldBe(FileSystemFailureTermination.Exhausted);
+        result.Message!.ShouldContain(resultContext.Format());
+        PublishResult equalCopy = result with { };
+        result.ShouldBe(equalCopy);
+        result.GetHashCode().ShouldBe(equalCopy.GetHashCode());
+        JsonSerializer.Serialize(result).ShouldBe(JsonSerializer.Serialize(equalCopy));
+        FileSystemFailureContext.TryGetResult(equalCopy, out _).ShouldBeFalse();
+        caller.CanRead.ShouldBeTrue();
+        Directory.Exists(Path.Combine(workspace.Root, "npm-publish")).ShouldBeFalse();
+        first.Verify(client => client.PublishAsync(
+            It.IsAny<PackageReference>(), It.IsAny<Stream>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Publish_UnmarkedNetworkFailureStillFallsBack()
+    {
+        using PublicationWorkspace workspace = new();
+        byte[] bytes = "complete body after a network failure"u8.ToArray();
+        string path = workspace.CreateFile(bytes);
+        using FileStream caller = File.OpenRead(path);
+        caller.Position = 5;
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        FileSystemContext context = primitives.CreateContext(retries: 0);
+        BoundaryPublishHandler handler = new() { ThrowNetworkOnFirst = true };
+        using HttpClient http = new(handler);
+        RegistryHttpTransport transport = PublicationTestSupport.Transport(http);
+        PublishingRegistryClient first = new(transport, CreateEndpoint("first"), context);
+        PublishingRegistryClient second = new(transport, CreateEndpoint("second"), context);
+        RedundantRegistryClient composite = new([first, second], 3, null, context);
+
+        PublishResult result = await composite.PublishAsync(
+            new PackageReference("example.package", "1.0.0"), caller, TestContext.Current.CancellationToken);
+
+        result.Success.ShouldBeTrue();
+        handler.RequestCount.ShouldBe(2);
+        handler.Bodies.Count.ShouldBe(2);
+        handler.Bodies[0].ShouldBe(bytes);
+        handler.Bodies[1].ShouldBe(bytes);
+        primitives.Count("PrepareBorrowedRead").ShouldBe(1);
+        primitives.Calls.Where(call => call.Operation == "SetPosition")
+            .Select(call => call.Offset).ShouldBe([0L, 0L]);
+        primitives.AsyncWaits.ShouldBeEmpty();
+        primitives.Waits.ShouldBeEmpty();
+        caller.CanRead.ShouldBeTrue();
+        caller.Position.ShouldBe(bytes.LongLength);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Query_TerminalLocalFailureDoesNotStartQueuedRegistry(bool search)
+    {
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        IOException failure = new("local query failure");
+        primitives.Set<string>("GetTempPath", _ =>
+            ScriptedFileSystemPrimitives.Fail<string>(failure, "query local work"));
+        IOException terminal = await Should.ThrowAsync<IOException>(() =>
+            primitives.CreateContext(retries: 1).FileSystem.GetTempPathAsync(TestContext.Current.CancellationToken).AsTask());
+        HttpRequestException wrapped = new("HTTP wrapper", new AggregateException(terminal));
+        Mock<IRegistryClient> first = CreateMockClient(CreateEndpoint("first"));
+        Mock<IRegistryClient> second = CreateMockClient(CreateEndpoint("second"));
+        first.Setup(client => client.SearchAsync(It.IsAny<PackageSearchCriteria>(), It.IsAny<CancellationToken>()))
+            .Returns(async () =>
+            {
+                await Task.Yield();
+                throw wrapped;
+            });
+        first.Setup(client => client.GetPackageListingAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async () =>
+            {
+                await Task.Yield();
+                throw wrapped;
+            });
+        RedundantRegistryClient composite = new([first.Object, second.Object], maxParallelRegistryQueries: 1);
+
+        HttpRequestException exception = await Should.ThrowAsync<HttpRequestException>(async () =>
+        {
+            if (search)
+                await composite.SearchAsync(new PackageSearchCriteria { Name = "example" }, TestContext.Current.CancellationToken);
+            else
+                await composite.GetPackageListingAsync("example.package", TestContext.Current.CancellationToken);
+        });
+
+        exception.ShouldBeSameAs(wrapped);
+        second.Verify(client => client.SearchAsync(
+            It.IsAny<PackageSearchCriteria>(), It.IsAny<CancellationToken>()), Times.Never);
+        second.Verify(client => client.GetPackageListingAsync(
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        primitives.Count("GetTempPath").ShouldBe(2);
+        primitives.AsyncWaits.ShouldBe([10]);
+    }
+
+    [Theory]
+    [InlineData("download")]
+    [InlineData("source-download")]
+    [InlineData("resolve-direct")]
+    [InlineData("resolve-source")]
+    public async Task Routing_TerminalLocalFailurePreservesExceptionBeforeSanitization(string operation)
+    {
+        ScriptedFileSystemPrimitives primitives = PublicationTestSupport.SystemFiles();
+        primitives.Set<string>("GetTempPath", _ =>
+            ScriptedFileSystemPrimitives.NativeFailure<string>(1117, "routed local work"));
+        IOException terminal = await Should.ThrowAsync<IOException>(() =>
+            primitives.CreateContext(retries: 0).FileSystem.GetTempPathAsync(TestContext.Current.CancellationToken).AsTask());
+        HttpRequestException wrapped = new("HTTP wrapper", new AggregateException(terminal));
+        Mock<IRegistryClient> first = CreateMockClient(CreateEndpoint("first"));
+        Mock<IRegistryClient> second = CreateMockClient(CreateEndpoint("second"));
+        first.Setup(client => client.DownloadAsync(It.IsAny<ResolvedDirective>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(wrapped);
+        first.Setup(client => client.ResolveAsync(
+                It.IsAny<PackageDirective>(), It.IsAny<VersionResolveOptions?>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(wrapped);
+        if (operation == "resolve-source")
+        {
+            first.Setup(client => client.GetPackageListingAsync("example.package", It.IsAny<CancellationToken>()))
+                .ReturnsAsync(CreateListing("example.package", "1.0.0", new PackageVersionInfo
+                {
+                    Name = "example.package",
+                    Version = "1.0.0",
+                }));
+        }
+        RedundantRegistryClient composite = new(first.Object, second.Object);
+        ResolvedDirective resolved = new()
+        {
+            Reference = new PackageReference("example.package", "1.0.0"),
+            TarballUri = new Uri("https://first.example/package.tgz"),
+            SourceRegistry = operation == "source-download" ? first.Object.Endpoint : null,
+        };
+
+        HttpRequestException exception = await Should.ThrowAsync<HttpRequestException>(async () =>
+        {
+            if (operation.EndsWith("download", StringComparison.Ordinal))
+                await composite.DownloadAsync(resolved, TestContext.Current.CancellationToken);
+            else
+                await composite.ResolveAsync(
+                    PackageDirective.Parse("example.package#1.0.0"),
+                    cancellationToken: TestContext.Current.CancellationToken);
+        });
+
+        exception.ShouldBeSameAs(wrapped);
+        second.Verify(client => client.DownloadAsync(
+            It.IsAny<ResolvedDirective>(), It.IsAny<CancellationToken>()), Times.Never);
+        second.Verify(client => client.ResolveAsync(
+            It.IsAny<PackageDirective>(), It.IsAny<VersionResolveOptions?>(), It.IsAny<CancellationToken>()), Times.Never);
+        primitives.Count("GetTempPath").ShouldBe(1);
+        primitives.AsyncWaits.ShouldBeEmpty();
+        FileSystemFailureContext.TryGetTerminal(exception, out FileSystemFailureContext? evidence).ShouldBeTrue();
+        evidence!.NativeErrorCode.ShouldBe(1117);
+    }
+
+    private sealed class BoundaryPublishHandler : HttpMessageHandler
+    {
+        internal int RequestCount { get; private set; }
+
+        internal List<byte[]> Bodies { get; } = [];
+
+        internal Action? BeforeSerialization { get; init; }
+
+        internal bool ThrowNetworkOnFirst { get; init; }
+
+        internal HttpRequestException? BodyFailure { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            BeforeSerialization?.Invoke();
+            try
+            {
+                Bodies.Add(await request.Content!.ReadAsByteArrayAsync(cancellationToken));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                BodyFailure = new HttpRequestException("HTTP content failed", new AggregateException(exception));
+                throw BodyFailure;
+            }
+
+            if (ThrowNetworkOnFirst && RequestCount == 1)
+                throw new HttpRequestException("Unmarked network failure");
+
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        }
     }
 
     [Fact]

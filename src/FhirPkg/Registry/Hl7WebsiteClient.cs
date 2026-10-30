@@ -1,6 +1,7 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License. See LICENSE in the project root.
 
 using System.Net;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Resolution;
 using Microsoft.Extensions.Logging;
@@ -71,7 +72,16 @@ public sealed class Hl7WebsiteClient : RegistryClientBase, IRegistryClient
         RegistryHttpTransport transport,
         RegistryEndpoint endpoint,
         ILogger<Hl7WebsiteClient> logger)
-        : base(transport, endpoint, logger)
+        : this(transport, endpoint, logger, FileSystemContext.CreateDefault())
+    {
+    }
+
+    internal Hl7WebsiteClient(
+        RegistryHttpTransport transport,
+        RegistryEndpoint endpoint,
+        ILogger<Hl7WebsiteClient> logger,
+        FileSystemContext context)
+        : base(transport, endpoint, logger, context)
     {
     }
 

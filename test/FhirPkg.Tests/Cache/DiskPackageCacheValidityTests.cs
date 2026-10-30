@@ -3,6 +3,8 @@
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
+using Microsoft.Win32.SafeHandles;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Resolution;
@@ -789,6 +791,257 @@ public sealed class DiskPackageCacheValidityTests : IDisposable
 
         await AssertRejectedByEveryReadSurfaceAsync(cache, reference);
         File.Exists(linkTarget).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Inspect_ExhaustedManifestIoRemainsCorruptWithFinalContext()
+    {
+        PackageReference reference = new("example.package", "1.0.0");
+        PackageCacheKey cacheKey = PackageCacheKey.Create(reference);
+        string targetPath = cacheKey.GetPackageDirectoryPath(_cacheRoot);
+        string manifestPath = Path.Combine(targetPath, "package", "package.json");
+        await WriteValidContentAsync(Path.Combine(targetPath, "package"));
+
+        ScriptedFileSystemPrimitives asyncPrimitives = CreateManifestFaultPrimitives();
+        PackageCacheInspection asyncInspection = await new PackageCacheValidator(
+                _cacheRoot, asyncPrimitives.CreateContext(retries: 5))
+            .InspectAsync(cacheKey, TestContext.Current.CancellationToken);
+        ScriptedFileSystemPrimitives syncPrimitives = CreateManifestFaultPrimitives();
+        PackageCacheInspection syncInspection = new PackageCacheValidator(
+                _cacheRoot, syncPrimitives.CreateContext(retries: 5))
+            .Inspect(cacheKey);
+
+        // One initial attempt plus five retries, against a file that is genuinely present.
+        CountManifestOpens(asyncPrimitives, manifestPath).ShouldBe(6);
+        CountManifestOpens(syncPrimitives, manifestPath).ShouldBe(6);
+        asyncPrimitives.AsyncWaits.Count.ShouldBe(5);
+        syncPrimitives.Waits.Count.ShouldBe(5);
+        foreach (PackageCacheInspection inspection in new[] { asyncInspection, syncInspection })
+        {
+            inspection.State.ShouldBe(PackageCacheInspectionState.Corrupt);
+            inspection.IsRepairable.ShouldBeTrue();
+            inspection.ManifestPath.ShouldBe(manifestPath);
+            inspection.Manifest.ShouldBeNull();
+            FileSystemFailureContext failure = inspection.FailureContext.ShouldNotBeNull();
+            failure.IsTerminal.ShouldBeTrue();
+            failure.Termination.ShouldBe(FileSystemFailureTermination.Exhausted);
+            failure.RetriesUsed.ShouldBe(5);
+            failure.AttemptCount.ShouldBeGreaterThanOrEqualTo(6);
+            failure.NativeErrorCode.ShouldBe(32);
+            failure.Path.ShouldNotBeNull().ShouldEndWith("package.json");
+            inspection.CorruptionReason.ShouldNotBeNull().ShouldContain("retries 5");
+            inspection.CorruptionReason.ShouldContain("Exhausted");
+        }
+    }
+
+    [Fact]
+    public async Task Strict_ExhaustedManifestIoDoesNotReadReplacementSource()
+    {
+        PackageReference reference = new("example.package", "1.0.0");
+        string targetPath = PackageCacheKey.Create(reference).GetPackageDirectoryPath(_cacheRoot);
+        string manifestPath = Path.Combine(targetPath, "package", "package.json");
+        await WriteValidContentAsync(Path.Combine(targetPath, "package"));
+        ScriptedFileSystemPrimitives primitives = CreateManifestFaultPrimitives();
+        primitives.Set<FileStream>("OpenFile", _ => OpenScriptedLockFile(_cacheRoot));
+        primitives.Set("TryLock", FileSystemReplayOutcome<bool>.Complete(true));
+        primitives.Set("Unlock", FileSystemReplayOutcome<bool>.Complete(true));
+        using FailOnReadStream source = new();
+        using DiskPackageCache cache = new(
+            _cacheRoot,
+            logger: null,
+            timeProvider: null,
+            new PackageInstallLimits(),
+            primitives.CreateContext(retries: 5));
+
+        PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(
+            () => cache.InstallAsync(
+                reference,
+                source,
+                new InstallCacheOptions
+                {
+                    VerifyChecksum = false,
+                    CorruptCacheBehavior = CorruptCacheBehavior.Strict
+                },
+                TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(PackageInstallErrorCode.CorruptCache);
+        exception.Stage.ShouldBe(PackageInstallStage.CacheInspection);
+        exception.Message.ShouldContain("retries 5");
+        exception.Message.ShouldContain("Exhausted");
+        source.ReadAttempts.ShouldBe(0);
+        // No replacement was staged and the unreadable target was neither moved nor removed.
+        CountManifestOpens(primitives, manifestPath).ShouldBe(6);
+        primitives.Calls.Count(call => call.Operation == "MovePath").ShouldBe(0);
+        primitives.Calls.Count(call => call.Operation == "DeleteEntry"
+            && call.Path!.StartsWith(targetPath, StringComparison.Ordinal)).ShouldBe(0);
+        File.Exists(manifestPath).ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("ancestor", 2)]
+    [InlineData("target", 2)]
+    [InlineData("exact-root-manifest", 2)]
+    [InlineData("required-content", 3)]
+    [InlineData("required-manifest", 3)]
+    [InlineData("root-snapshot", 3)]
+    [InlineData("content-snapshot", 2)]
+    public async Task InspectAsync_ShapeAndExactNameFaultsWaitAsynchronously(string step, int expectedCalls)
+    {
+        PackageReference reference = new("@example/package", "1.0.0");
+        PackageCacheKey key = PackageCacheKey.Create(reference);
+        string targetPath = key.GetPackageDirectoryPath(_cacheRoot);
+        string contentPath = Path.Combine(targetPath, "package");
+        Directory.CreateDirectory(contentPath);
+        string manifest = """{"name":"@example/package","version":"1.0.0"}""";
+        File.WriteAllText(Path.Combine(targetPath, "package.json"), manifest);
+        File.WriteAllText(Path.Combine(contentPath, "package.json"), manifest);
+        string faultPath = step switch
+        {
+            "ancestor" => Path.Combine(_cacheRoot, "@example"),
+            "required-content" or "content-snapshot" => contentPath,
+            "required-manifest" => Path.Combine(contentPath, "package.json"),
+            "exact-root-manifest" => Path.Combine(targetPath, "package.json"),
+            _ => targetPath,
+        };
+        int faultAttempt = step is "required-content" or "required-manifest" ? 2 : 1;
+        int calls = 0;
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        if (step == "required-manifest")
+        {
+            files.OnWait = () => TestContext.Current.TestOutputHelper?.WriteLine(
+                $"Wait after call {files.Calls.Count}: async=[{string.Join(", ", files.AsyncWaits)}], " +
+                $"sync=[{string.Join(", ", files.Waits)}]");
+        }
+        if (step.EndsWith("snapshot", StringComparison.Ordinal))
+        {
+            files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+                call.Path == faultPath && ++calls == faultAttempt
+                    ? ScriptedFileSystemPrimitives.NativeFailure<IEnumerator<string>>(5, "snapshot", call.Path)
+                    : SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        }
+        else
+        {
+            files.Set<FileSystemProbeResult>("Probe", call =>
+            {
+                FileSystemReplayOutcome<FileSystemProbeResult> outcome = call.Path == faultPath && ++calls == faultAttempt
+                    ? ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "shape", call.Path)
+                    : SystemFileSystemPrimitives.Instance.Probe(call.Path!, call.Flags == 1);
+                if (step == "required-manifest" && call.Path == faultPath)
+                {
+                    string result = outcome.Kind == FileSystemReplayOutcomeKind.Completed
+                        ? outcome.Value.Kind.ToString()
+                        : outcome.Kind.ToString();
+                    if (outcome.PrimitiveFailure is FileSystemPrimitiveFailure failure
+                        && FileSystemFailureContext.TryGetOrigin(failure.Exception, out FileSystemFailureContext? evidence))
+                        result += $", errno={evidence.NativeErrorCode}";
+                    TestContext.Current.TestOutputHelper?.WriteLine(
+                        $"Manifest probe #{calls} at call {files.Calls.Count}: {result}");
+                }
+                return outcome;
+            });
+        }
+
+        PackageCacheInspection inspection = await new PackageCacheValidator(_cacheRoot, files.CreateContext(retries: 1))
+            .InspectAsync(key, TestContext.Current.CancellationToken);
+
+        if (step == "required-manifest")
+        {
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                $"{files.Platform} operation order (paths relative to cache root): " +
+                string.Join(" -> ", files.Calls.Select((call, index) =>
+                    $"{index + 1}:{call.Operation}({(call.Path is null ? "-" : Path.GetRelativePath(_cacheRoot, call.Path))})")));
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                $"Final waits: async=[{string.Join(", ", files.AsyncWaits)}], sync=[{string.Join(", ", files.Waits)}]");
+        }
+        inspection.State.ShouldBe(PackageCacheInspectionState.Valid);
+        inspection.ContentPath.ShouldBe(contentPath);
+        inspection.Manifest!.Name.ShouldBe(reference.Name);
+        CountManifestOpens(files, Path.Combine(contentPath, "package.json")).ShouldBe(1);
+        if (step == "required-manifest" && files.Platform == FileSystemPlatform.MacOS)
+        {
+            // The macOS protected-read precheck adds one probe after the shape retry.
+            expectedCalls++;
+        }
+        calls.ShouldBe(expectedCalls);
+        files.AsyncWaits.ShouldBe([10]);
+        files.Waits.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InspectAsync_ExhaustedShapeFaultRetainsCorruptOutcomeAndAsyncEvidence(bool enumeration)
+    {
+        PackageCacheKey key = PackageCacheKey.Create(new PackageReference("example.package", "1.0.0"));
+        string targetPath = key.GetPackageDirectoryPath(_cacheRoot);
+        await WriteValidContentAsync(Path.Combine(targetPath, "package"));
+        ScriptedFileSystemPrimitives files = CompositionTestSupport.SystemFiles(_cacheRoot);
+        IOException failure = new("shape unavailable");
+        if (enumeration)
+        {
+            files.Set<IEnumerator<string>>("CreateDirectoryEnumerator", call =>
+                ScriptedFileSystemPrimitives.Fail<IEnumerator<string>>(failure, "snapshot", call.Path));
+        }
+        else
+        {
+            files.Set<FileSystemProbeResult>("Probe", call =>
+                ScriptedFileSystemPrimitives.Fail<FileSystemProbeResult>(failure, "shape", call.Path));
+        }
+
+        PackageCacheInspection inspection = await new PackageCacheValidator(_cacheRoot, files.CreateContext(retries: 2))
+            .InspectAsync(key, TestContext.Current.CancellationToken);
+
+        inspection.State.ShouldBe(PackageCacheInspectionState.Corrupt);
+        inspection.IsRepairable.ShouldBeTrue();
+        inspection.FailureContext.ShouldNotBeNull().RetriesUsed.ShouldBe(2);
+        inspection.CorruptionReason.ShouldNotBeNull().ShouldContain("attempts 3, retries 2");
+        files.Count(enumeration ? "CreateDirectoryEnumerator" : "Probe").ShouldBe(3);
+        files.Count("OpenFileHandle").ShouldBe(0);
+        files.AsyncWaits.ShouldBe([10, 10]);
+        files.Waits.ShouldBeEmpty();
+    }
+
+    private static ScriptedFileSystemPrimitives CreateManifestFaultPrimitives()
+    {
+        ScriptedFileSystemPrimitives primitives = new(SystemFileSystemPrimitives.Instance.Platform);
+        primitives.UseSystemFiles();
+        primitives.Set<IEnumerator<string>>(
+            "CreateDirectoryEnumerator",
+            call => SystemFileSystemPrimitives.Instance.CreateDirectoryEnumerator(call.Path!));
+        primitives.Set<SafeFileHandle>(
+            "OpenFileHandle",
+            call => IsManifest(call.Path)
+                ? ScriptedFileSystemPrimitives.NativeFailure<SafeFileHandle>(32, "OpenFileHandle", call.Path)
+                : SystemFileSystemPrimitives.Instance.OpenFileHandle(
+                    call.Path!, call.Mode!.Value, call.Access!.Value, call.Share!.Value, call.Options!.Value));
+        primitives.Set<int>(
+            "OpenDescriptor",
+            call => IsManifest(call.Path)
+                ? ScriptedFileSystemPrimitives.NativeFailure<int>(32, "OpenDescriptor", call.Path)
+                : SystemFileSystemPrimitives.Instance.OpenDescriptor(call.Path!, (int)call.Flags!.Value, 0));
+        return primitives;
+    }
+
+    private static bool IsManifest(string? path) =>
+        string.Equals(Path.GetFileName(path), "package.json", StringComparison.Ordinal);
+
+    private static int CountManifestOpens(ScriptedFileSystemPrimitives primitives, string manifestPath) =>
+        primitives.Calls.Count(call =>
+            call.Operation is "OpenFileHandle" or "OpenDescriptor"
+            && string.Equals(call.Path, manifestPath, StringComparison.OrdinalIgnoreCase));
+
+    private static FileSystemReplayOutcome<FileStream> OpenScriptedLockFile(string root)
+    {
+        Directory.CreateDirectory(root);
+        string path = Path.Combine(root, $"scripted-{Guid.NewGuid():N}.lock");
+        return FileSystemReplayOutcome<FileStream>.Complete(
+            new FileStream(
+                path,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.ReadWrite | FileShare.Delete,
+                1,
+                FileOptions.DeleteOnClose));
     }
 
     public void Dispose()
