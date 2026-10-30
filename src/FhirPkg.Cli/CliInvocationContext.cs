@@ -26,6 +26,9 @@ internal sealed class CliInvocationContext
     /// <summary>Isolated test hook applied only after SDK policy validation.</summary>
     internal static Func<FileSystemContext, FileSystemContext>? FileSystemContextOverride { get; set; }
 
+    /// <summary>Isolated test hook for raw environment reads during SDK policy validation.</summary>
+    internal static Func<string, string?>? EnvironmentReaderOverride { get; set; }
+
     internal FileSystemContext FileSystemContext { get; }
 
     internal FhirPackageManagerConfiguration Configuration => _configuration;
@@ -67,7 +70,18 @@ internal sealed class CliInvocationContext
         if (options.FileSystemMaximumJitterMilliseconds is int jitter)
             retry.MaximumJitterMilliseconds = jitter;
 
-        FileSystemContext context = new FileSystemContext(retry);
+        Func<string, string?>? reader = EnvironmentReaderOverride;
+        FileSystemContext context;
+        if (reader is null)
+        {
+            context = new FileSystemContext(retry);
+        }
+        else
+        {
+            FileSystemRetryPolicy policy = FileSystemRetryPolicy.Resolve(retry, reader, out bool hasExplicitValues);
+            context = new FileSystemContext(
+                policy, hasExplicitValues, SystemFileSystemPrimitives.Instance, new FileSystemRetryExecutor());
+        }
         return FileSystemContextOverride?.Invoke(context) ?? context;
     }
 

@@ -2,11 +2,11 @@
 
 using System.CommandLine;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Formats.Tar;
 using System.Globalization;
 using System.IO.Compression;
 using System.Net;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using FhirPkg.Cache;
@@ -37,11 +37,13 @@ public sealed class FileSystemRetryCliTests : IDisposable
         FileSystemRetryOptions.MaximumJitterMillisecondsEnvironmentVariable,
     ];
 
-    private readonly string?[] _originalEnvironment = s_variables.Select(Environment.GetEnvironmentVariable).ToArray();
     private readonly Func<ConfigFile?>? _originalLoader = GlobalOptions.ConfigLoaderOverride;
     private readonly Func<FhirPackageManagerOptions, FhirPackageManager>? _originalFactory = ManagerFactory.FactoryOverride;
     private readonly Func<FileSystemContext, FileSystemContext>? _originalContextFactory =
         CliInvocationContext.FileSystemContextOverride;
+    private readonly Func<string, string?>? _originalEnvironmentReader = CliInvocationContext.EnvironmentReaderOverride;
+    private readonly Dictionary<string, string?> _environment = s_variables.ToDictionary(name => name, _ => (string?)null);
+    private readonly List<(string Name, string? Value)> _environmentReads = [];
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"fhir-cli-retry-{Guid.NewGuid():N}");
     private readonly CliFileSystemPrimitives _files;
     private readonly List<FileSystemContext> _contexts = [];
@@ -54,7 +56,7 @@ public sealed class FileSystemRetryCliTests : IDisposable
         Directory.CreateDirectory(HomeDirectory);
         Directory.CreateDirectory(Path.Combine(_root, "temp"));
         _files = new CliFileSystemPrimitives(CurrentDirectory, HomeDirectory, Path.Combine(_root, "temp"));
-        SetEnvironment(null, null, null);
+        CliInvocationContext.EnvironmentReaderOverride = ReadEnvironment;
         GlobalOptions.ConfigLoaderOverride = null;
         ManagerFactory.FactoryOverride = null;
         CliInvocationContext.FileSystemContextOverride = resolved =>
@@ -206,7 +208,6 @@ public sealed class FileSystemRetryCliTests : IDisposable
         {
             case "empty-environment":
                 SetVariable(s_variables[0], string.Empty);
-                Environment.GetEnvironmentVariable(s_variables[0]).ShouldBe(string.Empty);
                 break;
             case "malformed-environment":
                 SetEnvironment(null, "invalid", null);
@@ -232,6 +233,8 @@ public sealed class FileSystemRetryCliTests : IDisposable
 
         InvocationOutput output = await RunMainAsync([.. HandlerArguments(handler), .. flags], json);
 
+        if (invalid == "empty-environment")
+            _environmentReads.ShouldBe([(s_variables[0], string.Empty)]);
         output.ExitCode.ShouldBe(ExitCodes.InvalidArgs, output.StandardError);
         configLoads.ShouldBe(0);
         _factoryCalls.ShouldBe(0);
@@ -250,6 +253,54 @@ public sealed class FileSystemRetryCliTests : IDisposable
         {
             output.StandardOutput.ShouldContain("✗ ");
             output.StandardOutput.ShouldNotContain("\"error\"");
+        }
+    }
+
+    [Fact]
+    public async Task ManagedEnvironment_InvalidPolicyUsesDefaultReader()
+    {
+        using CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        source.CancelAfter(TimeSpan.FromSeconds(60));
+        using Process process = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                WorkingDirectory = CurrentDirectory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            },
+        };
+        process.StartInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "FhirPkg.Cli.dll"));
+        foreach (string argument in WithGlobalOptions(["list"], json: true, verbose: false))
+            process.StartInfo.ArgumentList.Add(argument);
+        process.StartInfo.Environment[s_variables[0]] = "invalid";
+        process.StartInfo.Environment.Remove(s_variables[1]);
+        process.StartInfo.Environment.Remove(s_variables[2]);
+
+        process.Start();
+        try
+        {
+            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(source.Token);
+            Task<string> stderrTask = process.StandardError.ReadToEndAsync(source.Token);
+            await Task.WhenAll(stdoutTask, stderrTask);
+            await process.WaitForExitAsync(source.Token);
+            InvocationOutput output = new(process.ExitCode, await stdoutTask, await stderrTask);
+
+            output.ExitCode.ShouldBe(ExitCodes.InvalidArgs, output.StandardOutput + output.StandardError);
+            output.StandardError.ShouldBeEmpty();
+            using JsonDocument document = JsonDocument.Parse(output.StandardOutput);
+            document.RootElement.EnumerateObject().Select(property => property.Name).ShouldBe(["error"]);
+            document.RootElement.GetProperty("error").GetString().ShouldNotBeNull().ShouldContain(s_variables[0]);
+            Directory.Exists(CachePath).ShouldBeFalse();
+        }
+        catch
+        {
+            try { process.Kill(entireProcessTree: true); } catch { /* best effort */ }
+            throw;
         }
     }
 
@@ -951,36 +1002,23 @@ public sealed class FileSystemRetryCliTests : IDisposable
         }
     }
 
-    private static void SetEnvironment(string? count, string? minimum, string? jitter)
+    private string? ReadEnvironment(string name)
+    {
+        string? value = _environment.TryGetValue(name, out string? configured)
+            ? configured
+            : Environment.GetEnvironmentVariable(name);
+        _environmentReads.Add((name, value));
+        return value;
+    }
+
+    private void SetEnvironment(string? count, string? minimum, string? jitter)
     {
         SetVariable(s_variables[0], count);
         SetVariable(s_variables[1], minimum);
         SetVariable(s_variables[2], jitter);
     }
 
-    private static void SetVariable(string name, string? value)
-    {
-        if (value is not { Length: 0 })
-        {
-            Environment.SetEnvironmentVariable(name, value);
-            return;
-        }
-
-        // The net8.0 managed setter deletes empty values. Create a real empty
-        // process variable, and restore it the same way if it was originally empty.
-        bool succeeded = OperatingSystem.IsWindows()
-            ? SetWindowsEnvironmentVariable(name, value)
-            : SetUnixEnvironmentVariable(name, value, overwrite: 1) == 0;
-        if (!succeeded)
-            throw new Win32Exception(Marshal.GetLastPInvokeError());
-    }
-
-    [DllImport("kernel32.dll", EntryPoint = "SetEnvironmentVariableW", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetWindowsEnvironmentVariable(string name, string value);
-
-    [DllImport("libc", EntryPoint = "setenv", SetLastError = true)]
-    private static extern int SetUnixEnvironmentVariable(string name, string value, int overwrite);
+    private void SetVariable(string name, string? value) => _environment[name] = value;
 
     private static byte[] CreateArchive()
     {
@@ -999,8 +1037,7 @@ public sealed class FileSystemRetryCliTests : IDisposable
         GlobalOptions.ConfigLoaderOverride = _originalLoader;
         ManagerFactory.FactoryOverride = _originalFactory;
         CliInvocationContext.FileSystemContextOverride = _originalContextFactory;
-        for (int index = 0; index < s_variables.Length; index++)
-            SetVariable(s_variables[index], _originalEnvironment[index]);
+        CliInvocationContext.EnvironmentReaderOverride = _originalEnvironmentReader;
         Directory.Delete(_root, recursive: true);
     }
 
