@@ -1,8 +1,10 @@
 // Copyright (c) Gino Canessa. Licensed under the MIT License.
 
+using System.Reflection;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using FhirPkg.Release.Validation;
 using Shouldly;
 using Xunit;
 
@@ -316,6 +318,152 @@ public class BuildToolchainContractTests
             values.Replace(" ", string.Empty, StringComparison.Ordinal)
                 .ShouldBe(string.Join(",", frameworks.Select(value => $"'{value}'")));
         }
+    }
+
+    [Fact]
+    public void ReleasePolicy_CompiledSupportedSetMatchesDeclaredPolicyAndIndependentExpectation()
+    {
+        string declaredPolicy = GetProperty(
+            ReadXml("Directory.Build.props"),
+            "FhirPkgSupportedTargetFrameworks").Value;
+        XElement metadataItem = ReadXml(
+                "tools/FhirPkg.Release/FhirPkg.Release.csproj")
+            .Descendants("AssemblyMetadata")
+            .Where(item => (string?)item.Attribute("Include")
+                == "FhirPkgSupportedTargetFrameworks")
+            .ShouldHaveSingleItem();
+        ((string?)metadataItem.Attribute("Value"))
+            .ShouldBe("$(FhirPkgSupportedTargetFrameworks)");
+        metadataItem.AncestorsAndSelf().ShouldNotContain(
+            element => element.Attribute("Condition") != null);
+
+        AssemblyMetadataAttribute metadata =
+            typeof(ReleaseFrameworkPolicy).Assembly
+                .GetCustomAttributes<AssemblyMetadataAttribute>()
+                .Where(attribute => attribute.Key == "FhirPkgSupportedTargetFrameworks")
+                .ShouldHaveSingleItem();
+        metadata.Value.ShouldBe(declaredPolicy);
+        metadata.Value.ShouldBe(string.Join(';', ExpectedFrameworks));
+        ReleaseFrameworkPolicy.Frameworks.ShouldBe(ExpectedFrameworks);
+        ReleaseFrameworkPolicy.Frameworks.ShouldBe(declaredPolicy.Split(';'));
+        typeof(ReleaseFrameworkPolicy).TypeInitializer.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("\t\r\n")]
+    [InlineData(";")]
+    [InlineData(";net8.0")]
+    [InlineData("net8.0;")]
+    [InlineData("net8.0;;net9.0")]
+    [InlineData("net8.0; ;net9.0")]
+    [InlineData("net8.0;net8.0")]
+    [InlineData("net11.0;net8.0;net11.0")]
+    [InlineData("NET8.0")]
+    [InlineData("Net11.0")]
+    [InlineData(" net8.0")]
+    [InlineData("net8.0 ")]
+    [InlineData("net8.0\n")]
+    [InlineData("net8.0; net9.0")]
+    [InlineData("net8.0;\tnet9.0")]
+    [InlineData("net7.0")]
+    [InlineData("net0.0")]
+    [InlineData("net08.0")]
+    [InlineData("net+8.0")]
+    [InlineData("net-8.0")]
+    [InlineData("net8")]
+    [InlineData("net8.1")]
+    [InlineData("net8.00")]
+    [InlineData("net.0")]
+    [InlineData("net8.0-windows")]
+    [InlineData("netstandard2.0")]
+    [InlineData(".NETCoreApp,Version=v8.0")]
+    [InlineData("net8.0,net9.0")]
+    [InlineData("net\u0668.0")]
+    [InlineData("net2147483648.0")]
+    public void ReleasePolicy_ParseRejectsMissingEmptyDuplicateAndMalformedValues(
+        string? value)
+    {
+        ReleaseValidationException exception =
+            Should.Throw<ReleaseValidationException>(
+                () => ReleaseFrameworkPolicy.Parse(value));
+
+        exception.Message.ShouldContain(
+            "Invalid release build policy 'FhirPkgSupportedTargetFrameworks':");
+        exception.Message.ShouldContain("Rebuild the release tool");
+    }
+
+    [Theory]
+    [InlineData("net8.0")]
+    [InlineData("net11.0;net10.0;net9.0;net8.0")]
+    [InlineData("net8.0;net11.0")]
+    [InlineData("net12.0;net99.0")]
+    public void ReleasePolicy_ParseAcceptsCanonicalModernFrameworks(
+        string value)
+    {
+        ReleaseFrameworkPolicy.Parse(value).ShouldBe(value.Split(';'));
+    }
+
+    [Fact]
+    public void ReleasePolicy_ParseReturnsReadOnlyFrameworks()
+    {
+        IReadOnlyList<string> frameworks =
+            ReleaseFrameworkPolicy.Parse("net11.0;net8.0");
+        (frameworks is string[]).ShouldBeFalse();
+        IList<string> collection = (IList<string>)frameworks;
+
+        collection.IsReadOnly.ShouldBeTrue();
+        Should.Throw<NotSupportedException>(
+            () => collection[0] = "net12.0");
+        Should.Throw<NotSupportedException>(
+            () => collection.Add("net12.0"));
+        Should.Throw<NotSupportedException>(
+            () => collection.RemoveAt(0));
+        frameworks.ShouldBe(["net11.0", "net8.0"]);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void ReleasePolicy_ReadMetadataRejectsMissingAndDuplicateAttributes(
+        int count)
+    {
+        List<AssemblyMetadataAttribute> metadata =
+        [
+            new("UnrelatedPolicy", "net11.0;net10.0;net9.0;net8.0"),
+        ];
+        for (int index = 0; index < count; index++)
+        {
+            metadata.Add(new AssemblyMetadataAttribute(
+                "FhirPkgSupportedTargetFrameworks",
+                "net11.0;net10.0;net9.0;net8.0"));
+        }
+
+        ReleaseValidationException exception =
+            Should.Throw<ReleaseValidationException>(
+                () => ReleaseFrameworkPolicy.ReadMetadata(metadata));
+
+        exception.Message.ShouldContain(
+            "Invalid release build policy 'FhirPkgSupportedTargetFrameworks':");
+        exception.Message.ShouldContain(
+            $"Expected exactly one assembly metadata attribute, found {count}.");
+    }
+
+    [Fact]
+    public void ReleasePolicy_ReadMetadataUsesOnlyTheSupportedFrameworkKey()
+    {
+        AssemblyMetadataAttribute[] metadata =
+        [
+            new("TargetFramework", "net8.0"),
+            new("TargetFrameworks", "net8.0"),
+            new("fhirpkgsupportedtargetframeworks", "not-a-framework"),
+            new("FhirPkgSupportedTargetFrameworks", "net11.0;net10.0;net9.0;net8.0"),
+        ];
+
+        ReleaseFrameworkPolicy.ReadMetadata(metadata)
+            .ShouldBe(ExpectedFrameworks);
     }
 
     private static void AssertPublishedPackageMode(XDocument project)

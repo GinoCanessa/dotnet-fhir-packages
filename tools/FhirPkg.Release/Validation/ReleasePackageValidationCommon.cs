@@ -13,9 +13,6 @@ internal static class ReleasePackageValidationCommon
         "https://github.com/GinoCanessa/dotnet-fhir-packages";
     internal const string SdkPackageId = "fhir-pkg-lib";
 
-    internal static readonly string[] Frameworks =
-        ["net8.0", "net9.0", "net10.0"];
-
     internal static string ComputeSha256(string path)
     {
         using FileStream stream = File.OpenRead(path);

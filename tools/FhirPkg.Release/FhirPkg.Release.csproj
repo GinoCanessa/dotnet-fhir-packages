@@ -13,6 +13,9 @@
   <ItemGroup>
     <InternalsVisibleTo Include="FhirPkg.Tests" />
     <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
+    <AssemblyMetadata
+      Include="FhirPkgSupportedTargetFrameworks"
+      Value="$(FhirPkgSupportedTargetFrameworks)" />
   </ItemGroup>
 
 </Project>

@@ -425,8 +425,7 @@ internal sealed class ReleaseCandidateValidator : IReleaseCandidateValidator
         CandidatePackageValidationResult sdkResult,
         CandidatePackageValidationResult cliResult)
     {
-        string[] frameworks = ["net8.0", "net9.0", "net10.0"];
-        foreach (string framework in frameworks)
+        foreach (string framework in ReleaseFrameworkPolicy.Frameworks)
         {
             string sdkHash = GetZipEntrySha256(
                 sdkResult.PackagePath,

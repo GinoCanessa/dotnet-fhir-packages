@@ -73,7 +73,7 @@ internal sealed class ReleaseSymbolPackageValidator
         HashSet<string> entryNames)
     {
         foreach (string framework in
-                 ReleasePackageValidationCommon.Frameworks)
+                 ReleaseFrameworkPolicy.Frameworks)
         {
             string[] requiredEntries =
                 string.Equals(

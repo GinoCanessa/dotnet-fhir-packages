@@ -140,6 +140,39 @@ public sealed class ReleaseCandidateValidatorTests
         }
     }
 
+    [Theory]
+    [InlineData("net8.0")]
+    [InlineData("net9.0")]
+    [InlineData("net10.0")]
+    [InlineData("net11.0")]
+    public void Validate_RejectsCliSdkAssemblyMismatchForFramework(
+        string framework)
+    {
+        string candidateDirectory = ReleaseValidationFixture.CreateCandidate(
+            mismatchCliAssembly: true,
+            mismatchFramework: framework);
+        try
+        {
+            IReleaseCandidateValidator validator =
+                new ReleaseCandidateValidator();
+
+            ReleaseValidationException exception =
+                Should.Throw<ReleaseValidationException>(
+                    () => validator.Validate(
+                        candidateDirectory,
+                        ReleaseValidationFixture.Version,
+                        ReleaseValidationFixture.Tag,
+                        ReleaseValidationFixture.RepositoryCommit));
+
+            exception.Message.ShouldBe(
+                $"The CLI embedded SDK assembly for '{framework}' does not match the SDK package.");
+        }
+        finally
+        {
+            Directory.Delete(candidateDirectory, recursive: true);
+        }
+    }
+
     [Fact]
     public void Validate_RejectsMissingOrUnexpectedArtifact()
     {
