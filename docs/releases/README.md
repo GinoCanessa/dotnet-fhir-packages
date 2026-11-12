@@ -225,10 +225,12 @@ No frozen fixture bundle for test/FhirPkg.Qualification/qualification-corpus.jso
 Do exactly that. A drift check dispatched at the tag freezes a bundle for the
 tag's own corpus, and its head commit is already on `main`.
 
-Until `hl7.fhir.us.core#6.0.0` is re-pinned in the corpus, no bundle can be
-frozen: packages2.fhir.org now serves bytes for it that differ from its pin,
-so every drift run fails on that row, and every release and validation run
-stops at this error. The re-pin is a separate change.
+The `hl7.fhir.us.core#6.0.0` pin was updated in commit `ee4c3c7` after the
+upstream archive changed. The
+[November 9 drift check](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/runs/42656908733)
+passed on `main` and froze a bundle for the updated corpus. The earlier drift
+blocker is resolved; still perform the pre-release drift check described under
+[Preparing the changelog](#preparing-the-changelog).
 
 `pack-release-candidate` downloads the located bundle with `fetch-artifact`,
 which requires the downloaded zip's SHA-256 to equal the digest GitHub

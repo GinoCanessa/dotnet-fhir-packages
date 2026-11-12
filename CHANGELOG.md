@@ -10,9 +10,11 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+## [2026.1112.1330] - 2026-11-12
+
 ### Added
-- Added .NET 11 targets to the SDK and CLI while retaining .NET 8, 9, and 10
-  support.
+- Added .NET 11 targets across all seven solution projects, including the SDK
+  and CLI, while retaining .NET 8, 9, and 10 support.
 
 ### Changed
 - Made stable .NET SDK `11.0.100` the contributor floor and `net11.0` the
@@ -23,6 +25,8 @@ qualification evidence) lives alongside this file under
   qualification to twelve OS/framework jobs.
 
 ### Fixed
+- Updated the `hl7.fhir.us.core#6.0.0` qualification fixture hash to match the
+  upstream archive, restoring verified fixture-bundle generation.
 - Corrected Unix native creation and descriptor-control argument delivery on
   macOS arm64, preserving requested file permissions and descriptor options.
 - Allowed abandoned-staging cleanup to finish when the staging parent
