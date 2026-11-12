@@ -57,7 +57,7 @@ public class ReleaseWorkflowContractTests
             "if: ${{ inputs.commit_sha != '' }}").ShouldBe(4);
         buildWorkflow.ShouldNotContain(
             "github.event_name == 'workflow_call'");
-        buildWorkflow.ShouldContain("--framework net10.0");
+        buildWorkflow.ShouldContain("--framework net11.0");
         CountOccurrences(buildWorkflow, "'tools/**'").ShouldBe(2);
         commandNames.ShouldBe(
             [
@@ -102,7 +102,7 @@ public class ReleaseWorkflowContractTests
         releaseWorkflow.ShouldContain(
             "os: [ubuntu-latest, windows-latest, macos-latest]");
         releaseWorkflow.ShouldContain(
-            "framework: [net8.0, net9.0, net10.0]");
+            "framework: [net8.0, net9.0, net10.0, net11.0]");
         releaseWorkflow.ShouldContain("UsePublishedFhirPkg=true");
         releaseWorkflow.ShouldContain("release:");
         releaseWorkflow.ShouldContain("types: [published]");
@@ -164,7 +164,6 @@ public class ReleaseWorkflowContractTests
         releaseWorkflow.ShouldNotContain("Test-PublishedRelease");
         releaseWorkflow.ShouldNotContain("skip-signature-verification");
 
-        validateSection.ShouldContain("dotnet-version: 10.0.302");
         CountOccurrences(
             validateSection,
             "dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(1);
@@ -224,8 +223,7 @@ public class ReleaseWorkflowContractTests
         preflightIndex.ShouldBeLessThan(firstPushIndex);
         cliPrimaryIndex.ShouldBeLessThan(sdkPrimaryIndex);
 
-        qualificationProject.ShouldContain(
-            "<TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>");
+        qualificationProject.ShouldNotContain("<TargetFrameworks>");
         testProject.ShouldNotContain(
             "..\\..\\.github\\scripts\\*.ps1");
     }
@@ -646,7 +644,7 @@ public class ReleaseWorkflowContractTests
                 "dotnet run `",
                 "--project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `",
                 "--configuration Release `",
-                "--framework net10.0 `",
+                "--framework net11.0 `",
                 "--no-restore `",
                 "-- `",
                 "--derive-bundle $bundle `",
@@ -878,7 +876,6 @@ public class ReleaseWorkflowContractTests
         driftWorkflow.ShouldNotContain("environment:");
         driftWorkflow.ShouldNotContain("secrets.");
         driftWorkflow.ShouldNotContain("GINOC_NUGET");
-        driftWorkflow.ShouldContain("dotnet-version: 10.0.302");
 
         driftSection.ShouldContain("--freeze-bundle");
         driftSection.ShouldContain(
@@ -1028,13 +1025,12 @@ public class ReleaseWorkflowContractTests
 
     private static string ReadTestProject() =>
         File.ReadAllText(
-            Path.GetFullPath(
-                Path.Combine(
-                    AppContext.BaseDirectory,
-                    "..",
-                    "..",
-                    "..",
-                    "FhirPkg.Tests.csproj")));
+            Path.Combine(
+                AppContext.BaseDirectory,
+                "BuildContracts",
+                "test",
+                "FhirPkg.Tests",
+                "FhirPkg.Tests.csproj"));
 
     private static string GetSection(
         string value,
