@@ -368,7 +368,7 @@ These are decisions, not preferences. Violating one is a review Blocker.
   unit project — they read copied configuration/workflow inputs from rebuilt
   test output, not stale `bin/` content. Keep full-suite build/test paths
   unpinned and retain singular published-package qualification overrides.
-- **Nothing touches nuget.org from a local machine.** No `dotnet nuget push`,
+- **Nothing pushes to nuget.org from a local machine.** No `dotnet nuget push`,
   no local run of the publish workflow, and no `publish` command against a real
   registry. Publication happens only through the process in
   [`docs/releases/README.md`](docs/releases/README.md).
@@ -505,8 +505,8 @@ scratch/<MMDD>-<##>/
 - Prefer the smallest targeted verification that covers the change; escalate to
   the full solution / all-TFM run only when the targeted run indicates it is
   needed.
-- Never run the publish workflow, `dotnet nuget push`, or anything that touches
-  nuget.org.
+- Never run the publish workflow, `dotnet nuget push`, or anything that writes 
+  to nuget.org.
 
 ### Subagent model policy
 
