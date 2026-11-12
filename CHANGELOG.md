@@ -10,6 +10,10 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+### Fixed
+- Restored supported Microsoft.Extensions dependency selection and explicit
+  VSTest routing in both test projects after the dependency refresh.
+
 ## [2026.1112.1330] - 2026-11-12
 
 ### Added

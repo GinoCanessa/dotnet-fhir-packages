@@ -163,6 +163,54 @@ public class BuildToolchainContractTests
     }
 
     [Fact]
+    public void TestProjects_ExplicitlySelectVSTestAndRetainCollectorInfrastructure()
+    {
+        foreach (string projectPath in new[]
+        {
+            "test/FhirPkg.Tests/FhirPkg.Tests.csproj",
+            "test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj",
+        })
+        {
+            XDocument project = ReadXml(projectPath);
+            foreach (string name in new[]
+            {
+                "IsTestingPlatformApplication",
+                "TestingPlatformDotnetTestSupport",
+            })
+            {
+                XElement property = GetProperty(project, name);
+                property.Value.ShouldBe("false");
+                property.AncestorsAndSelf().ShouldNotContain(
+                    element => element.Attribute("Condition") != null);
+            }
+
+            GetProperty(project, "IsTestProject").Value.ShouldBe("true");
+            GetProperty(project, "OutputType").Value.ShouldBe("Exe");
+            GetProperty(project, "IsPackable").Value.ShouldBe("false");
+
+            foreach (string name in new[]
+            {
+                "Microsoft.NET.Test.Sdk",
+                "xunit.v3",
+                "xunit.runner.visualstudio",
+                "coverlet.collector",
+            })
+            {
+                XElement package = project.Descendants("PackageReference")
+                    .Where(reference => (string?)reference.Attribute("Include") == name)
+                    .ShouldHaveSingleItem();
+                if (name is "xunit.runner.visualstudio" or "coverlet.collector")
+                {
+                    package.Elements("PrivateAssets").ShouldHaveSingleItem().Value
+                        .ShouldBe("all");
+                    package.Elements("IncludeAssets").ShouldHaveSingleItem().Value
+                        .ShouldBe("runtime; build; native; contentfiles; analyzers; buildtransitive");
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void FrameworkPolicy_DefaultsOnlyWhenBothTargetPropertiesAreEmpty()
     {
         XDocument policy = ReadXml("Directory.Build.props");

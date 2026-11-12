@@ -180,6 +180,29 @@ dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net10.0 \
   --filter "FullyQualifiedName~DiskPackageCacheTests"
 ```
 
+### VSTest coverage collection
+
+The existing `coverlet.collector` integration requires **VSTest**, not MTP.
+Use the repository's stable SDK 11 floor and install the .NET 8, 9, 10, and 11
+runtimes for this unpinned four-TFM run. Both test projects' existing centrally
+versioned `coverlet.collector` (`10.1.0`) and `Microsoft.NET.Test.Sdk` (`18.12.0`)
+references are prerequisites; `xunit.runner.visualstudio` supplies the adapter.
+
+From the repository root (which contains one solution, `FhirPkg.sln`), use the
+first dotnet-test quick-start recipe verbatim from the installed
+`coverlet.collector` 10.1.0 `VSTestIntegration.md`:
+`C:\Users\ginoc\.nuget\packages\coverlet.collector\10.1.0\VSTestIntegration.md`.
+
+```bash
+dotnet test --collect:"XPlat Code Coverage"
+```
+
+VSTest reports Cobertura attachments under each test project's
+`TestResults/<guid>/coverage.cobertura.xml`; GUID directories are
+platform-controlled. Check current-run attachments and recorded SDK
+production-file hits for both projects on each of the four TFMs, rather than
+treating one attachment as evidence for the entire run.
+
 ### Integration-test partitioning
 
 CI splits `FhirPkg.IntegrationTests` in two, and a change touching either half
