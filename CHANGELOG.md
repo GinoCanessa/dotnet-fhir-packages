@@ -11,8 +11,16 @@ qualification evidence) lives alongside this file under
 ## Current
 
 ### Added
+- Added .NET 11 targets to the SDK and CLI while retaining .NET 8, 9, and 10
+  support.
 
 ### Changed
+- Made stable .NET SDK `11.0.100` the contributor floor and `net11.0` the
+  primary development and CI path, while retaining unqualified four-framework
+  builds and tests.
+- Required all four framework legs in release package, symbol, and embedded-SDK
+  validation regardless of the validator's runtime, and expanded release
+  qualification to twelve OS/framework jobs.
 
 ### Fixed
 - Corrected Unix native creation and descriptor-control argument delivery on

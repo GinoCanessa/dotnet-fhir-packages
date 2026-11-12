@@ -230,24 +230,67 @@ for the full layout and index behavior.
 
 ## Prerequisites
 
-- [.NET 8.0 SDK](https://dotnet.microsoft.com/download) or later (8, 9, and 10 are supported; .NET 10 is recommended)
+- **CLI consumers:** [.NET 8 SDK or runtime](https://dotnet.microsoft.com/download)
+  or later (.NET 8, 9, 10, and 11 are supported; .NET 11 is recommended).
+- **SDK consumers:** a project targeting `net8.0`, `net9.0`, `net10.0`, or
+  `net11.0` (`net11.0` is recommended).
 
 ## Building from Source
+
+Building this checkout requires the **stable .NET 11 SDK, version `11.0.100`
+or later within .NET 11**. `global.json` uses `latestFeature` roll-forward and
+disables prerelease SDKs. This contributor floor does not raise the package
+consumer requirements above.
+
+Unqualified builds and tests cover all four supported frameworks. Running all
+test targets also requires the .NET 8, 9, 10, and 11 runtimes; the .NET 11 SDK
+alone does not supply the older testhosts' runtimes.
+
+Comprehensive build:
 
 ```bash
 git clone https://github.com/GinoCanessa/dotnet-fhir-packages.git
 cd dotnet-fhir-packages
+dotnet restore FhirPkg.sln
 dotnet build FhirPkg.sln
+```
+
+For a single-project development loop, select the primary framework:
+
+```bash
+dotnet build src/FhirPkg/FhirPkg.csproj --framework net11.0
+```
+
+Legacy .NET 10 compatibility build (not the development default):
+
+```bash
+dotnet build src/FhirPkg/FhirPkg.csproj --framework net10.0
 ```
 
 ## Running Tests
 
+Comprehensive per-project runs (all four frameworks):
+
 ```bash
 # Unit tests
-dotnet test test/FhirPkg.Tests
+dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj
 
 # Integration tests (offline / recorded mode)
-dotnet test test/FhirPkg.IntegrationTests
+dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
+```
+
+Focused primary-framework example:
+
+```bash
+dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net11.0 \
+  --filter "FullyQualifiedName~DiskPackageCacheTests"
+```
+
+Legacy .NET 10 compatibility variant:
+
+```bash
+dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net10.0 \
+  --filter "FullyQualifiedName~DiskPackageCacheTests"
 ```
 
 <!-- mirror-of: docs/index.md -->
@@ -261,7 +304,7 @@ dotnet test test/FhirPkg.IntegrationTests
 | [SDK API Reference](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/sdk-api-reference.md) | Reference for the supported public surface — interfaces, models, and enums |
 | [Package Request Process](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/process.md) | End-to-end walkthrough of resolution, download, extraction, caching, and indexing. |
 | [Version Resolution Policy](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/versioning-policy.md) | Configuration snapshots, fixups, pre-release rules, and FHIR-release filtering. |
-| [Release Process and Evidence](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/releases/README.md) | Exact-commit source CI, immutable candidate handoff, 3 x 3 qualification, publication gates, and evidence. |
+| [Release Process and Evidence](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/releases/README.md) | Exact-commit source CI, immutable candidate handoff, 3 x 4 qualification (twelve jobs), publication gates, and evidence. |
 | [CLI Overview](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/cli-overview.md) | Installation, quick start, command summary |
 | [CLI Reference](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/cli-reference.md) | All commands, options, exit codes, and config |
 | [FHIR Package Reference](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/reference/index.md) | Package naming, versioning, resolution, registry API, caching, dependencies, client implementations, security, and errors. |
