@@ -132,7 +132,7 @@ public sealed class ReleaseCandidateValidatorTests
                         ReleaseValidationFixture.RepositoryCommit));
 
             exception.Message.ShouldBe(
-                "The CLI embedded SDK assembly for 'net9.0' does not match the SDK package.");
+                "The CLI embedded SDK assembly for 'net10.0' does not match the SDK package.");
         }
         finally
         {
@@ -141,8 +141,6 @@ public sealed class ReleaseCandidateValidatorTests
     }
 
     [Theory]
-    [InlineData("net8.0")]
-    [InlineData("net9.0")]
     [InlineData("net10.0")]
     [InlineData("net11.0")]
     public void Validate_RejectsCliSdkAssemblyMismatchForFramework(

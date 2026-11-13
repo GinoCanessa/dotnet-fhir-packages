@@ -102,7 +102,7 @@ public class ReleaseWorkflowContractTests
         releaseWorkflow.ShouldContain(
             "os: [ubuntu-latest, windows-latest, macos-latest]");
         releaseWorkflow.ShouldContain(
-            "framework: [net8.0, net9.0, net10.0, net11.0]");
+            "framework: [net10.0, net11.0]");
         releaseWorkflow.ShouldContain("UsePublishedFhirPkg=true");
         releaseWorkflow.ShouldContain("release:");
         releaseWorkflow.ShouldContain("types: [published]");

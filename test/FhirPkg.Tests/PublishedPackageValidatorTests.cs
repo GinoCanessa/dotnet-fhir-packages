@@ -159,7 +159,7 @@ public sealed class PublishedPackageValidatorTests
                     ;
 
             exception.Message.ShouldBe(
-                "Published package entry 'lib/net9.0/FhirPkg.dll' differs from the release candidate.");
+                "Published package entry 'lib/net10.0/FhirPkg.dll' differs from the release candidate.");
         }
         finally
         {

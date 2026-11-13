@@ -904,11 +904,11 @@ public sealed class QualificationDiagnosticsTests : IDisposable
             "--summary",
             summaryPath,
             "--summary-title",
-            "qualify-windows-latest-net8.0"
+            "qualify-windows-latest-net10.0"
         ]);
 
         arguments.SummaryPath.ShouldBe(Path.GetFullPath(summaryPath));
-        arguments.SummaryTitle.ShouldBe("qualify-windows-latest-net8.0");
+        arguments.SummaryTitle.ShouldBe("qualify-windows-latest-net10.0");
     }
 
     [Fact]

@@ -46,11 +46,7 @@ public static class CheckSum
     private static string ComputeSha1Core(Stream stream)
     {
         byte[] hash = SHA1.HashData(stream);
-#if NET9_0_OR_GREATER
         return Convert.ToHexStringLower(hash);
-#else
-        return Convert.ToHexString(hash).ToLowerInvariant();
-#endif
     }
 
     /// <summary>
@@ -64,11 +60,7 @@ public static class CheckSum
         ArgumentNullException.ThrowIfNull(data);
 
         byte[] hash = SHA1.HashData(data);
-#if NET9_0_OR_GREATER
         return Convert.ToHexStringLower(hash);
-#else
-        return Convert.ToHexString(hash).ToLowerInvariant();
-#endif
     }
 
     /// <summary>
@@ -94,11 +86,7 @@ public static class CheckSum
     private static string ComputeSha256Core(Stream stream)
     {
         byte[] hash = SHA256.HashData(stream);
-#if NET9_0_OR_GREATER
         return Convert.ToHexStringLower(hash);
-#else
-        return Convert.ToHexString(hash).ToLowerInvariant();
-#endif
     }
 
     /// <summary>
@@ -112,11 +100,7 @@ public static class CheckSum
         ArgumentNullException.ThrowIfNull(data);
 
         byte[] hash = SHA256.HashData(data);
-#if NET9_0_OR_GREATER
         return Convert.ToHexStringLower(hash);
-#else
-        return Convert.ToHexString(hash).ToLowerInvariant();
-#endif
     }
 
     /// <summary>

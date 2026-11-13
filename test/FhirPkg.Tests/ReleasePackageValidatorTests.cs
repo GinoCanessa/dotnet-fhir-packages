@@ -57,20 +57,8 @@ public class ReleasePackageValidatorTests
     }
 
     [Theory]
-    [InlineData("fhir-pkg-lib", "net8.0", "FhirPkg.dll")]
-    [InlineData("fhir-pkg-lib", "net9.0", "FhirPkg.dll")]
     [InlineData("fhir-pkg-lib", "net10.0", "FhirPkg.dll")]
     [InlineData("fhir-pkg-lib", "net11.0", "FhirPkg.dll")]
-    [InlineData("fhir-pkg-cli", "net8.0", "DotnetToolSettings.xml")]
-    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.Cli.dll")]
-    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.Cli.deps.json")]
-    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.Cli.runtimeconfig.json")]
-    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.dll")]
-    [InlineData("fhir-pkg-cli", "net9.0", "DotnetToolSettings.xml")]
-    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.Cli.dll")]
-    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.Cli.deps.json")]
-    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.Cli.runtimeconfig.json")]
-    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.dll")]
     [InlineData("fhir-pkg-cli", "net10.0", "DotnetToolSettings.xml")]
     [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.Cli.dll")]
     [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.Cli.deps.json")]
@@ -187,7 +175,7 @@ public class ReleasePackageValidatorTests
                         ReleaseValidationFixture.RepositoryCommit));
 
             exception.Message.ShouldMatch(
-                @"^Expected one tool settings file for 'net(?:8|9|10|11)\.0'\.$");
+                @"^Expected one tool settings file for 'net(?:10|11)\.0'\.$");
         }
         finally
         {

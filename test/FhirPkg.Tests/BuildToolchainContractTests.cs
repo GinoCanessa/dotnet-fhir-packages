@@ -13,7 +13,7 @@ namespace FhirPkg.Tests;
 public class BuildToolchainContractTests
 {
     private static readonly string[] ExpectedFrameworks =
-        ["net11.0", "net10.0", "net9.0", "net8.0"];
+        ["net11.0", "net10.0"];
     private static readonly string[] ProjectPaths =
     [
         "src/FhirPkg/FhirPkg.csproj",
@@ -28,10 +28,10 @@ public class BuildToolchainContractTests
     private const string OsMatrix =
         "os: [ubuntu-latest, windows-latest, macos-latest]";
     private const string FrameworkMatrix =
-        "framework: [net8.0, net9.0, net10.0, net11.0]";
+        "framework: [net10.0, net11.0]";
 
     [Fact]
-    public void FrameworkPolicy_DeclaresFourSupportedTargetsAndNet11Primary()
+    public void FrameworkPolicy_DeclaresTwoSupportedTargetsAndNet11Primary()
     {
         XDocument policy = ReadXml("Directory.Build.props");
 
@@ -231,7 +231,7 @@ public class BuildToolchainContractTests
         sdkVersion.ShouldBe("11.0.100");
         sdk.GetProperty("rollForward").GetString().ShouldBe("latestFeature");
         sdk.GetProperty("allowPrerelease").GetBoolean().ShouldBeFalse();
-        string[] allSdks = [sdkVersion, "10.0.302", "9.0.119", "8.0.423"];
+        string[] allSdks = [sdkVersion, "10.0.302"];
         string build = ReadWorkflow("build-and-test.yaml");
         Dictionary<string, string> buildJobs = GetJobs(build);
         buildJobs.Keys.ToArray().ShouldBe(["build-and-test", "hardened-integration"]);
@@ -403,33 +403,36 @@ public class BuildToolchainContractTests
     [InlineData(" ")]
     [InlineData("\t\r\n")]
     [InlineData(";")]
-    [InlineData(";net8.0")]
-    [InlineData("net8.0;")]
-    [InlineData("net8.0;;net9.0")]
-    [InlineData("net8.0; ;net9.0")]
-    [InlineData("net8.0;net8.0")]
-    [InlineData("net11.0;net8.0;net11.0")]
-    [InlineData("NET8.0")]
+    [InlineData(";net10.0")]
+    [InlineData("net10.0;")]
+    [InlineData("net10.0;;net11.0")]
+    [InlineData("net10.0; ;net11.0")]
+    [InlineData("net10.0;net10.0")]
+    [InlineData("net11.0;net10.0;net11.0")]
+    [InlineData("NET10.0")]
     [InlineData("Net11.0")]
-    [InlineData(" net8.0")]
-    [InlineData("net8.0 ")]
-    [InlineData("net8.0\n")]
-    [InlineData("net8.0; net9.0")]
-    [InlineData("net8.0;\tnet9.0")]
+    [InlineData(" net10.0")]
+    [InlineData("net10.0 ")]
+    [InlineData("net10.0\n")]
+    [InlineData("net10.0; net11.0")]
+    [InlineData("net10.0;\tnet11.0")]
     [InlineData("net7.0")]
+    [InlineData("net8.0")]
+    [InlineData("net9.0")]
+    [InlineData("net11.0;net9.0")]
     [InlineData("net0.0")]
-    [InlineData("net08.0")]
-    [InlineData("net+8.0")]
-    [InlineData("net-8.0")]
-    [InlineData("net8")]
-    [InlineData("net8.1")]
-    [InlineData("net8.00")]
+    [InlineData("net010.0")]
+    [InlineData("net+10.0")]
+    [InlineData("net-10.0")]
+    [InlineData("net10")]
+    [InlineData("net10.1")]
+    [InlineData("net10.00")]
     [InlineData("net.0")]
-    [InlineData("net8.0-windows")]
+    [InlineData("net10.0-windows")]
     [InlineData("netstandard2.0")]
-    [InlineData(".NETCoreApp,Version=v8.0")]
-    [InlineData("net8.0,net9.0")]
-    [InlineData("net\u0668.0")]
+    [InlineData(".NETCoreApp,Version=v10.0")]
+    [InlineData("net10.0,net11.0")]
+    [InlineData("net1\u0660.0")]
     [InlineData("net2147483648.0")]
     public void ReleasePolicy_ParseRejectsMissingEmptyDuplicateAndMalformedValues(
         string? value)
@@ -444,9 +447,9 @@ public class BuildToolchainContractTests
     }
 
     [Theory]
-    [InlineData("net8.0")]
-    [InlineData("net11.0;net10.0;net9.0;net8.0")]
-    [InlineData("net8.0;net11.0")]
+    [InlineData("net10.0")]
+    [InlineData("net11.0;net10.0")]
+    [InlineData("net10.0;net11.0")]
     [InlineData("net12.0;net99.0")]
     public void ReleasePolicy_ParseAcceptsCanonicalModernFrameworks(
         string value)
@@ -458,7 +461,7 @@ public class BuildToolchainContractTests
     public void ReleasePolicy_ParseReturnsReadOnlyFrameworks()
     {
         IReadOnlyList<string> frameworks =
-            ReleaseFrameworkPolicy.Parse("net11.0;net8.0");
+            ReleaseFrameworkPolicy.Parse("net11.0;net10.0");
         (frameworks is string[]).ShouldBeFalse();
         IList<string> collection = (IList<string>)frameworks;
 
@@ -469,7 +472,7 @@ public class BuildToolchainContractTests
             () => collection.Add("net12.0"));
         Should.Throw<NotSupportedException>(
             () => collection.RemoveAt(0));
-        frameworks.ShouldBe(["net11.0", "net8.0"]);
+        frameworks.ShouldBe(["net11.0", "net10.0"]);
     }
 
     [Theory]
@@ -480,13 +483,13 @@ public class BuildToolchainContractTests
     {
         List<AssemblyMetadataAttribute> metadata =
         [
-            new("UnrelatedPolicy", "net11.0;net10.0;net9.0;net8.0"),
+            new("UnrelatedPolicy", "net11.0;net10.0"),
         ];
         for (int index = 0; index < count; index++)
         {
             metadata.Add(new AssemblyMetadataAttribute(
                 "FhirPkgSupportedTargetFrameworks",
-                "net11.0;net10.0;net9.0;net8.0"));
+                "net11.0;net10.0"));
         }
 
         ReleaseValidationException exception =
@@ -504,10 +507,10 @@ public class BuildToolchainContractTests
     {
         AssemblyMetadataAttribute[] metadata =
         [
-            new("TargetFramework", "net8.0"),
-            new("TargetFrameworks", "net8.0"),
+            new("TargetFramework", "net10.0"),
+            new("TargetFrameworks", "net10.0"),
             new("fhirpkgsupportedtargetframeworks", "not-a-framework"),
-            new("FhirPkgSupportedTargetFrameworks", "net11.0;net10.0;net9.0;net8.0"),
+            new("FhirPkgSupportedTargetFrameworks", "net11.0;net10.0"),
         ];
 
         ReleaseFrameworkPolicy.ReadMetadata(metadata)

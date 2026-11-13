@@ -11,6 +11,9 @@ qualification evidence) lives alongside this file under
 ## Current
 
 ### Changed
+- Dropped out-of-support .NET 8 and 9 targets from the SDK, CLI, source CI,
+  and release qualification; both packages now require .NET 10 or later,
+  with .NET 11 remaining the primary development target.
 - Removed NuGet package download-back checks from publication so accepted
   primary uploads proceeded directly to symbol uploads without waiting for
   indexing.

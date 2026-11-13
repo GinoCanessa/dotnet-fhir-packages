@@ -168,9 +168,9 @@ fhir-pkg-cli.<version>.sha512
 release-metadata.json
 ```
 
-Build and pack retain all four supported targets: `net8.0`, `net9.0`,
-`net10.0`, and `net11.0`. The release tool and non-matrix harness paths use
-the primary `net11.0` framework. The validator requires all four package,
+Build and pack retain both supported targets: `net10.0` and `net11.0`.
+The release tool and non-matrix harness paths use
+the primary `net11.0` framework. The validator requires both package,
 symbol, and embedded-SDK framework legs regardless of the runtime executing it.
 
 Candidate validation checks both nuspec identities, versions, repository URL
@@ -274,7 +274,7 @@ Qualification inputs: bundle sha256:<digest> · corpus <sha256> · approvals: <n
 answer: a URL outside the frozen routes, or a method other than `GET` or
 `HEAD`. The fixture registry answers it with `404` and records it, and the
 case fails with `Unrouted fixture request(s): <METHOD> <URL>; …`, identically
-in all twelve jobs. It points at a gap between the harness and its frozen
+in all six jobs. It points at a gap between the harness and its frozen
 inputs; it is neither upstream drift nor a transient failure that a re-run
 would clear.
 
@@ -303,10 +303,10 @@ The workflow enforces this dependency chain:
    ran, and fails unless the expected one succeeded and the other was skipped.
    It checks every hash, digest, and run id, and writes the
    `### Release identity` summary. Every later job reads the identity from it.
-6. Twelve `qualify-<os>-<framework>` jobs run Ubuntu, Windows, and macOS
+6. Six `qualify-<os>-<framework>` jobs run Ubuntu, Windows, and macOS
    (`ubuntu-latest`, `windows-latest`, and `macos-latest`) crossed with
-   `net8.0`, `net9.0`, `net10.0`, and `net11.0`.
-7. `publish-nuget` runs only after all twelve qualification jobs pass, and only
+   `net10.0` and `net11.0`.
+7. `publish-nuget` runs only after all six qualification jobs pass, and only
    for a published GitHub Release (`release.published`) or for a recovery
    dispatch with `validation_only=false` whose GitHub Release is published.
    Just before it uses the credential, it re-checks that the Release is
@@ -355,7 +355,7 @@ Every rejected artifact and independent failure is also an error annotation.
 
 No qualification or publication job rebuilds either package.
 Local source tests and synthetic package fixtures do not replace this
-twelve-job exact-package qualification evidence.
+six-job exact-package qualification evidence.
 
 ## Validation-only run
 
@@ -397,7 +397,7 @@ gh run view <run-id> --json headSha,conclusion,jobs
 The head SHA must equal the tag SHA, `validate-release` must locate the
 bundle, source CI must pass, the candidate must contain exactly seven files,
 `pack-release-candidate` must upload `fhir-pkg-<version>-fixture-bundle` after
-the candidate, `release-identity` must show both identities, all twelve
+the candidate, `release-identity` must show both identities, all six
 qualification jobs must report the same two package hashes, artifact digest,
 and bundle SHA-256, each tool install must select its matrix framework, and
 `publish-nuget` must remain skipped.
@@ -543,7 +543,7 @@ Recovery finishes an already-authorized release from its original run,
 including after GitHub's 30-day re-run window has closed. It is a third,
 dispatch-only mode of the same workflow, run at the release tag. It verifies
 GitHub's own records of the original run, retrieves the original candidate and
-qualification inputs by digest, re-qualifies them through the same twelve jobs,
+qualification inputs by digest, re-qualifies them through the same six jobs,
 and publishes through the same protected `publish-nuget` job.
 
 Recovery never re-runs source CI and never rebuilds: `exact-source-ci` and
@@ -662,13 +662,13 @@ only in a dry run does R2 also accept a `workflow_dispatch` original. R1 is
 only reported, so the Release need not be published, and `publish-nuget` is
 always skipped, because it requires `validation_only` to be `false`.
 Everything else runs as in a real recovery: R2–R5, the digest-checked
-retrieval, any approval, the twelve qualification jobs, and `release-identity`.
+retrieval, any approval, the six qualification jobs, and `release-identity`.
 
 To rehearse the whole path before a real release depends on it, dispatch a
 [validation-only run](#validation-only-run) at a test tag, then a dry run at
 the same tag with `recover_run_id` naming that run. Expect R1 `reported`,
 R2–R4 `passed`, `retrieve-release-candidate` to fetch both artifacts by digest
-and revalidate the candidate, all twelve qualification jobs to pass from the
+and revalidate the candidate, all six qualification jobs to pass from the
 original bundle, and `publish-nuget` to be skipped.
 
 ## Evidence record
@@ -709,7 +709,7 @@ corpus blob, and approval author; for a recovered release, the drift run and
 corpus blob are in the original run's summary. The approval file at its
 commit gives each approval's artifact, hashes, approver, and reason.
 
-Also record all twelve qualification reports across the three OSes and four
+Also record all six qualification reports across the three OSes and two
 frameworks in [Required release gates](#required-release-gates), the selected
 framework and CLI informational version for each matrix job, and the corpus
 outcome. NuGet.org indexes primary packages and symbols asynchronously, so
