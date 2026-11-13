@@ -701,6 +701,7 @@ internal sealed class ResilientFileSystem
         private string? _fullPath;
         private int? _descriptor;
         private int? _duplicate;
+        private int _descriptorFlags;
         private int _stage;
 
         internal RegularFileReplayOperation(
@@ -784,7 +785,7 @@ internal sealed class ResilientFileSystem
                     return Failure<FileSystemProbeResult, T>(inspected);
                 RequireRegular(inspected.Value);
                 _stage = _descriptor == 0 ? 3 : 5;
-                SetPhase(_stage == 3 ? "DuplicateZeroDescriptor" : "TransferDescriptor");
+                SetPhase(_stage == 3 ? "DuplicateZeroDescriptor" : "GetDescriptorFlags");
                 return FileSystemReplayOutcome<T>.Continue();
             }
 
@@ -816,6 +817,30 @@ internal sealed class ResilientFileSystem
                 _descriptor = _duplicate;
                 _duplicate = null;
                 _stage = 5;
+                SetPhase("GetDescriptorFlags");
+                return FileSystemReplayOutcome<T>.Continue();
+            }
+
+            if (_stage == 5)
+            {
+                FileSystemReplayOutcome<int> flags = _primitives.GetDescriptorFlags(_descriptor!.Value, _fullPath);
+                if (flags.Kind != FileSystemReplayOutcomeKind.Completed)
+                    return Failure<int, T>(flags);
+                // .NET 11 treats O_NONBLOCK handles as async and bypasses positioned reads.
+                int nonblocking = _primitives.Platform == FileSystemPlatform.Linux ? 0x800 : 0x4;
+                _descriptorFlags = flags.Value & ~nonblocking;
+                _stage = 6;
+                SetPhase("SetDescriptorFlags");
+                return FileSystemReplayOutcome<T>.Continue();
+            }
+
+            if (_stage == 6)
+            {
+                FileSystemReplayOutcome<bool> configured = _primitives.SetDescriptorFlags(
+                    _descriptor!.Value, _descriptorFlags, _fullPath);
+                if (configured.Kind != FileSystemReplayOutcomeKind.Completed)
+                    return Failure<bool, T>(configured);
+                _stage = 7;
                 SetPhase("TransferDescriptor");
                 return FileSystemReplayOutcome<T>.Continue();
             }

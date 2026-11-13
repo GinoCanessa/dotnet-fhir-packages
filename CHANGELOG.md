@@ -10,10 +10,6 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
-### Fixed
-- Restored supported Microsoft.Extensions dependency selection and explicit
-  VSTest routing in both test projects after the dependency refresh.
-
 ## [2026.1112.1330] - 2026-11-12
 
 ### Added
@@ -27,6 +23,8 @@ qualification evidence) lives alongside this file under
 - Required all four framework legs in release package, symbol, and embedded-SDK
   validation regardless of the validator's runtime, and expanded release
   qualification to twelve OS/framework jobs.
+- Updated System.CommandLine to 3.0.0 and refreshed the test SDK, xUnit,
+  runner, and coverage collector while preserving VSTest-based execution.
 
 ### Fixed
 - Updated the `hl7.fhir.us.core#6.0.0` qualification fixture hash to match the
@@ -36,6 +34,10 @@ qualification evidence) lives alongside this file under
 - Allowed abandoned-staging cleanup to finish when the staging parent
   disappeared during its bounded directory snapshot, while preserving unrelated
   filesystem failures and cancellation.
+- Restored supported Microsoft.Extensions dependency selection and explicit
+  VSTest routing in both test projects after the dependency refresh.
+- Restored positioned Unix regular-file reads and retries on .NET 11 by
+  clearing nonblocking mode after descriptor verification.
 
 ## [2026.1029.15100] - 2026-10-29
 

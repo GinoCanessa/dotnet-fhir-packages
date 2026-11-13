@@ -401,6 +401,58 @@ public sealed class PositionedFileStreamTests : IDisposable
         (asynchronous ? primitives.AsyncWaits : primitives.Waits).ShouldBe([10]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProtectedRead_PartialFailureReplaysNonzeroOffsetAndBackwardSeek(bool asynchronous)
+    {
+        string path = Path.Combine(_root, "protected-read");
+        byte[] content = "0123456789abcdefghijklmnopqrstuvwxyz"u8.ToArray();
+        File.WriteAllBytes(path, content);
+        ScriptedFileSystemPrimitives primitives = SystemFiles();
+        FileSystemContext context = primitives.CreateContext();
+        await using Stream stream = asynchronous
+            ? await context.FileSystem.OpenProtectedRegularReadAsync(path, TestContext.Current.CancellationToken)
+            : context.FileSystem.OpenProtectedRegularRead(path, TestContext.Current.CancellationToken);
+        stream.ShouldBeOfType<PositionedFileStream>().Context.ShouldBeSameAs(context);
+        stream.Seek(5, SeekOrigin.Begin).ShouldBe(5);
+        string operation = asynchronous ? "ReadAtAsync" : "ReadAt";
+        primitives.Enqueue<int>(operation, call =>
+        {
+            RandomAccess.Read(call.Handle!, call.Buffer.Span[..2], call.Offset!.Value).ShouldBe(2);
+            call.Buffer.Span[..2].ToArray().ShouldBe(content[5..7]);
+            stream.Position.ShouldBe(5);
+            return ScriptedFileSystemPrimitives.NativeFailure<int>(5, operation, call.Path);
+        });
+        primitives.OnWait = () => stream.Position.ShouldBe(5);
+        byte[] result = new byte[content.Length - 5];
+
+        int count = asynchronous
+            ? await stream.ReadAsync(result.AsMemory(), TestContext.Current.CancellationToken)
+            : stream.Read(result, 0, result.Length);
+
+        count.ShouldBe(result.Length);
+        result.ShouldBe(content[5..]);
+        stream.Position.ShouldBe(content.Length);
+        stream.Seek(3, SeekOrigin.Begin).ShouldBe(3);
+        byte[] backward = new byte[7];
+        int backwardCount = asynchronous
+            ? await stream.ReadAsync(backward.AsMemory(), TestContext.Current.CancellationToken)
+            : stream.Read(backward, 0, backward.Length);
+
+        backwardCount.ShouldBe(backward.Length);
+        backward.ShouldBe(content[3..10]);
+        stream.Position.ShouldBe(10);
+        FileSystemPrimitiveCall[] reads = primitives.Calls.Where(call => call.Operation == operation).ToArray();
+        reads.Length.ShouldBe(3);
+        reads.Select(call => call.Offset).ShouldBe([5L, 5L, 3L]);
+        reads.ShouldAllBe(call => ReferenceEquals(call.Handle, reads[0].Handle));
+        primitives.Count("OpenDescriptor").ShouldBe(OperatingSystem.IsWindows() ? 0 : 1);
+        primitives.Count("OpenFileHandle").ShouldBe(OperatingSystem.IsWindows() ? 1 : 0);
+        (asynchronous ? primitives.AsyncWaits : primitives.Waits).ShouldBe([10]);
+        (asynchronous ? primitives.Waits : primitives.AsyncWaits).ShouldBeEmpty();
+    }
+
     [Fact]
     public void LengthAndEndSeek_UsePolicy()
     {

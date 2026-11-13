@@ -447,10 +447,14 @@ public sealed class NativeFileSystemTests
         }
     }
 
-    [Fact]
-    public void RegularOpen_InspectionRetriesRetainedDescriptorAndPreservesPrimaryFailure()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RegularOpen_InspectionRetriesRetainedDescriptorAndPreservesPrimaryFailure(bool macOS)
     {
-        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives();
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(
+            macOS ? FileSystemPlatform.MacOS : FileSystemPlatform.Linux);
+        primitives.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.File));
         primitives.Set("OpenDescriptor", FileSystemReplayOutcome<int>.Complete(73));
         primitives.Enqueue<FileSystemProbeResult>("InspectDescriptor", _ =>
             ScriptedFileSystemPrimitives.NativeFailure<FileSystemProbeResult>(5, "statx"));
@@ -464,12 +468,126 @@ public sealed class NativeFileSystemTests
         exception.Message.ShouldBe("The package manifest is not a regular file.");
         primitives.Count("OpenDescriptor").ShouldBe(1);
         primitives.Count("InspectDescriptor").ShouldBe(2);
+        primitives.Count("GetDescriptorFlags").ShouldBe(0);
+        primitives.Count("SetDescriptorFlags").ShouldBe(0);
         primitives.Count("CloseDescriptor").ShouldBe(1);
         primitives.Calls.Single(call => call.Operation == "OpenDescriptor").Flags
-            .ShouldBe((long)NativeFileSystemPrimitives.LinuxManifestOpenFlags);
+            .ShouldBe((long)(macOS
+                ? NativeFileSystemPrimitives.MacManifestOpenFlags
+                : NativeFileSystemPrimitives.LinuxManifestOpenFlags));
         primitives.Calls.Where(call => call.Operation == "InspectDescriptor").ShouldAllBe(call => call.Descriptor == 73);
         primitives.Waits.ShouldBe([10]);
         FileSystemFailureContext.TryGetOrigin(exception, out _).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(true, true, true)]
+    public async Task RegularOpen_FlagRetriesRetainDescriptorAndClearOnlyNonblocking(
+        bool macOS, bool descriptorZero, bool asynchronous)
+    {
+        using CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(
+            macOS ? FileSystemPlatform.MacOS : FileSystemPlatform.Linux);
+        string path = TestPath("manifest-flags");
+        int preservedFlags = macOS ? 0x01000882 : 0x00020406;
+        int nonblocking = macOS ? 0x4 : 0x800;
+        primitives.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.File));
+        primitives.Set("OpenDescriptor", FileSystemReplayOutcome<int>.Complete(descriptorZero ? 0 : 73));
+        primitives.Set("InspectDescriptor", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.File));
+        primitives.Set("DuplicateDescriptor", FileSystemReplayOutcome<int>.Complete(73));
+        primitives.Enqueue("GetDescriptorFlags", ScriptedFileSystemPrimitives.NativeFailure<int>(5, "fcntl(F_GETFL)", path));
+        primitives.Set("GetDescriptorFlags", FileSystemReplayOutcome<int>.Complete(preservedFlags | nonblocking));
+        primitives.Enqueue("SetDescriptorFlags", ScriptedFileSystemPrimitives.NativeFailure<bool>(5, "fcntl(F_SETFL)", path));
+        primitives.Set<bool>("SetDescriptorFlags", _ =>
+        {
+            // Stop before managed ownership: these are scripted numbers, not host handles.
+            source.Cancel();
+            return FileSystemReplayOutcome<bool>.Complete(true);
+        });
+        primitives.Set("CloseDescriptor", FileSystemReplayOutcome<bool>.Complete(true));
+        ResilientFileSystem fileSystem = primitives.CreateContext(retries: 2).FileSystem;
+
+        OperationCanceledException final = asynchronous
+            ? await Should.ThrowAsync<OperationCanceledException>(() => fileSystem.OpenRegularReadAsync(path, source.Token).AsTask())
+            : Should.Throw<OperationCanceledException>(() => fileSystem.OpenRegularRead(path, source.Token));
+
+        final.CancellationToken.ShouldBe(source.Token);
+        List<string> expected = [];
+        if (macOS)
+            expected.Add("Probe");
+        expected.AddRange(["OpenDescriptor", "InspectDescriptor"]);
+        if (descriptorZero)
+            expected.AddRange(["DuplicateDescriptor", "CloseDescriptor"]);
+        expected.AddRange(["GetDescriptorFlags", "GetDescriptorFlags", "SetDescriptorFlags", "SetDescriptorFlags", "CloseDescriptor"]);
+        primitives.Calls.Select(call => call.Operation).ShouldBe(expected);
+        primitives.Calls.Single(call => call.Operation == "OpenDescriptor").Flags
+            .ShouldBe((long)(macOS
+                ? NativeFileSystemPrimitives.MacManifestOpenFlags
+                : NativeFileSystemPrimitives.LinuxManifestOpenFlags));
+        primitives.Calls.Where(call => call.Operation is "GetDescriptorFlags" or "SetDescriptorFlags")
+            .ShouldAllBe(call => call.Descriptor == 73 && call.Path == path);
+        primitives.Calls.Where(call => call.Operation == "SetDescriptorFlags")
+            .Select(call => call.Flags).ShouldBe([(long?)preservedFlags, preservedFlags]);
+        primitives.Calls.Where(call => call.Operation == "CloseDescriptor")
+            .Select(call => call.Descriptor).ShouldBe(descriptorZero ? [0, 73] : [73]);
+        (asynchronous ? primitives.AsyncWaits : primitives.Waits).ShouldBe([10, 10]);
+        (asynchronous ? primitives.Waits : primitives.AsyncWaits).ShouldBeEmpty();
+        FileSystemFailureContext.TryGetOrigin(final, out _).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void RegularOpen_FlagFailureReleasesRetainedDescriptorOnce(bool macOS, bool setting)
+    {
+        ScriptedFileSystemPrimitives primitives = new ScriptedFileSystemPrimitives(
+            macOS ? FileSystemPlatform.MacOS : FileSystemPlatform.Linux);
+        string path = TestPath("manifest-flag-failure");
+        string operation = setting ? "SetDescriptorFlags" : "GetDescriptorFlags";
+        string nativeOperation = setting ? "fcntl(F_SETFL)" : "fcntl(F_GETFL)";
+        IOException primary = new IOException("descriptor flags failed", new Win32Exception(5));
+        primitives.Set("Probe", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.File));
+        primitives.Set("OpenDescriptor", FileSystemReplayOutcome<int>.Complete(73));
+        primitives.Set("InspectDescriptor", ScriptedFileSystemPrimitives.Entry(FileSystemEntryKind.File));
+        if (setting)
+        {
+            primitives.Set("GetDescriptorFlags", FileSystemReplayOutcome<int>.Complete(0x804));
+            primitives.Set("SetDescriptorFlags", ScriptedFileSystemPrimitives.Fail<bool>(primary, nativeOperation, path));
+        }
+        else
+        {
+            primitives.Set("GetDescriptorFlags", ScriptedFileSystemPrimitives.Fail<int>(primary, nativeOperation, path));
+        }
+        primitives.Set<bool>("CloseDescriptor", _ => throw new IOException("cleanup failed"));
+
+        IOException final = Should.Throw<IOException>(() =>
+            primitives.CreateContext(retries: 1).FileSystem.OpenProtectedRegularRead(path));
+
+        final.ShouldBeSameAs(primary);
+        primitives.Count("OpenDescriptor").ShouldBe(1);
+        primitives.Count("InspectDescriptor").ShouldBe(1);
+        primitives.Count("GetDescriptorFlags").ShouldBe(setting ? 1 : 2);
+        primitives.Count("SetDescriptorFlags").ShouldBe(setting ? 2 : 0);
+        primitives.Count("CloseDescriptor").ShouldBe(1);
+        primitives.Calls.Where(call => call.Operation is "GetDescriptorFlags" or "SetDescriptorFlags" or "CloseDescriptor")
+            .ShouldAllBe(call => call.Descriptor == 73);
+        primitives.Waits.ShouldBe([10]);
+        primitives.AsyncWaits.ShouldBeEmpty();
+        FileSystemFailureContext.TryGetTerminal(final, out FileSystemFailureContext? failure).ShouldBeTrue();
+        failure!.Phase.ShouldBe(operation);
+        failure.Operation.ShouldBe(nativeOperation);
+        failure.Path.ShouldBe(path);
+        failure.Termination.ShouldBe(FileSystemFailureTermination.Exhausted);
+        failure.RetriesUsed.ShouldBe(1);
     }
 
     [Fact]

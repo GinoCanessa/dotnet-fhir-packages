@@ -456,6 +456,12 @@ internal sealed class SystemFileSystemPrimitives : IFileSystemPrimitives
     public FileSystemReplayOutcome<int> DuplicateDescriptor(int descriptor, int command, int minimum, string? path = null) =>
         NativeFileSystemPrimitives.DuplicateDescriptor(descriptor, command, minimum, path);
 
+    public FileSystemReplayOutcome<int> GetDescriptorFlags(int descriptor, string? path = null) =>
+        NativeFileSystemPrimitives.GetDescriptorFlags(descriptor, path);
+
+    public FileSystemReplayOutcome<bool> SetDescriptorFlags(int descriptor, int flags, string? path = null) =>
+        NativeFileSystemPrimitives.SetDescriptorFlags(descriptor, flags, path);
+
     public FileSystemReplayOutcome<FileSystemDirectorySyncOutcome> SynchronizeDescriptor(
         int descriptor,
         bool fullSync,
