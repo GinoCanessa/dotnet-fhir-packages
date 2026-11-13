@@ -67,8 +67,20 @@ public record PackageManifest
     [JsonPropertyName("license")]
     public string? License { get; init; }
 
-    /// <summary>The package author.</summary>
+    /// <summary>
+    /// The package author: a verbatim string, null, or an object projected to
+    /// <c>name &lt;email&gt; (url)</c> by a property-scoped JSON converter.
+    /// Optional string/null components omit missing, null, and exactly empty values;
+    /// nonempty values are not trimmed and are joined with single separator spaces.
+    /// An object with no usable components projects to null.
+    /// Unknown object members are ignored; other author shapes and malformed recognized
+    /// members throw <see cref="JsonException"/>. Member casing follows serializer options,
+    /// and the last recognized occurrence wins after every occurrence is validated.
+    /// Object projection is lossy: model serialization emits a string (or normal null),
+    /// not the original object. Imported manifest bytes are preserved independently.
+    /// </summary>
     [JsonPropertyName("author")]
+    [JsonConverter(typeof(PackageAuthorJsonConverter))]
     public string? Author { get; init; }
 
     /// <summary>The package homepage URL.</summary>
@@ -216,5 +228,87 @@ public record PackageManifest
     {
         int dashIndex = version.IndexOf('-');
         return dashIndex >= 0 ? version[..dashIndex] : version;
+    }
+}
+
+internal sealed class PackageAuthorJsonConverter : JsonConverter<string>
+{
+    public override string? Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            return reader.GetString();
+        }
+
+        if (reader.TokenType != JsonTokenType.StartObject)
+        {
+            throw new JsonException("Package author must be a string, object, or null.");
+        }
+
+        using JsonDocument document = JsonDocument.ParseValue(ref reader);
+        StringComparison comparison = options.PropertyNameCaseInsensitive
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        string? name = null;
+        string? email = null;
+        string? url = null;
+        foreach (JsonProperty property in document.RootElement.EnumerateObject())
+        {
+            bool isName = property.Name.Equals("name", comparison);
+            bool isEmail = property.Name.Equals("email", comparison);
+            bool isUrl = property.Name.Equals("url", comparison);
+            if (!isName && !isEmail && !isUrl)
+            {
+                continue;
+            }
+
+            if (property.Value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+            {
+                throw new JsonException($"Package author member '{property.Name}' must be a string or null.");
+            }
+
+            string? value = property.Value.GetString();
+            if (isName)
+            {
+                name = value;
+            }
+            else if (isEmail)
+            {
+                email = value;
+            }
+            else
+            {
+                url = value;
+            }
+        }
+
+        List<string> components = [];
+        if (!string.IsNullOrEmpty(name))
+        {
+            components.Add(name);
+        }
+
+        if (!string.IsNullOrEmpty(email))
+        {
+            components.Add($"<{email}>");
+        }
+
+        if (!string.IsNullOrEmpty(url))
+        {
+            components.Add($"({url})");
+        }
+
+        return components.Count == 0 ? null : string.Join(" ", components);
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        string value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value);
     }
 }

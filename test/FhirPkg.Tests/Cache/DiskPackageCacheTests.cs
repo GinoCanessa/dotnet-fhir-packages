@@ -2,7 +2,9 @@
 
 using System.Formats.Tar;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using FhirPkg.Cache;
 using FhirPkg.Installation;
 using FhirPkg.Models;
@@ -599,6 +601,168 @@ public class DiskPackageCacheTests : IDisposable
             PackageCacheKey.Create(other).MetadataKey).ShouldBeTrue();
         metadata.Packages[
             PackageCacheKey.Create(alias).MetadataKey].ArchiveSha256.ShouldBe("refreshed");
+    }
+
+    [Fact]
+    public async Task InstallAsync_ObjectAuthor_PreservesManifestAndRemainsReadable()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        PackageReference reference = new PackageReference("test.package", "1.0.0");
+        const string manifestJson = """
+            {
+                "name": "test.package",
+                "version": "1.0.0",
+                "author": {"name":"Example Author","email":"author@example.test","url":"https://example.test/"}
+            }
+            """;
+        const string expectedAuthor =
+            "Example Author <author@example.test> (https://example.test/)";
+        byte[] manifestBytes = Encoding.UTF8.GetBytes(manifestJson);
+        string directoryPath = Path.Combine(_tempDir, "test.package#1.0.0");
+        string contentPath = Path.Combine(directoryPath, "package");
+        using MemoryStream tarball = CreateTestTarball(manifestJson);
+
+        using (DiskPackageCache cache = new DiskPackageCache(_tempDir))
+        {
+            PackageRecord record = await cache.InstallAsync(
+                reference,
+                tarball,
+                new InstallCacheOptions { VerifyChecksum = false },
+                ct);
+
+            record.Reference.Name.ShouldBe(reference.Name);
+            record.Reference.Version.ShouldBe(reference.Version);
+            record.Manifest.Author.ShouldNotBeNull();
+            record.Manifest.Author.ShouldBe(expectedAuthor);
+            record.DirectoryPath.ShouldBe(directoryPath);
+            record.ContentPath.ShouldBe(contentPath);
+            Directory.Exists(record.DirectoryPath).ShouldBeTrue();
+            byte[] installedBytes = await File.ReadAllBytesAsync(
+                Path.Combine(record.ContentPath, "package.json"),
+                ct);
+            installedBytes.ShouldBe(manifestBytes);
+        }
+
+        using DiskPackageCache reopenedCache = new DiskPackageCache(_tempDir);
+        PackageRecord? reopenedRecord = await reopenedCache.GetPackageAsync(reference, ct);
+
+        reopenedRecord.ShouldNotBeNull();
+        reopenedRecord.Reference.Name.ShouldBe(reference.Name);
+        reopenedRecord.Reference.Version.ShouldBe(reference.Version);
+        reopenedRecord.Manifest.Author.ShouldBe(expectedAuthor);
+        reopenedRecord.ContentPath.ShouldBe(contentPath);
+        reopenedCache.GetPackageContentPath(reference).ShouldBe(contentPath);
+        byte[] reopenedBytes = await File.ReadAllBytesAsync(
+            Path.Combine(contentPath, "package.json"),
+            ct);
+        reopenedBytes.ShouldBe(manifestBytes);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task ImportAsync_AuthorForms_PreserveBytesAndRemainReadable(
+        bool objectAuthor,
+        bool unmodified)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        PackageReference reference = new PackageReference("test.package", "1.0.0");
+        string authorJson = objectAuthor
+            ? """{"name":"Example Author","email":"author@example.test","url":"https://example.test/"}"""
+            : "\"Example Author <author@example.test> (https://example.test/)\"";
+        string manifestJson = $$"""
+            {
+                "name": "test.package",
+                "version": "1.0.0",
+                "author": {{authorJson}}
+            }
+            """;
+        const string expectedAuthor =
+            "Example Author <author@example.test> (https://example.test/)";
+        byte[] manifestBytes = Encoding.UTF8.GetBytes(manifestJson);
+        using MemoryStream authoredTarball = CreateTestTarball(manifestJson);
+        byte[] archiveBytes = authoredTarball.ToArray();
+        string expectedSha256 = Convert.ToHexString(SHA256.HashData(archiveBytes))
+            .ToLowerInvariant();
+        using MemoryStream tarball = new MemoryStream(archiveBytes.ToArray());
+        string directoryPath = Path.Combine(_tempDir, "test.package#1.0.0");
+        string contentPath = Path.Combine(directoryPath, "package");
+        tarball.CanRead.ShouldBeTrue();
+        tarball.Position.ShouldBe(0);
+
+        using (DiskPackageCache cache = new DiskPackageCache(_tempDir))
+        {
+            PackageRecord record = await cache.ImportAsync(
+                tarball,
+                new InstallCacheOptions
+                {
+                    Unmodified = unmodified,
+                    VerifyChecksum = true,
+                    ExpectedSha256Sum = expectedSha256
+                },
+                ct);
+
+            record.Reference.Name.ShouldBe(reference.Name);
+            record.Reference.Version.ShouldBe(reference.Version);
+            record.Manifest.Author.ShouldNotBeNull();
+            record.Manifest.Author.ShouldBe(expectedAuthor);
+            record.DirectoryPath.ShouldBe(directoryPath);
+            record.ContentPath.ShouldBe(contentPath);
+            Directory.Exists(record.DirectoryPath).ShouldBeTrue();
+            byte[] importedBytes = await File.ReadAllBytesAsync(
+                Path.Combine(record.ContentPath, "package.json"),
+                ct);
+            importedBytes.ShouldBe(manifestBytes);
+            tarball.CanRead.ShouldBeTrue();
+            tarball.ToArray().ShouldBe(archiveBytes);
+            CacheMetadata metadata = await cache.GetMetadataAsync(ct);
+            CacheMetadataEntry entry = metadata.Packages[
+                PackageCacheKey.Create(reference).MetadataKey];
+            entry.ArchiveSha256.ShouldBe(expectedSha256);
+        }
+
+        using DiskPackageCache reopenedCache = new DiskPackageCache(_tempDir);
+        PackageRecord? reopenedRecord = await reopenedCache.GetPackageAsync(reference, ct);
+
+        reopenedRecord.ShouldNotBeNull();
+        reopenedRecord.Reference.Name.ShouldBe(reference.Name);
+        reopenedRecord.Reference.Version.ShouldBe(reference.Version);
+        reopenedRecord.Manifest.Author.ShouldNotBeNull();
+        reopenedRecord.Manifest.Author.ShouldBe(expectedAuthor);
+        reopenedRecord.ContentPath.ShouldBe(contentPath);
+        bool isInstalled = await reopenedCache.IsInstalledAsync(reference, ct);
+        isInstalled.ShouldBeTrue();
+        reopenedCache.GetPackageContentPath(reference).ShouldBe(contentPath);
+        byte[] reopenedBytes = await File.ReadAllBytesAsync(
+            Path.Combine(contentPath, "package.json"),
+            ct);
+        reopenedBytes.ShouldBe(manifestBytes);
+    }
+
+    [Fact]
+    public async Task ImportAsync_MalformedAuthor_ReturnsTypedManifestFailure()
+    {
+        using DiskPackageCache cache = new DiskPackageCache(_tempDir);
+        using MemoryStream tarball = CreateTestTarball(
+            """{"name":"test.package","version":"1.0.0","author":{"name":42}}""");
+
+        PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(
+            () => cache.ImportAsync(
+                tarball,
+                new InstallCacheOptions
+                {
+                    Unmodified = true,
+                    VerifyChecksum = false
+                },
+                TestContext.Current.CancellationToken));
+
+        exception.ErrorCode.ShouldBe(PackageInstallErrorCode.InvalidArchive);
+        exception.Stage.ShouldBe(PackageInstallStage.ArchiveValidation);
+        JsonException jsonException = exception.InnerException.ShouldBeOfType<JsonException>();
+        jsonException.Path.ShouldBe("$.author");
+        Directory.Exists(Path.Combine(_tempDir, "test.package#1.0.0")).ShouldBeFalse();
     }
 
     [Fact]

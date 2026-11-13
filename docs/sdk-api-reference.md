@@ -855,6 +855,25 @@ recompute it.
 The deserialized `package.json` for a FHIR package. Combines standard NPM fields
 with FHIR-specific extensions.
 
+`Author` remains `string?` and has a property-scoped JSON converter: strings are
+preserved verbatim, missing/JSON-null authors remain null, and objects project to
+`name <email> (url)` (for example,
+`Example Author <author@example.test> (https://example.test/)`). The optional
+`name`, `email`, and `url` members accept only strings or null. Missing, null, and
+exactly empty components are omitted; nonempty components are not trimmed and
+are joined in that order with single separator spaces, with no extra leading or
+trailing separator spaces. An object with no usable components projects to null.
+Unknown members, including nested metadata, are ignored. Recognized member names
+follow serializer casing options (the model helpers are case-insensitive;
+default `JsonSerializer` options are case-sensitive). The last recognized
+occurrence wins, including null/empty clearing, but every recognized occurrence
+is validated. Arrays, numbers, and booleans as authors, or malformed recognized
+member values, throw `JsonException`. This projection is lossy: explicit model
+serialization emits a JSON string, not the original object; `Serialize()` omits
+null authors while default external serialization emits normal JSON null.
+Imported manifest bytes remain untouched independently of this typed projection.
+Older SDK readers still reject object authors in those preserved cache files.
+
 ```csharp
 public record PackageManifest
 {
