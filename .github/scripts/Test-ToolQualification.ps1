@@ -7,7 +7,7 @@ param(
     [string] $CandidateDirectory,
 
     [Parameter(Mandatory)]
-    [ValidateSet('net8.0', 'net9.0', 'net10.0', 'net11.0')]
+    [ValidateSet('net10.0', 'net11.0')]
     [string] $Framework,
 
     [Parameter(Mandatory)]

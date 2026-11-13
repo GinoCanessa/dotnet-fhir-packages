@@ -66,19 +66,19 @@ projects, and `tools/FhirPkg.Release`.
   unbuildable on any machine lacking that one patch.
 - Root `Directory.Build.props` declares
   `FhirPkgPrimaryTargetFramework=net11.0` and
-  `FhirPkgSupportedTargetFrameworks=net11.0;net10.0;net9.0;net8.0`.
+  `FhirPkgSupportedTargetFrameworks=net11.0;net10.0`.
   All seven projects inherit the supported set when neither `TargetFramework`
   nor `TargetFrameworks` is supplied. Both explicit override forms are
-  preserved. Unqualified building and testing fans out over **four TFMs**;
+  preserved. Unqualified building and testing fans out over **two TFMs**;
   the primary property does not narrow comprehensive validation.
   `LangVersion` **14**, `Nullable` enable, and `ImplicitUsings` enable are
   defaulted here too. `src/common.props` owns packaging/versioning only.
-- Source CI and release pack/qualification jobs install SDKs `11.0.100`,
-  `10.0.302`, `9.0.119`, and `8.0.423`, retaining matching older frameworks
+- Source CI and release pack/qualification jobs install SDKs `11.0.100`
+  and `10.0.302`, retaining both supported frameworks
   and runtimes. Development-SDK-only release/drift jobs install `11.0.100`.
   The .NET 11 SDK alone does not establish that older testhosts can run;
-  local all-framework testing also requires the .NET 8, 9, 10, and 11 runtimes.
-  Explicit primary selectors use `net11.0`; older targets remain supported.
+  local all-framework testing also requires the .NET 10 and 11 runtimes.
+  Explicit primary selectors use `net11.0`; `net10.0` remains supported.
   `global.json`, the root policy, source CI, publish CI, fixture drift CI,
   and qualification script allow-lists are coupled projections.
   `BuildToolchainContractTests` checks their agreement and ownership using
@@ -149,7 +149,7 @@ dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj
 dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
 ```
 
-CI appends `-p:TestTfmsInParallel=false` to the unit-test invocation so the four
+CI appends `-p:TestTfmsInParallel=false` to the unit-test invocation so the two
 per-TFM `vstest.console` / `testhost` pairs start sequentially on the hosted
 runners (4 vCPU on ubuntu/windows, 3 vCPU on macOS); concurrent testhost startup
 there previously exhausted the connect window and silently aborted runs.
@@ -166,7 +166,7 @@ dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj \
 ```
 
 Prefer pinning a single TFM while iterating — otherwise every run executes
-four times. The primary development variant is:
+twice. The primary development variant is:
 
 ```bash
 dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net11.0 \
@@ -183,8 +183,8 @@ dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net10.0 \
 ### VSTest coverage collection
 
 The existing `coverlet.collector` integration requires **VSTest**, not MTP.
-Use the repository's stable SDK 11 floor and install the .NET 8, 9, 10, and 11
-runtimes for this unpinned four-TFM run. Both test projects' existing centrally
+Use the repository's stable SDK 11 floor and install the .NET 10 and 11
+runtimes for this unpinned two-TFM run. Both test projects' existing centrally
 versioned `coverlet.collector` (`10.1.0`) and `Microsoft.NET.Test.Sdk` (`18.12.0`)
 references are prerequisites; `xunit.runner.visualstudio` supplies the adapter.
 
@@ -200,7 +200,7 @@ dotnet test --collect:"XPlat Code Coverage"
 VSTest reports Cobertura attachments under each test project's
 `TestResults/<guid>/coverage.cobertura.xml`; GUID directories are
 platform-controlled. Check current-run attachments and recorded SDK
-production-file hits for both projects on each of the four TFMs, rather than
+production-file hits for both projects on each of the two TFMs, rather than
 treating one attachment as evidence for the entire run.
 
 ### Integration-test partitioning
@@ -214,7 +214,7 @@ dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj \
   --framework net11.0 \
   --filter "FullyQualifiedName!~HardenedInstallationIntegrationTests&FullyQualifiedName!~CrossProcessCacheIntegrationTests"
 
-# The hardened / cross-process suites, run per-TFM (net8.0, net9.0, net10.0, net11.0).
+# The hardened / cross-process suites, run per-TFM (net10.0, net11.0).
 dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj \
   --framework net11.0 \
   --filter "FullyQualifiedName~HardenedInstallationIntegrationTests|FullyQualifiedName~CrossProcessCacheIntegrationTests"
@@ -286,7 +286,7 @@ release process is documented in
 | `src/FhirPkg.Cli/**` | Unit tests plus the non-hardened integration filter. |
 | Workflow YAML, `tools/FhirPkg.Release/**` | `dotnet test test/FhirPkg.Tests/…` (release-contract tests read the YAML from build output). |
 | `qualification-corpus.json`, `test/FhirPkg.Qualification/**` | The qualification `--validate-only` run above. |
-| Multi-TFM-sensitive code (APIs newer than net8.0, polyfills) | Run without `--framework` so all four TFMs execute. |
+| Multi-TFM-sensitive code (APIs newer than net10.0, polyfills) | Run without `--framework` so both TFMs execute. |
 
 **Rule: never claim a target framework or platform is green that you did not
 actually run.** State which TFMs and which host OS you verified, and name the
@@ -309,7 +309,7 @@ Style is enforced by review against `## Code style` below, not by a tool.
 
 The SDK (`src/FhirPkg/`) is a library and is not run directly. The CLI is run
 from source with `dotnet run`, pinning a TFM so the multi-target fanout does
-not build four copies. Select the primary .NET 11 framework:
+not build two copies. Select the primary .NET 11 framework:
 
 ```bash
 dotnet run --project src/FhirPkg.Cli/FhirPkg.Cli.csproj --framework net11.0 -- --help
@@ -375,10 +375,10 @@ These are decisions, not preferences. Violating one is a review Blocker.
   sanctioned per-project override.
 - **Every `.cs` file carries the license header**, including test helpers and
   anything that merely looks generated.
-- **Everything must compile on `net8.0`.** The four TFMs are one source tree,
-  so an API introduced after net8.0 needs a `#if` guard or a polyfill — never a
+- **Everything must compile on `net10.0`.** The two TFMs are one source tree,
+  so an API introduced after net10.0 needs a `#if` guard or a polyfill — never a
   bare call that only the `net11.0` leg ever proves. This is why the
-  verification matrix sends multi-TFM-sensitive changes through all four.
+  verification matrix sends multi-TFM-sensitive changes through both.
 - **The CHANGELOG `## Current` heading is machine-read.** `src/common.targets`
   extracts that section into `<PackageReleaseNotes>` at pack time, so renaming
   it, stamping a version onto it, or malforming it silently ships a release

@@ -102,7 +102,7 @@ public class ReleaseWorkflowContractTests
         releaseWorkflow.ShouldContain(
             "os: [ubuntu-latest, windows-latest, macos-latest]");
         releaseWorkflow.ShouldContain(
-            "framework: [net8.0, net9.0, net10.0, net11.0]");
+            "framework: [net10.0, net11.0]");
         releaseWorkflow.ShouldContain("UsePublishedFhirPkg=true");
         releaseWorkflow.ShouldContain("release:");
         releaseWorkflow.ShouldContain("types: [published]");
@@ -144,14 +144,14 @@ public class ReleaseWorkflowContractTests
             "dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(5);
         CountOccurrences(
             releaseWorkflow,
-            "--project tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(15);
+            "--project tools/FhirPkg.Release/FhirPkg.Release.csproj").ShouldBe(12);
         CountOccurrences(releaseWorkflow, "validate-version").ShouldBe(0);
         CountOccurrences(releaseWorkflow, "validate-inputs").ShouldBe(2);
         CountOccurrences(releaseWorkflow, "validate-candidate").ShouldBe(4);
-        CountOccurrences(releaseWorkflow, "inspect-publication").ShouldBe(1);
+        CountOccurrences(releaseWorkflow, "inspect-publication").ShouldBe(0);
         CountOccurrences(
             releaseWorkflow,
-            "validate-published-package").ShouldBe(2);
+            "validate-published-package").ShouldBe(0);
         CountOccurrences(
             releaseWorkflow,
             "--github-ref \"${{ github.ref }}\"").ShouldBe(2);
@@ -160,7 +160,7 @@ public class ReleaseWorkflowContractTests
             "--allow-published-version").ShouldBe(2);
         CountOccurrences(
             releaseWorkflow,
-            "--no-build\n          --no-restore\n          --").ShouldBe(15);
+            "--no-build\n          --no-restore\n          --").ShouldBe(12);
         releaseWorkflow.ShouldNotContain("Test-Release");
         releaseWorkflow.ShouldNotContain("Test-PublishedRelease");
         releaseWorkflow.ShouldNotContain("skip-signature-verification");
@@ -208,8 +208,11 @@ public class ReleaseWorkflowContractTests
                     "validate-inputs",
                     StringComparison.Ordinal));
 
-        int preflightIndex = publishSection.IndexOf(
-            "inspect-publication",
+        int candidateValidationIndex = publishSection.IndexOf(
+            "validate-candidate",
+            StringComparison.Ordinal);
+        int firstLoginIndex = publishSection.IndexOf(
+            "NuGet/login@v1",
             StringComparison.Ordinal);
         int firstPushIndex = publishSection.IndexOf(
             "dotnet nuget push",
@@ -220,8 +223,9 @@ public class ReleaseWorkflowContractTests
         int sdkPrimaryIndex = publishSection.IndexOf(
             "steps.candidate.outputs.sdk_package_path",
             StringComparison.Ordinal);
-        preflightIndex.ShouldBeGreaterThanOrEqualTo(0);
-        preflightIndex.ShouldBeLessThan(firstPushIndex);
+        candidateValidationIndex.ShouldBeGreaterThanOrEqualTo(0);
+        candidateValidationIndex.ShouldBeLessThan(firstLoginIndex);
+        firstLoginIndex.ShouldBeLessThan(firstPushIndex);
         cliPrimaryIndex.ShouldBeLessThan(sdkPrimaryIndex);
 
         qualificationProject.ShouldNotContain("<TargetFrameworks>");
@@ -230,7 +234,7 @@ public class ReleaseWorkflowContractTests
     }
 
     [Fact]
-    public void ReleaseWorkflow_UsesJobScopedTrustedPublishingAfterPreflight()
+    public void ReleaseWorkflow_UsesJobScopedTrustedPublishingAfterCandidateValidation()
     {
         string releaseWorkflow = ReadContract("nuget-generator.yaml");
         string publishSection = GetSection(
@@ -249,19 +253,17 @@ public class ReleaseWorkflowContractTests
         CountOccurrences(publishSection, "NuGet/login@v1").ShouldBe(3);
         CountOccurrences(releaseWorkflow, "secrets.NUGET_USER").ShouldBe(3);
 
-        (string Name, string Id, string PushName, string? Condition, string Prerequisite)[] logins =
+        (string Name, string Id, string PushName, string Prerequisite)[] logins =
         [
             ("CLI", "nuget_cli", "CLI primary",
-                "steps.publication_state.outputs.cli_state == 'missing'",
-                "inspect-publication"),
+                "Revalidate qualified release candidate"),
             ("SDK", "nuget_sdk", "SDK primary",
-                "steps.publication_state.outputs.sdk_state == 'missing'",
-                "Verify published CLI primary matches candidate"),
-            ("symbol", "nuget_symbols", "CLI symbols", null,
-                "Verify published SDK primary matches candidate"),
+                "Push CLI primary package to NuGet.org"),
+            ("symbol", "nuget_symbols", "CLI symbols",
+                "Push SDK primary package to NuGet.org"),
         ];
 
-        foreach ((string name, string id, string pushName, string? condition, string prerequisite) in logins)
+        foreach ((string name, string id, string pushName, string prerequisite) in logins)
         {
             string loginMarker =
                 $"      - name: Authenticate {name} publication to NuGet.org\n";
@@ -281,15 +283,8 @@ public class ReleaseWorkflowContractTests
             loginSection.ShouldContain("          user: ${{ secrets.NUGET_USER }}\n");
             pushHeader.ShouldContain(
                 "          NUGET_API_KEY: ${{ steps." + id + ".outputs.NUGET_API_KEY }}\n");
-            if (condition is not null)
-            {
-                loginSection.ShouldContain($"        if: {condition}\n");
-                pushHeader.ShouldContain($"        if: {condition}\n");
-            }
-            else
-            {
-                loginSection.ShouldNotContain("        if:");
-            }
+            loginSection.ShouldNotContain("        if:");
+            pushHeader.ShouldNotContain("        if:");
 
             int prerequisiteIndex = publishSection.IndexOf(
                 prerequisite,
@@ -302,6 +297,51 @@ public class ReleaseWorkflowContractTests
         CountOccurrences(
             publishSection,
             "NUGET_API_KEY: ${{ steps.nuget_symbols.outputs.NUGET_API_KEY }}").ShouldBe(2);
+    }
+
+    [Fact]
+    public void ReleaseWorkflow_PushesPrimariesThenSymbolsWithoutNuGetDownloads()
+    {
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string publishSection = GetSection(
+            releaseWorkflow,
+            "  publish:\n",
+            null);
+        string[] pushNames =
+        [
+            "CLI primary",
+            "SDK primary",
+            "CLI symbols",
+            "SDK symbols",
+        ];
+
+        publishSection.ShouldNotContain("inspect-publication");
+        publishSection.ShouldNotContain("validate-published-package");
+        publishSection.ShouldNotContain("v3-flatcontainer");
+        publishSection.ShouldNotContain("publication_state");
+        publishSection.ShouldNotContain("continue-on-error:");
+        publishSection.ShouldNotContain("if: always()");
+        publishSection.ShouldNotContain("|| true");
+
+        int previousPushIndex = -1;
+        foreach (string pushName in pushNames)
+        {
+            string pushMarker =
+                $"      - name: Push {pushName} package to NuGet.org\n";
+            int pushIndex = publishSection.IndexOf(
+                pushMarker,
+                StringComparison.Ordinal);
+            pushIndex.ShouldBeGreaterThan(previousPushIndex);
+
+            string pushSection = GetSection(
+                publishSection,
+                pushMarker,
+                pushName == pushNames[^1] ? null : "\n\n");
+            pushSection.ShouldContain("          dotnet nuget push\n");
+            pushSection.ShouldContain("          --skip-duplicate");
+            pushSection.ShouldNotContain("        if:");
+            previousPushIndex = pushIndex;
+        }
     }
 
     [Fact]
@@ -852,26 +892,6 @@ public class ReleaseWorkflowContractTests
         "Revalidate qualified release candidate",
         "RELEASE_TAG: ${{ needs.validate.outputs.tag }}",
         "--tag \"$RELEASE_TAG\"")]
-    [InlineData(
-        "Reconcile existing NuGet publication state",
-        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
-        "--version \"$RELEASE_VERSION\"")]
-    [InlineData(
-        "Verify published CLI primary matches candidate",
-        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
-        "--published-package-uri \"https://api.nuget.org/v3-flatcontainer/fhir-pkg-cli/$RELEASE_VERSION/fhir-pkg-cli.$RELEASE_VERSION.nupkg\"")]
-    [InlineData(
-        "Verify published CLI primary matches candidate",
-        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
-        "--version \"$RELEASE_VERSION\"")]
-    [InlineData(
-        "Verify published SDK primary matches candidate",
-        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
-        "--published-package-uri \"https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/$RELEASE_VERSION/fhir-pkg-lib.$RELEASE_VERSION.nupkg\"")]
-    [InlineData(
-        "Verify published SDK primary matches candidate",
-        "RELEASE_VERSION: ${{ needs.validate.outputs.version }}",
-        "--version \"$RELEASE_VERSION\"")]
     public void ReleaseWorkflow_PassesVersionAndTagToScriptsThroughEnvironment(
         string stepName,
         string environmentEntry,

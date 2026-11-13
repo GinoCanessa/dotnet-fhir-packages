@@ -10,7 +10,17 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+## [2026.1113.1020] - 2026-11-13
+
 ### Changed
+- Dropped out-of-support .NET 8 and 9 targets from the SDK, CLI, source CI,
+  and release qualification; both packages now require .NET 10 or later,
+  with .NET 11 remaining the primary development target.
+- Updated Microsoft.Extensions dependency injection, HTTP, logging, and
+  options packages from `10.0.9` to `11.0.0`.
+- Removed NuGet package download-back checks from publication so accepted
+  primary uploads proceeded directly to symbol uploads without waiting for
+  indexing.
 - Switched NuGet publication to trusted publishing with job-scoped GitHub
   OIDC and short-lived credentials refreshed before primary and symbol
   publication, replacing long-lived API-key secrets for new releases.

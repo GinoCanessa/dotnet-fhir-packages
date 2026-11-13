@@ -59,14 +59,8 @@ public class ReleaseSymbolPackageValidatorTests
     }
 
     [Theory]
-    [InlineData("fhir-pkg-lib", "net8.0", "FhirPkg.pdb")]
-    [InlineData("fhir-pkg-lib", "net9.0", "FhirPkg.pdb")]
     [InlineData("fhir-pkg-lib", "net10.0", "FhirPkg.pdb")]
     [InlineData("fhir-pkg-lib", "net11.0", "FhirPkg.pdb")]
-    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.Cli.pdb")]
-    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.pdb")]
-    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.Cli.pdb")]
-    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.pdb")]
     [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.Cli.pdb")]
     [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.pdb")]
     [InlineData("fhir-pkg-cli", "net11.0", "FhirPkg.Cli.pdb")]

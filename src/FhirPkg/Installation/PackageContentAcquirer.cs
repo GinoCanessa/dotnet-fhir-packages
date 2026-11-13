@@ -379,11 +379,7 @@ internal static class PackageContentAcquirer
 
     private static string ToLowerHex(byte[] value)
     {
-#if NET9_0_OR_GREATER
         return Convert.ToHexStringLower(value);
-#else
-        return Convert.ToHexString(value).ToLowerInvariant();
-#endif
     }
 }
 

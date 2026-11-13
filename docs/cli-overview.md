@@ -21,8 +21,8 @@ search, publish, and maintain a local package cache. It is built on the
 
 ## Prerequisites
 
-- [.NET 8.0 SDK or Runtime](https://dotnet.microsoft.com/download) or later
-  (.NET 8, 9, 10, and 11 are supported; .NET 11 is recommended)
+- [.NET 10.0 SDK or Runtime](https://dotnet.microsoft.com/download) or later
+  (.NET 10 and 11 are supported; .NET 11 is recommended)
 
 ## Installation
 

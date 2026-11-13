@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <FhirPkgPrimaryTargetFramework>net11.0</FhirPkgPrimaryTargetFramework>
-    <FhirPkgSupportedTargetFrameworks>net11.0;net10.0;net9.0;net8.0</FhirPkgSupportedTargetFrameworks>
+    <FhirPkgSupportedTargetFrameworks>net11.0;net10.0</FhirPkgSupportedTargetFrameworks>
     <TargetFrameworks Condition="'$(TargetFramework)' == '' and '$(TargetFrameworks)' == ''">$(FhirPkgSupportedTargetFrameworks)</TargetFrameworks>
     <LangVersion Condition="'$(LangVersion)' == ''">14</LangVersion>
     <Nullable Condition="'$(Nullable)' == ''">enable</Nullable>

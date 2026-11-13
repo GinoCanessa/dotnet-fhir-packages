@@ -22,7 +22,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($Framework -notin @('net8.0', 'net9.0', 'net10.0', 'net11.0'))
+if ($Framework -notin @('net10.0', 'net11.0'))
 {
     throw "Unsupported qualification framework '$Framework'."
 }

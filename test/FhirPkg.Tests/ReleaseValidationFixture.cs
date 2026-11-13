@@ -18,12 +18,12 @@ internal static class ReleaseValidationFixture
         "0123456789abcdef0123456789abcdef01234567";
 
     internal static readonly string[] Frameworks =
-        ["net8.0", "net9.0", "net10.0", "net11.0"];
+        ["net10.0", "net11.0"];
 
     internal static string CreateCandidate(
         bool mismatchCliAssembly = false,
         bool invalidSdkPackageMetadata = false,
-        string mismatchFramework = "net9.0",
+        string mismatchFramework = "net10.0",
         string? omittedSdkPackageEntry = null,
         string? omittedCliPackageEntry = null,
         string? omittedSdkSymbolsEntry = null,
@@ -131,7 +131,7 @@ internal static class ReleaseValidationFixture
         string? version = null,
         string? repositoryCommit = null,
         string nuspecEntryName = "fhir-pkg-lib.nuspec",
-        string mismatchFramework = "net9.0",
+        string mismatchFramework = "net10.0",
         string? omittedEntry = null)
     {
         using FileStream stream = File.Create(path);
@@ -208,7 +208,7 @@ internal static class ReleaseValidationFixture
         string entryPoint = "FhirPkg.Cli.dll",
         string runner = "dotnet",
         string nuspecEntryName = "fhir-pkg-cli.nuspec",
-        string mismatchFramework = "net9.0",
+        string mismatchFramework = "net10.0",
         string? omittedEntry = null)
     {
         using FileStream stream = File.Create(path);

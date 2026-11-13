@@ -66,14 +66,14 @@ internal static class ReleaseFrameworkPolicy
                     NumberStyles.None,
                     CultureInfo.InvariantCulture,
                     out int major) ||
-                major < 8 ||
+                major < 10 ||
                 !string.Equals(
                     framework,
                     $"net{major.ToString(CultureInfo.InvariantCulture)}.0",
                     StringComparison.Ordinal))
             {
                 throw InvalidPolicy(
-                    $"Framework '{framework}' must be a canonical 'net<major>.0' identifier with major >= 8.");
+                    $"Framework '{framework}' must be a canonical 'net<major>.0' identifier with major >= 10.");
             }
 
             if (!uniqueFrameworks.Add(framework))

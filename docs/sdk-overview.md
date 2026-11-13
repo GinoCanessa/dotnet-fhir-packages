@@ -2,7 +2,7 @@
 
 FhirPkg is a C# SDK for discovering, resolving, downloading, caching, and managing
 [FHIR packages](https://registry.fhir.org/) from multiple registries. It targets
-**.NET 8+** (`net8.0`, `net9.0`, `net10.0`, and `net11.0`; .NET 11 recommended)
+**.NET 10+** (`net10.0` and `net11.0`; .NET 11 recommended)
 and is distributed as the **fhir-pkg-lib** NuGet package.
 
 ## Features

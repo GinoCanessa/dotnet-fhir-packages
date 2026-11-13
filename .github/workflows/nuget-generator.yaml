@@ -283,8 +283,6 @@ jobs:
           dotnet-version: |
             11.0.100
             10.0.302
-            9.0.119
-            8.0.423
 
       - name: Restore release validation tool
         run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -897,7 +895,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        framework: [net8.0, net9.0, net10.0, net11.0]
+        framework: [net10.0, net11.0]
 
     steps:
       - uses: actions/checkout@v6
@@ -949,8 +947,6 @@ jobs:
           dotnet-version: |
             11.0.100
             10.0.302
-            9.0.119
-            8.0.423
 
       - name: Restore release validation tool
         run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -1374,32 +1370,13 @@ jobs:
           --expected-sdk-package-sha256 "${{ needs.release-identity.outputs.sdk_package_sha256 }}"
           --expected-cli-package-sha256 "${{ needs.release-identity.outputs.cli_package_sha256 }}"
 
-      - name: Reconcile existing NuGet publication state
-        id: publication_state
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-        run: >-
-          dotnet run
-          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
-          --configuration Release
-          --framework net11.0
-          --no-build
-          --no-restore
-          --
-          inspect-publication
-          --candidate-directory "${{ runner.temp }}/release-candidate"
-          --version "$RELEASE_VERSION"
-          --repository-commit "${{ needs.validate.outputs.commit }}"
-
       - name: Authenticate CLI publication to NuGet.org
-        if: steps.publication_state.outputs.cli_state == 'missing'
         id: nuget_cli
         uses: NuGet/login@v1
         with:
           user: ${{ secrets.NUGET_USER }}
 
       - name: Push CLI primary package to NuGet.org
-        if: steps.publication_state.outputs.cli_state == 'missing'
         env:
           NUGET_API_KEY: ${{ steps.nuget_cli.outputs.NUGET_API_KEY }}
         run: >-
@@ -1410,34 +1387,13 @@ jobs:
           --no-symbols
           --skip-duplicate
 
-      - name: Verify published CLI primary matches candidate
-        if: steps.publication_state.outputs.cli_state == 'missing'
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-        run: >-
-          dotnet run
-          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
-          --configuration Release
-          --framework net11.0
-          --no-build
-          --no-restore
-          --
-          validate-published-package
-          --package-id fhir-pkg-cli
-          --candidate-package-path "${{ steps.candidate.outputs.cli_package_path }}"
-          --published-package-uri "https://api.nuget.org/v3-flatcontainer/fhir-pkg-cli/$RELEASE_VERSION/fhir-pkg-cli.$RELEASE_VERSION.nupkg"
-          --version "$RELEASE_VERSION"
-          --repository-commit "${{ needs.validate.outputs.commit }}"
-
       - name: Authenticate SDK publication to NuGet.org
-        if: steps.publication_state.outputs.sdk_state == 'missing'
         id: nuget_sdk
         uses: NuGet/login@v1
         with:
           user: ${{ secrets.NUGET_USER }}
 
       - name: Push SDK primary package to NuGet.org
-        if: steps.publication_state.outputs.sdk_state == 'missing'
         env:
           NUGET_API_KEY: ${{ steps.nuget_sdk.outputs.NUGET_API_KEY }}
         run: >-
@@ -1447,25 +1403,6 @@ jobs:
           --source https://api.nuget.org/v3/index.json
           --no-symbols
           --skip-duplicate
-
-      - name: Verify published SDK primary matches candidate
-        if: steps.publication_state.outputs.sdk_state == 'missing'
-        env:
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-        run: >-
-          dotnet run
-          --project tools/FhirPkg.Release/FhirPkg.Release.csproj
-          --configuration Release
-          --framework net11.0
-          --no-build
-          --no-restore
-          --
-          validate-published-package
-          --package-id fhir-pkg-lib
-          --candidate-package-path "${{ steps.candidate.outputs.sdk_package_path }}"
-          --published-package-uri "https://api.nuget.org/v3-flatcontainer/fhir-pkg-lib/$RELEASE_VERSION/fhir-pkg-lib.$RELEASE_VERSION.nupkg"
-          --version "$RELEASE_VERSION"
-          --repository-commit "${{ needs.validate.outputs.commit }}"
 
       - name: Authenticate symbol publication to NuGet.org
         id: nuget_symbols

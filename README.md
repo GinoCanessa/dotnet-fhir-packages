@@ -230,9 +230,9 @@ for the full layout and index behavior.
 
 ## Prerequisites
 
-- **CLI consumers:** [.NET 8 SDK or runtime](https://dotnet.microsoft.com/download)
-  or later (.NET 8, 9, 10, and 11 are supported; .NET 11 is recommended).
-- **SDK consumers:** a project targeting `net8.0`, `net9.0`, `net10.0`, or
+- **CLI consumers:** [.NET 10 SDK or runtime](https://dotnet.microsoft.com/download)
+  or later (.NET 10 and 11 are supported; .NET 11 is recommended).
+- **SDK consumers:** a project targeting `net10.0` or
   `net11.0` (`net11.0` is recommended).
 
 ## Building from Source
@@ -242,9 +242,9 @@ or later within .NET 11**. `global.json` uses `latestFeature` roll-forward and
 disables prerelease SDKs. This contributor floor does not raise the package
 consumer requirements above.
 
-Unqualified builds and tests cover all four supported frameworks. Running all
-test targets also requires the .NET 8, 9, 10, and 11 runtimes; the .NET 11 SDK
-alone does not supply the older testhosts' runtimes.
+Unqualified builds and tests cover both supported frameworks. Running all
+test targets also requires the .NET 10 and 11 runtimes; the .NET 11 SDK
+alone does not supply the .NET 10 testhost's runtime.
 
 Comprehensive build:
 
@@ -269,7 +269,7 @@ dotnet build src/FhirPkg/FhirPkg.csproj --framework net10.0
 
 ## Running Tests
 
-Comprehensive per-project runs (all four frameworks):
+Comprehensive per-project runs (both frameworks):
 
 ```bash
 # Unit tests
@@ -304,7 +304,7 @@ dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net10.0 \
 | [SDK API Reference](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/sdk-api-reference.md) | Reference for the supported public surface — interfaces, models, and enums |
 | [Package Request Process](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/process.md) | End-to-end walkthrough of resolution, download, extraction, caching, and indexing. |
 | [Version Resolution Policy](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/versioning-policy.md) | Configuration snapshots, fixups, pre-release rules, and FHIR-release filtering. |
-| [Release Process and Evidence](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/releases/README.md) | Exact-commit source CI, immutable candidate handoff, 3 x 4 qualification (twelve jobs), publication gates, and evidence. |
+| [Release Process and Evidence](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/releases/README.md) | Exact-commit source CI, immutable candidate handoff, 3 x 2 qualification (six jobs), publication gates, and evidence. |
 | [CLI Overview](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/cli-overview.md) | Installation, quick start, command summary |
 | [CLI Reference](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/docs/cli-reference.md) | All commands, options, exit codes, and config |
 | [FHIR Package Reference](https://github.com/GinoCanessa/dotnet-fhir-packages/blob/main/reference/index.md) | Package naming, versioning, resolution, registry API, caching, dependencies, client implementations, security, and errors. |
