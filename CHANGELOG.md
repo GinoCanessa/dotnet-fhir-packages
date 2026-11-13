@@ -10,6 +10,11 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+### Fixed
+- Accepted object-valued package authors during import, installation, and cache
+  reads while preserving the string-valued SDK author property and imported
+  manifest bytes.
+
 ## [2026.1113.1020] - 2026-11-13
 
 ### Changed
