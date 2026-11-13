@@ -224,6 +224,95 @@ public static class RegistryClientFactory
             gitHubToken: null,
             new FileSystemContext(fileSystemRetry));
 
+    /// <summary>
+    /// Creates an endpoint client with explicit finite installation limits and
+    /// a construction-time filesystem retry policy using an unverified transport.
+    /// </summary>
+    /// <param name="endpoint">The registry endpoint configuration.</param>
+    /// <param name="httpClient">The HTTP client to use for requests.</param>
+    /// <param name="loggerFactory">The logger factory for typed loggers.</param>
+    /// <param name="timeProvider">The time provider, or null for the system provider.</param>
+    /// <param name="fileSystemRetry">The required bounded filesystem retry options.</param>
+    /// <param name="installLimits">The required finite installation policy.</param>
+    /// <returns>The registry client for the endpoint.</returns>
+    /// <remarks>
+    /// Explicitly assigned fields override environment values, then finite defaults.
+    /// Installation and retry policies are validated for safe accounting and
+    /// snapshotted before client construction. Higher valid finite construction
+    /// ceilings are supported. NPM uses installation limits for local publication
+    /// preparation, not a download spool; native cache operations independently
+    /// enforce their construction ceilings and only-tightening
+    /// <c>InstallCacheOptions.Limits</c>. Later caller or ambient mutations do not
+    /// change the snapshots. This overload does not confer redirect guarantees.
+    /// </remarks>
+    public static IRegistryClient CreateClientForEndpoint(
+        RegistryEndpoint endpoint,
+        HttpClient httpClient,
+        ILoggerFactory loggerFactory,
+        TimeProvider? timeProvider,
+        FileSystemRetryOptions fileSystemRetry,
+        PackageInstallLimits installLimits)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ArgumentNullException.ThrowIfNull(httpClient);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        PackageInstallLimits resolved = PackageInstallLimits.ResolveManager(installLimits);
+        FileSystemContext context = new(fileSystemRetry);
+        return CreateClientForEndpoint(
+            endpoint,
+            RegistryHttpTransport.CreateUnverified(httpClient),
+            loggerFactory,
+            resolved,
+            timeProvider,
+            gitHubToken: null,
+            context);
+    }
+
+    /// <summary>
+    /// Creates an endpoint client with explicit transport guarantees, finite
+    /// installation limits and a construction-time filesystem retry policy.
+    /// </summary>
+    /// <param name="endpoint">The registry endpoint configuration.</param>
+    /// <param name="transport">The HTTP transport to use for requests.</param>
+    /// <param name="loggerFactory">The logger factory for typed loggers.</param>
+    /// <param name="timeProvider">The time provider, or null for the system provider.</param>
+    /// <param name="fileSystemRetry">The required bounded filesystem retry options.</param>
+    /// <param name="installLimits">The required finite installation policy.</param>
+    /// <returns>The registry client for the endpoint.</returns>
+    /// <remarks>
+    /// Explicit fields override environment values, then finite defaults. Policies
+    /// are validated for safe accounting and snapshotted before client construction;
+    /// higher valid finite ceilings are supported. NPM publication preparation
+    /// observes this policy, while native cache operations use their own ceilings
+    /// and only-tightening <c>InstallCacheOptions.Limits</c>. Later caller or
+    /// environment mutations cannot change the snapshots. Supplied transport
+    /// guarantees are retained; no download spool is introduced.
+    /// </remarks>
+    public static IRegistryClient CreateClientForEndpoint(
+        RegistryEndpoint endpoint,
+        RegistryHttpTransport transport,
+        ILoggerFactory loggerFactory,
+        TimeProvider? timeProvider,
+        FileSystemRetryOptions fileSystemRetry,
+        PackageInstallLimits installLimits)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        PackageInstallLimits resolved = PackageInstallLimits.ResolveManager(installLimits);
+        FileSystemContext context = new(fileSystemRetry);
+        return CreateClientForEndpoint(
+            endpoint,
+            transport,
+            loggerFactory,
+            resolved,
+            timeProvider,
+            gitHubToken: null,
+            context);
+    }
+
     internal static IRegistryClient CreateClientForEndpoint(
         RegistryEndpoint endpoint,
         RegistryHttpTransport transport,

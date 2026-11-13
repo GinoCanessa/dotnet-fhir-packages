@@ -99,6 +99,38 @@ public class DiskPackageCache :
     {
     }
 
+    /// <summary>
+    /// Creates a disk package cache with explicit finite installation limits and
+    /// a construction-time filesystem retry policy.
+    /// </summary>
+    /// <param name="cacheDirectory">The cache root, or null for the default root.</param>
+    /// <param name="logger">An optional logger.</param>
+    /// <param name="timeProvider">An optional time provider.</param>
+    /// <param name="fileSystemRetry">The required bounded filesystem retry options.</param>
+    /// <param name="installLimits">The required finite installation policy.</param>
+    /// <remarks>
+    /// Each explicitly assigned limit overrides its environment variable, then
+    /// the finite default. Both policies are validated for safe accounting and
+    /// snapshotted before cache root discovery or creation. Higher valid finite
+    /// construction ceilings are supported; <see cref="InstallCacheOptions.Limits"/>
+    /// may only tighten those ceilings for an individual operation. Later caller
+    /// or environment mutations do not change this cache's policies.
+    /// </remarks>
+    public DiskPackageCache(
+        string? cacheDirectory,
+        ILogger<DiskPackageCache>? logger,
+        TimeProvider? timeProvider,
+        FileSystemRetryOptions fileSystemRetry,
+        PackageInstallLimits installLimits)
+        : this(
+            cacheDirectory,
+            logger,
+            timeProvider,
+            PackageInstallLimits.ResolveManager(installLimits),
+            new FileSystemContext(fileSystemRetry))
+    {
+    }
+
     internal DiskPackageCache(
         string? cacheDirectory,
         ILogger<DiskPackageCache>? logger,
