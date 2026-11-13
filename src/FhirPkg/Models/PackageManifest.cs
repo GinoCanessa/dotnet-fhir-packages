@@ -99,8 +99,16 @@ public record PackageManifest
     [JsonPropertyName("keywords")]
     public IReadOnlyList<string>? Keywords { get; init; }
 
-    /// <summary>Source code repository metadata.</summary>
+    /// <summary>
+    /// Source code repository metadata. A string projects verbatim to <see cref="NpmRepository.Url"/>
+    /// with null type and directory; no shorthand expansion or URL interpretation occurs.
+    /// Object members accept strings/null (including empty strings), ignore unknown members,
+    /// and follow serializer-option casing. Every recognized occurrence is validated before
+    /// the last occurrence wins, including null clearing. Other shapes throw <see cref="JsonException"/>.
+    /// Model serialization emits an ordinary repository object; imported bytes are preserved independently.
+    /// </summary>
     [JsonPropertyName("repository")]
+    [JsonConverter(typeof(PackageRepositoryJsonConverter))]
     public NpmRepository? Repository { get; init; }
 
     /// <summary>Distribution metadata (tarball URL and checksum).</summary>
@@ -125,8 +133,15 @@ public record PackageManifest
     [JsonPropertyName("type")]
     public string? Type { get; init; }
 
-    /// <summary>The publication date of this package version.</summary>
+    /// <summary>
+    /// The publication date of this package version. Strings are preserved verbatim;
+    /// numeric tokens must be exactly eight or fourteen ASCII digits and project to their
+    /// lexical text without calendar or time-zone interpretation. Other shapes throw
+    /// <see cref="JsonException"/>. Model serialization emits a string (or normal null),
+    /// independently of the unchanged imported manifest bytes.
+    /// </summary>
     [JsonPropertyName("date")]
+    [JsonConverter(typeof(PackageDateJsonConverter))]
     public string? Date { get; init; }
 
     /// <summary>The human-readable title of this package.</summary>
@@ -228,6 +243,108 @@ public record PackageManifest
     {
         int dashIndex = version.IndexOf('-');
         return dashIndex >= 0 ? version[..dashIndex] : version;
+    }
+}
+
+internal sealed class PackageRepositoryJsonConverter : JsonConverter<NpmRepository>
+{
+    public override NpmRepository? Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            return new NpmRepository(null, reader.GetString(), null);
+        }
+
+        if (reader.TokenType != JsonTokenType.StartObject)
+        {
+            throw new JsonException("Package repository must be a string, object, or null.");
+        }
+
+        using JsonDocument document = JsonDocument.ParseValue(ref reader);
+        StringComparison comparison = options.PropertyNameCaseInsensitive
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        string? type = null;
+        string? url = null;
+        string? directory = null;
+        foreach (JsonProperty property in document.RootElement.EnumerateObject())
+        {
+            bool isType = property.Name.Equals("type", comparison);
+            bool isUrl = property.Name.Equals("url", comparison);
+            bool isDirectory = property.Name.Equals("directory", comparison);
+            if (!isType && !isUrl && !isDirectory)
+            {
+                continue;
+            }
+
+            if (property.Value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+            {
+                throw new JsonException($"Package repository member '{property.Name}' must be a string or null.");
+            }
+
+            string? value = property.Value.GetString();
+            if (isType)
+            {
+                type = value;
+            }
+            else if (isUrl)
+            {
+                url = value;
+            }
+            else
+            {
+                directory = value;
+            }
+        }
+
+        return new NpmRepository(type, url, directory);
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        NpmRepository value,
+        JsonSerializerOptions options)
+    {
+        JsonSerializer.Serialize(writer, value, options);
+    }
+}
+
+internal sealed class PackageDateJsonConverter : JsonConverter<string>
+{
+    public override string? Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            return reader.GetString();
+        }
+
+        if (reader.TokenType != JsonTokenType.Number)
+        {
+            throw new JsonException("Package date must be a string, compact numeric date, or null.");
+        }
+
+        using JsonDocument document = JsonDocument.ParseValue(ref reader);
+        string text = document.RootElement.GetRawText();
+        if (text.Length is not (8 or 14) || text.Any(character => character is < '0' or > '9'))
+        {
+            throw new JsonException("Numeric package date must contain exactly eight or fourteen ASCII digits.");
+        }
+
+        return text;
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        string value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value);
     }
 }
 
