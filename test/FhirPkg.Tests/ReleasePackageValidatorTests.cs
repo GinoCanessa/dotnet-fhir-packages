@@ -56,6 +56,82 @@ public class ReleasePackageValidatorTests
         }
     }
 
+    [Theory]
+    [InlineData("fhir-pkg-lib", "net8.0", "FhirPkg.dll")]
+    [InlineData("fhir-pkg-lib", "net9.0", "FhirPkg.dll")]
+    [InlineData("fhir-pkg-lib", "net10.0", "FhirPkg.dll")]
+    [InlineData("fhir-pkg-lib", "net11.0", "FhirPkg.dll")]
+    [InlineData("fhir-pkg-cli", "net8.0", "DotnetToolSettings.xml")]
+    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.Cli.dll")]
+    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.Cli.deps.json")]
+    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.Cli.runtimeconfig.json")]
+    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.dll")]
+    [InlineData("fhir-pkg-cli", "net9.0", "DotnetToolSettings.xml")]
+    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.Cli.dll")]
+    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.Cli.deps.json")]
+    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.Cli.runtimeconfig.json")]
+    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.dll")]
+    [InlineData("fhir-pkg-cli", "net10.0", "DotnetToolSettings.xml")]
+    [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.Cli.dll")]
+    [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.Cli.deps.json")]
+    [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.Cli.runtimeconfig.json")]
+    [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.dll")]
+    [InlineData("fhir-pkg-cli", "net11.0", "DotnetToolSettings.xml")]
+    [InlineData("fhir-pkg-cli", "net11.0", "FhirPkg.Cli.dll")]
+    [InlineData("fhir-pkg-cli", "net11.0", "FhirPkg.Cli.deps.json")]
+    [InlineData("fhir-pkg-cli", "net11.0", "FhirPkg.Cli.runtimeconfig.json")]
+    [InlineData("fhir-pkg-cli", "net11.0", "FhirPkg.dll")]
+    public void Validate_RejectsMissingFrameworkAsset(
+        string packageId,
+        string framework,
+        string fileName)
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string packagePath = Path.Combine(
+                workingDirectory,
+                $"{packageId}.{ReleaseValidationFixture.Version}.nupkg");
+            string missingEntry;
+            if (string.Equals(
+                    packageId,
+                    "fhir-pkg-lib",
+                    StringComparison.Ordinal))
+            {
+                missingEntry = $"lib/{framework}/{fileName}";
+                ReleaseValidationFixture.CreateSdkPackage(
+                    packagePath,
+                    omittedEntry: missingEntry);
+            }
+            else
+            {
+                missingEntry = $"tools/{framework}/any/{fileName}";
+                ReleaseValidationFixture.CreateCliPackage(
+                    packagePath,
+                    omittedEntry: missingEntry);
+            }
+
+            IReleasePackageValidator validator =
+                new ReleasePackageValidator();
+
+            ReleaseValidationException exception =
+                Should.Throw<ReleaseValidationException>(
+                    () => validator.Validate(
+                        packageId,
+                        packagePath,
+                        ReleaseValidationFixture.Version,
+                        ReleaseValidationFixture.RepositoryCommit));
+
+            exception.Message.ShouldBe(
+                $"The package is missing '{missingEntry}'.");
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
     [Fact]
     public void Validate_RejectsSdkPackageWithInvalidMetadata()
     {
@@ -110,8 +186,8 @@ public class ReleasePackageValidatorTests
                         ReleaseValidationFixture.Version,
                         ReleaseValidationFixture.RepositoryCommit));
 
-            exception.Message.ShouldBe(
-                "Expected one tool settings file for 'net8.0'.");
+            exception.Message.ShouldMatch(
+                @"^Expected one tool settings file for 'net(?:8|9|10|11)\.0'\.$");
         }
         finally
         {

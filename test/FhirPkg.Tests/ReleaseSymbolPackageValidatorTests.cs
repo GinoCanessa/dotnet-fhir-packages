@@ -58,6 +58,70 @@ public class ReleaseSymbolPackageValidatorTests
         }
     }
 
+    [Theory]
+    [InlineData("fhir-pkg-lib", "net8.0", "FhirPkg.pdb")]
+    [InlineData("fhir-pkg-lib", "net9.0", "FhirPkg.pdb")]
+    [InlineData("fhir-pkg-lib", "net10.0", "FhirPkg.pdb")]
+    [InlineData("fhir-pkg-lib", "net11.0", "FhirPkg.pdb")]
+    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.Cli.pdb")]
+    [InlineData("fhir-pkg-cli", "net8.0", "FhirPkg.pdb")]
+    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.Cli.pdb")]
+    [InlineData("fhir-pkg-cli", "net9.0", "FhirPkg.pdb")]
+    [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.Cli.pdb")]
+    [InlineData("fhir-pkg-cli", "net10.0", "FhirPkg.pdb")]
+    [InlineData("fhir-pkg-cli", "net11.0", "FhirPkg.Cli.pdb")]
+    [InlineData("fhir-pkg-cli", "net11.0", "FhirPkg.pdb")]
+    public void Validate_RejectsMissingFrameworkSymbol(
+        string packageId,
+        string framework,
+        string fileName)
+    {
+        string workingDirectory =
+            ReleaseValidationFixture.CreateArtifactsDirectory();
+        try
+        {
+            string symbolsPath = Path.Combine(
+                workingDirectory,
+                $"{packageId}.{ReleaseValidationFixture.Version}.snupkg");
+            string missingEntry;
+            if (string.Equals(
+                    packageId,
+                    "fhir-pkg-lib",
+                    StringComparison.Ordinal))
+            {
+                missingEntry = $"lib/{framework}/{fileName}";
+                ReleaseValidationFixture.CreateSdkSymbolsPackage(
+                    symbolsPath,
+                    omittedEntry: missingEntry);
+            }
+            else
+            {
+                missingEntry = $"tools/{framework}/any/{fileName}";
+                ReleaseValidationFixture.CreateCliSymbolsPackage(
+                    symbolsPath,
+                    omittedEntry: missingEntry);
+            }
+
+            IReleaseSymbolPackageValidator validator =
+                new ReleaseSymbolPackageValidator();
+
+            ReleaseValidationException exception =
+                Should.Throw<ReleaseValidationException>(
+                    () => validator.Validate(
+                        packageId,
+                        symbolsPath,
+                        ReleaseValidationFixture.Version,
+                        ReleaseValidationFixture.RepositoryCommit));
+
+            exception.Message.ShouldBe(
+                $"The symbols package is missing '{missingEntry}'.");
+        }
+        finally
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
     [Fact]
     public void Validate_RejectsSymbolsPackageWithUnexpectedFileNameCase()
     {

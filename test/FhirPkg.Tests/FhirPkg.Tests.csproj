@@ -1,12 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>
-    <LangVersion>14</LangVersion>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <IsTestingPlatformApplication>false</IsTestingPlatformApplication>
+    <TestingPlatformDotnetTestSupport>false</TestingPlatformDotnetTestSupport>
     <RootNamespace>FhirPkg.Tests</RootNamespace>
     <OutputType>Exe</OutputType>
   </PropertyGroup>
@@ -30,6 +28,57 @@
     <ProjectReference Include="..\..\src\FhirPkg\FhirPkg.csproj" />
     <ProjectReference Include="..\..\tools\FhirPkg.Release\FhirPkg.Release.csproj" />
     <ProjectReference Include="..\FhirPkg.Qualification\FhirPkg.Qualification.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None
+      Include="..\..\Directory.Build.props"
+      Link="BuildContracts\Directory.Build.props"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\global.json"
+      Link="BuildContracts\global.json"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\src\common.props"
+      Link="BuildContracts\src\common.props"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\src\FhirPkg\FhirPkg.csproj"
+      Link="BuildContracts\src\FhirPkg\FhirPkg.csproj"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\src\FhirPkg.Cli\FhirPkg.Cli.csproj"
+      Link="BuildContracts\src\FhirPkg.Cli\FhirPkg.Cli.csproj"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="FhirPkg.Tests.csproj"
+      Link="BuildContracts\test\FhirPkg.Tests\FhirPkg.Tests.csproj"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\FhirPkg.IntegrationTests\FhirPkg.IntegrationTests.csproj"
+      Link="BuildContracts\test\FhirPkg.IntegrationTests\FhirPkg.IntegrationTests.csproj"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\FhirPkg.ProcessTestHost\FhirPkg.ProcessTestHost.csproj"
+      Link="BuildContracts\test\FhirPkg.ProcessTestHost\FhirPkg.ProcessTestHost.csproj"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\FhirPkg.Qualification\FhirPkg.Qualification.csproj"
+      Link="BuildContracts\test\FhirPkg.Qualification\FhirPkg.Qualification.csproj"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\tools\FhirPkg.Release\FhirPkg.Release.csproj"
+      Link="BuildContracts\tools\FhirPkg.Release\FhirPkg.Release.csproj"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\.github\scripts\Test-QualificationRestore.ps1"
+      Link="BuildContracts\.github\scripts\Test-QualificationRestore.ps1"
+      CopyToOutputDirectory="PreserveNewest" />
+    <None
+      Include="..\..\.github\scripts\Test-ToolQualification.ps1"
+      Link="BuildContracts\.github\scripts\Test-ToolQualification.ps1"
+      CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

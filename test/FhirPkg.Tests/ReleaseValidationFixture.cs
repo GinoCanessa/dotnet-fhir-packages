@@ -18,11 +18,16 @@ internal static class ReleaseValidationFixture
         "0123456789abcdef0123456789abcdef01234567";
 
     internal static readonly string[] Frameworks =
-        ["net8.0", "net9.0", "net10.0"];
+        ["net8.0", "net9.0", "net10.0", "net11.0"];
 
     internal static string CreateCandidate(
         bool mismatchCliAssembly = false,
-        bool invalidSdkPackageMetadata = false)
+        bool invalidSdkPackageMetadata = false,
+        string mismatchFramework = "net9.0",
+        string? omittedSdkPackageEntry = null,
+        string? omittedCliPackageEntry = null,
+        string? omittedSdkSymbolsEntry = null,
+        string? omittedCliSymbolsEntry = null)
     {
         string candidateDirectory =
             CreateArtifactsDirectory("fhirpkg-release-contract");
@@ -44,10 +49,19 @@ internal static class ReleaseValidationFixture
             sdkPackagePath,
             repositoryCommit: invalidSdkPackageMetadata
                 ? InvalidRepositoryCommit
-                : RepositoryCommit);
-        CreateSdkSymbolsPackage(sdkSymbolsPath);
-        CreateCliPackage(cliPackagePath, mismatchCliAssembly);
-        CreateCliSymbolsPackage(cliSymbolsPath);
+                : RepositoryCommit,
+            omittedEntry: omittedSdkPackageEntry);
+        CreateSdkSymbolsPackage(
+            sdkSymbolsPath,
+            omittedEntry: omittedSdkSymbolsEntry);
+        CreateCliPackage(
+            cliPackagePath,
+            mismatchCliAssembly,
+            mismatchFramework: mismatchFramework,
+            omittedEntry: omittedCliPackageEntry);
+        CreateCliSymbolsPackage(
+            cliSymbolsPath,
+            omittedEntry: omittedCliSymbolsEntry);
         WriteManifest(
             Path.Combine(
                 candidateDirectory,
@@ -116,7 +130,9 @@ internal static class ReleaseValidationFixture
         string? packageId = null,
         string? version = null,
         string? repositoryCommit = null,
-        string nuspecEntryName = "fhir-pkg-lib.nuspec")
+        string nuspecEntryName = "fhir-pkg-lib.nuspec",
+        string mismatchFramework = "net9.0",
+        string? omittedEntry = null)
     {
         using FileStream stream = File.Create(path);
         using ZipArchive archive =
@@ -131,13 +147,14 @@ internal static class ReleaseValidationFixture
         foreach (string framework in Frameworks)
         {
             byte[] assembly =
-                mismatchSdkAssembly && framework == "net9.0"
+                mismatchSdkAssembly && framework == mismatchFramework
                     ? Encoding.ASCII.GetBytes("mismatched-published-sdk")
                     : GetSdkAssembly(framework);
             AddBytes(
                 archive,
                 $"lib/{framework}/FhirPkg.dll",
-                assembly);
+                assembly,
+                omittedEntry);
         }
     }
 
@@ -154,7 +171,8 @@ internal static class ReleaseValidationFixture
         string? version = null,
         string? repositoryCommit = null,
         string? packageType = "SymbolsPackage",
-        string nuspecEntryName = "fhir-pkg-lib.nuspec")
+        string nuspecEntryName = "fhir-pkg-lib.nuspec",
+        string? omittedEntry = null)
     {
         using FileStream stream = File.Create(path);
         using ZipArchive archive =
@@ -172,7 +190,8 @@ internal static class ReleaseValidationFixture
             AddText(
                 archive,
                 $"lib/{framework}/FhirPkg.pdb",
-                $"sdk-pdb-{framework}");
+                $"sdk-pdb-{framework}",
+                omittedEntry);
         }
     }
 
@@ -188,7 +207,9 @@ internal static class ReleaseValidationFixture
         string commandName = "fhir-pkg",
         string entryPoint = "FhirPkg.Cli.dll",
         string runner = "dotnet",
-        string nuspecEntryName = "fhir-pkg-cli.nuspec")
+        string nuspecEntryName = "fhir-pkg-cli.nuspec",
+        string mismatchFramework = "net9.0",
+        string? omittedEntry = null)
     {
         using FileStream stream = File.Create(path);
         using ZipArchive archive =
@@ -211,27 +232,32 @@ internal static class ReleaseValidationFixture
                 CreateToolSettings(
                     commandName,
                     entryPoint,
-                    runner));
+                    runner),
+                omittedEntry);
             AddText(
                 archive,
                 $"{toolRoot}/FhirPkg.Cli.dll",
-                $"cli-{framework}");
+                $"cli-{framework}",
+                omittedEntry);
             AddText(
                 archive,
                 $"{toolRoot}/FhirPkg.Cli.deps.json",
-                "{}");
+                "{}",
+                omittedEntry);
             AddText(
                 archive,
                 $"{toolRoot}/FhirPkg.Cli.runtimeconfig.json",
-                "{}");
+                "{}",
+                omittedEntry);
             byte[] assembly =
-                mismatchCliAssembly && framework == "net9.0"
+                mismatchCliAssembly && framework == mismatchFramework
                     ? Encoding.ASCII.GetBytes("mismatched-sdk")
                     : GetSdkAssembly(framework);
             AddBytes(
                 archive,
                 $"{toolRoot}/FhirPkg.dll",
-                assembly);
+                assembly,
+                omittedEntry);
         }
     }
 
@@ -248,7 +274,8 @@ internal static class ReleaseValidationFixture
         string? version = null,
         string? repositoryCommit = null,
         string? packageType = "SymbolsPackage",
-        string nuspecEntryName = "fhir-pkg-cli.nuspec")
+        string nuspecEntryName = "fhir-pkg-cli.nuspec",
+        string? omittedEntry = null)
     {
         using FileStream stream = File.Create(path);
         using ZipArchive archive =
@@ -267,11 +294,13 @@ internal static class ReleaseValidationFixture
             AddText(
                 archive,
                 $"{toolRoot}/FhirPkg.Cli.pdb",
-                $"cli-pdb-{framework}");
+                $"cli-pdb-{framework}",
+                omittedEntry);
             AddText(
                 archive,
                 $"{toolRoot}/FhirPkg.pdb",
-                $"sdk-pdb-{framework}");
+                $"sdk-pdb-{framework}",
+                omittedEntry);
         }
     }
 
@@ -329,17 +358,28 @@ internal static class ReleaseValidationFixture
     private static void AddText(
         ZipArchive archive,
         string entryName,
-        string content) =>
+        string content,
+        string? omittedEntry = null) =>
         AddBytes(
             archive,
             entryName,
-            Encoding.UTF8.GetBytes(content));
+            Encoding.UTF8.GetBytes(content),
+            omittedEntry);
 
     private static void AddBytes(
         ZipArchive archive,
         string entryName,
-        byte[] content)
+        byte[] content,
+        string? omittedEntry = null)
     {
+        if (string.Equals(
+                entryName,
+                omittedEntry,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
         ZipArchiveEntry entry = archive.CreateEntry(entryName);
         using Stream stream = entry.Open();
         stream.Write(content);

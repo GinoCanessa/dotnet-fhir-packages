@@ -39,7 +39,8 @@ private implementation details.
 |-|-|
 | `src/FhirPkg/` | SDK library, packed as **`fhir-pkg-lib`**. Cache, Indexing, Installation, Models, Registry, Resolution, Utilities. |
 | `src/FhirPkg.Cli/` | .NET global tool, packed as **`fhir-pkg-cli`** (`ToolCommandName` = `fhir-pkg`). |
-| `src/common.props`, `src/common.targets` | Shared TFM/versioning/packaging properties and the changelog → `PackageReleaseNotes` task. Imported by both `src/` projects. |
+| `Directory.Build.props` | Repository-wide supported/primary frameworks and default compiler properties, inherited by all seven projects. |
+| `src/common.props`, `src/common.targets` | Shipping-package versioning/packaging properties and the changelog → `PackageReleaseNotes` task. Imported by both `src/` projects only. |
 | `test/FhirPkg.Tests/` | xunit.v3 unit tests. Also holds the release-contract tests over the workflow YAML. |
 | `test/FhirPkg.IntegrationTests/` | xunit.v3 integration tests (offline / recorded mode). |
 | `test/FhirPkg.ProcessTestHost/` | Console host used by cross-process cache tests. Not a test project. |
@@ -57,26 +58,32 @@ projects, and `tools/FhirPkg.Release`.
 
 ## Toolchain pins
 
-- **.NET SDK `10.0.302` floor**, declared in `global.json` with
+- **Stable .NET SDK `11.0.100` floor**, declared in `global.json` with
   `"rollForward": "latestFeature"` and `"allowPrerelease": false`. This is a
-  **floor, not an exact pin**: any installed `10.0.3xx` or later feature band
-  satisfies it, so a machine with `10.0.400` builds without installing
-  `10.0.302`. Do not suggest a different major version, and do not tighten the
-  policy back to `disable` — that made the repo unbuildable on any machine
-  lacking that one patch.
-- All projects **multi-target `net10.0;net9.0;net8.0`** and use
-  `LangVersion` **14**, `Nullable` enable, `ImplicitUsings` enable. Building
-  and testing therefore fans out over three TFMs unless you pass
-  `--framework`.
-- CI additionally installs the `9.0.119` and `8.0.423` SDKs so the `net9.0` and
-  `net8.0` targets have matching reference assemblies. CI installs `10.0.302`
-  itself via `setup-dotnet`, so the roll-forward policy above changes nothing
-  there — it resolves to exactly `10.0.302` on the runners and only gives local
-  machines room to use a newer feature band. `ReleaseWorkflowContractTests`
-  asserts `dotnet-version: 10.0.302` in both the publish workflow and
-  `.github/workflows/fixture-drift.yaml`, so `global.json` and those two
-  workflows are a coupled set of three files; changing `global.json` alone
-  does not satisfy it.
+  **floor, not an exact pin**: an installed `11.0.1xx` or later .NET 11 feature
+  band satisfies it. Do not suggest a preview or a different major version,
+  and do not tighten the policy back to `disable` — that made the repo
+  unbuildable on any machine lacking that one patch.
+- Root `Directory.Build.props` declares
+  `FhirPkgPrimaryTargetFramework=net11.0` and
+  `FhirPkgSupportedTargetFrameworks=net11.0;net10.0;net9.0;net8.0`.
+  All seven projects inherit the supported set when neither `TargetFramework`
+  nor `TargetFrameworks` is supplied. Both explicit override forms are
+  preserved. Unqualified building and testing fans out over **four TFMs**;
+  the primary property does not narrow comprehensive validation.
+  `LangVersion` **14**, `Nullable` enable, and `ImplicitUsings` enable are
+  defaulted here too. `src/common.props` owns packaging/versioning only.
+- Source CI and release pack/qualification jobs install SDKs `11.0.100`,
+  `10.0.302`, `9.0.119`, and `8.0.423`, retaining matching older frameworks
+  and runtimes. Development-SDK-only release/drift jobs install `11.0.100`.
+  The .NET 11 SDK alone does not establish that older testhosts can run;
+  local all-framework testing also requires the .NET 8, 9, 10, and 11 runtimes.
+  Explicit primary selectors use `net11.0`; older targets remain supported.
+  `global.json`, the root policy, source CI, publish CI, fixture drift CI,
+  and qualification script allow-lists are coupled projections.
+  `BuildToolchainContractTests` checks their agreement and ownership using
+  copied `BuildContracts/` inputs and `ReleaseContracts/` workflows;
+  `ReleaseWorkflowContractTests` retains the release-safety contracts.
 - **Central package management.** All package versions live in
   `Directory.Packages.props`. Add a `<PackageVersion>` there and a bare
   `<PackageReference Include="..." />` in the project — never a `Version=`
@@ -106,16 +113,22 @@ Release-configuration build, matching CI:
 dotnet build FhirPkg.sln --configuration Release --no-restore
 ```
 
-Single-project builds are fine for tight loops; add `--framework net10.0` when
-you only need one TFM:
+Single-project builds are fine for tight loops; select the primary
+`--framework net11.0` when you only need one TFM:
+
+```bash
+dotnet build src/FhirPkg/FhirPkg.csproj --framework net11.0
+```
+
+Legacy .NET 10 compatibility build (not the development default):
 
 ```bash
 dotnet build src/FhirPkg/FhirPkg.csproj --framework net10.0
 ```
 
 The expected baseline is **0 warnings, 0 errors**. Warnings are *not* errors
-here — no project sets `TreatWarningsAsErrors` and there is no
-`Directory.Build.props` — so a new warning fails nothing and will be missed
+here — neither the root `Directory.Build.props` nor any project sets
+`TreatWarningsAsErrors` — so a new warning fails nothing and will be missed
 unless you look. Investigate anything else you see before attributing it:
 confirm against a clean checkout or `HEAD` before calling it a regression.
 
@@ -136,10 +149,10 @@ dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj
 dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
 ```
 
-CI appends `-p:TestTfmsInParallel=false` to the unit-test invocation so the three
+CI appends `-p:TestTfmsInParallel=false` to the unit-test invocation so the four
 per-TFM `vstest.console` / `testhost` pairs start sequentially on the hosted
 runners (4 vCPU on ubuntu/windows, 3 vCPU on macOS); concurrent testhost startup
-there exhausted the connect window and silently aborted two of the three runs.
+there previously exhausted the connect window and silently aborted runs.
 Local runs may omit it, and pinning `--framework` avoids the fanout entirely.
 
 Targeted runs use **VSTest filter syntax**, which *is* valid in this repo:
@@ -153,12 +166,42 @@ dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj \
 ```
 
 Prefer pinning a single TFM while iterating — otherwise every run executes
-three times:
+four times. The primary development variant is:
+
+```bash
+dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net11.0 \
+  --filter "FullyQualifiedName~DiskPackageCacheTests"
+```
+
+Legacy .NET 10 compatibility variant:
 
 ```bash
 dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net10.0 \
   --filter "FullyQualifiedName~DiskPackageCacheTests"
 ```
+
+### VSTest coverage collection
+
+The existing `coverlet.collector` integration requires **VSTest**, not MTP.
+Use the repository's stable SDK 11 floor and install the .NET 8, 9, 10, and 11
+runtimes for this unpinned four-TFM run. Both test projects' existing centrally
+versioned `coverlet.collector` (`10.1.0`) and `Microsoft.NET.Test.Sdk` (`18.12.0`)
+references are prerequisites; `xunit.runner.visualstudio` supplies the adapter.
+
+From the repository root (which contains one solution, `FhirPkg.sln`), use the
+first dotnet-test quick-start recipe verbatim from the installed
+`coverlet.collector` 10.1.0 `VSTestIntegration.md`:
+`C:\Users\ginoc\.nuget\packages\coverlet.collector\10.1.0\VSTestIntegration.md`.
+
+```bash
+dotnet test --collect:"XPlat Code Coverage"
+```
+
+VSTest reports Cobertura attachments under each test project's
+`TestResults/<guid>/coverage.cobertura.xml`; GUID directories are
+platform-controlled. Check current-run attachments and recorded SDK
+production-file hits for both projects on each of the four TFMs, rather than
+treating one attachment as evidence for the entire run.
 
 ### Integration-test partitioning
 
@@ -166,18 +209,43 @@ CI splits `FhirPkg.IntegrationTests` in two, and a change touching either half
 should be verified the same way:
 
 ```bash
-# Everything except the hardened / cross-process suites, net10.0 only.
+# Everything except the hardened / cross-process suites, primary net11.0 only.
+dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj \
+  --framework net11.0 \
+  --filter "FullyQualifiedName!~HardenedInstallationIntegrationTests&FullyQualifiedName!~CrossProcessCacheIntegrationTests"
+
+# The hardened / cross-process suites, run per-TFM (net8.0, net9.0, net10.0, net11.0).
+dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj \
+  --framework net11.0 \
+  --filter "FullyQualifiedName~HardenedInstallationIntegrationTests|FullyQualifiedName~CrossProcessCacheIntegrationTests"
+```
+
+Legacy .NET 10 compatibility variants (CI's hardened matrix retains this leg):
+
+```bash
 dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj \
   --framework net10.0 \
   --filter "FullyQualifiedName!~HardenedInstallationIntegrationTests&FullyQualifiedName!~CrossProcessCacheIntegrationTests"
 
-# The hardened / cross-process suites, run per-TFM (net8.0, net9.0, net10.0).
 dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj \
   --framework net10.0 \
   --filter "FullyQualifiedName~HardenedInstallationIntegrationTests|FullyQualifiedName~CrossProcessCacheIntegrationTests"
 ```
 
 ### Qualification corpus validation
+
+Primary .NET 11 variant:
+
+```bash
+dotnet run --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj \
+  --framework net11.0 -- \
+  --validate-only true \
+  --cache /tmp/qualification-validation-cache \
+  --output /tmp/qualification-validation.json \
+  --corpus test/FhirPkg.Qualification/qualification-corpus.json
+```
+
+Legacy .NET 10 compatibility variant:
 
 ```bash
 dotnet run --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj \
@@ -218,7 +286,7 @@ release process is documented in
 | `src/FhirPkg.Cli/**` | Unit tests plus the non-hardened integration filter. |
 | Workflow YAML, `tools/FhirPkg.Release/**` | `dotnet test test/FhirPkg.Tests/…` (release-contract tests read the YAML from build output). |
 | `qualification-corpus.json`, `test/FhirPkg.Qualification/**` | The qualification `--validate-only` run above. |
-| Multi-TFM-sensitive code (APIs newer than net8.0, polyfills) | Run without `--framework` so all three TFMs execute. |
+| Multi-TFM-sensitive code (APIs newer than net8.0, polyfills) | Run without `--framework` so all four TFMs execute. |
 
 **Rule: never claim a target framework or platform is green that you did not
 actually run.** State which TFMs and which host OS you verified, and name the
@@ -241,10 +309,10 @@ Style is enforced by review against `## Code style` below, not by a tool.
 
 The SDK (`src/FhirPkg/`) is a library and is not run directly. The CLI is run
 from source with `dotnet run`, pinning a TFM so the multi-target fanout does
-not build three copies:
+not build four copies. Select the primary .NET 11 framework:
 
 ```bash
-dotnet run --project src/FhirPkg.Cli/FhirPkg.Cli.csproj --framework net10.0 -- --help
+dotnet run --project src/FhirPkg.Cli/FhirPkg.Cli.csproj --framework net11.0 -- --help
 ```
 
 Everything after `--` is passed to the tool. Commands are `install`, `restore`,
@@ -259,6 +327,14 @@ Point the tool at a throwaway cache whenever you exercise install/remove/clean
 so a local run cannot disturb the real package cache:
 
 ```bash
+dotnet run --project src/FhirPkg.Cli/FhirPkg.Cli.csproj --framework net11.0 -- \
+  --package-cache-folder /tmp/fhir-pkg-scratch list
+```
+
+Legacy .NET 10 compatibility variants:
+
+```bash
+dotnet run --project src/FhirPkg.Cli/FhirPkg.Cli.csproj --framework net10.0 -- --help
 dotnet run --project src/FhirPkg.Cli/FhirPkg.Cli.csproj --framework net10.0 -- \
   --package-cache-folder /tmp/fhir-pkg-scratch list
 ```
@@ -299,22 +375,23 @@ These are decisions, not preferences. Violating one is a review Blocker.
   sanctioned per-project override.
 - **Every `.cs` file carries the license header**, including test helpers and
   anything that merely looks generated.
-- **Everything must compile on `net8.0`.** The three TFMs are one source tree,
+- **Everything must compile on `net8.0`.** The four TFMs are one source tree,
   so an API introduced after net8.0 needs a `#if` guard or a polyfill — never a
-  bare call that only the `net10.0` leg ever proves. This is why the
-  verification matrix sends multi-TFM-sensitive changes through all three.
+  bare call that only the `net11.0` leg ever proves. This is why the
+  verification matrix sends multi-TFM-sensitive changes through all four.
 - **The CHANGELOG `## Current` heading is machine-read.** `src/common.targets`
   extracts that section into `<PackageReleaseNotes>` at pack time, so renaming
   it, stamping a version onto it, or malforming it silently ships a release
   with empty notes. Version headings are stamped by the release process, never
   by hand.
-- **`global.json`, the publish workflow, and the fixture drift workflow are a
-  coupled set of three files.** `ReleaseWorkflowContractTests` asserts
-  `dotnet-version: 10.0.302` in both `.github/workflows/nuget-generator.yaml`
-  and `.github/workflows/fixture-drift.yaml`, so changing the SDK pin means
-  changing all three and re-running that test — it reads the workflow YAML from
-  build output.
-- **Nothing touches nuget.org from a local machine.** No `dotnet nuget push`,
+- **The root framework policy, `global.json`, all three workflows, and both
+  qualification scripts must agree.** Changing the supported set or stable
+  SDK floor means updating every explicit projection and running
+  `BuildToolchainContractTests` and `ReleaseWorkflowContractTests` through the
+  unit project — they read copied configuration/workflow inputs from rebuilt
+  test output, not stale `bin/` content. Keep full-suite build/test paths
+  unpinned and retain singular published-package qualification overrides.
+- **Nothing pushes to nuget.org from a local machine.** No `dotnet nuget push`,
   no local run of the publish workflow, and no `publish` command against a real
   registry. Publication happens only through the process in
   [`docs/releases/README.md`](docs/releases/README.md).
@@ -451,8 +528,8 @@ scratch/<MMDD>-<##>/
 - Prefer the smallest targeted verification that covers the change; escalate to
   the full solution / all-TFM run only when the targeted run indicates it is
   needed.
-- Never run the publish workflow, `dotnet nuget push`, or anything that touches
-  nuget.org.
+- Never run the publish workflow, `dotnet nuget push`, or anything that writes 
+  to nuget.org.
 
 ### Subagent model policy
 

@@ -1210,6 +1210,10 @@ public sealed class FileSystemRetryCliTests : IDisposable
             Invoke("InspectDescriptor", path, () => SystemFileSystemPrimitives.Instance.InspectDescriptor(descriptor, path));
         public FileSystemReplayOutcome<int> DuplicateDescriptor(int descriptor, int command, int minimum, string? path = null) =>
             Invoke("DuplicateDescriptor", path, () => SystemFileSystemPrimitives.Instance.DuplicateDescriptor(descriptor, command, minimum, path));
+        public FileSystemReplayOutcome<int> GetDescriptorFlags(int descriptor, string? path = null) =>
+            Invoke("GetDescriptorFlags", path, () => SystemFileSystemPrimitives.Instance.GetDescriptorFlags(descriptor, path));
+        public FileSystemReplayOutcome<bool> SetDescriptorFlags(int descriptor, int flags, string? path = null) =>
+            Invoke("SetDescriptorFlags", path, () => SystemFileSystemPrimitives.Instance.SetDescriptorFlags(descriptor, flags, path));
         public FileSystemReplayOutcome<FileSystemDirectorySyncOutcome> SynchronizeDescriptor(
             int descriptor, bool fullSync, string? path = null) =>
             Invoke("SynchronizeDescriptor", path, () => SystemFileSystemPrimitives.Instance.SynchronizeDescriptor(descriptor, fullSync, path));

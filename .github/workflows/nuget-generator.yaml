@@ -164,7 +164,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 10.0.302
+          dotnet-version: 11.0.100
 
       - name: Restore release validation tool
         run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -173,7 +173,7 @@ jobs:
         run: >-
           dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-restore
 
       - name: Validate release inputs, tag, and main ancestry
@@ -185,7 +185,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -205,7 +205,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -225,7 +225,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -281,6 +281,7 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
+            11.0.100
             10.0.302
             9.0.119
             8.0.423
@@ -295,7 +296,7 @@ jobs:
         run: >-
           dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-restore
 
       - name: Download frozen fixture bundle
@@ -305,7 +306,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -477,7 +478,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -539,7 +540,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 10.0.302
+          dotnet-version: 11.0.100
 
       - name: Restore release validation tool
         run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -548,7 +549,7 @@ jobs:
         run: >-
           dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-restore
 
       - name: Retrieve original release candidate
@@ -558,7 +559,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -577,7 +578,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -594,7 +595,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -648,7 +649,7 @@ jobs:
           dotnet run `
             --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
             --configuration Release `
-            --framework net10.0 `
+            --framework net11.0 `
             --no-restore `
             -- `
             --derive-bundle $bundle `
@@ -896,7 +897,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        framework: [net8.0, net9.0, net10.0]
+        framework: [net8.0, net9.0, net10.0, net11.0]
 
     steps:
       - uses: actions/checkout@v6
@@ -946,6 +947,7 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
+            11.0.100
             10.0.302
             9.0.119
             8.0.423
@@ -957,7 +959,7 @@ jobs:
         run: >-
           dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-restore
 
       - name: Configure isolated global packages folder
@@ -988,7 +990,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -1293,7 +1295,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 10.0.302
+          dotnet-version: 11.0.100
 
       - name: Restore release validation tool
         run: dotnet restore tools/FhirPkg.Release/FhirPkg.Release.csproj
@@ -1302,7 +1304,7 @@ jobs:
         run: >-
           dotnet build tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-restore
 
       - name: Revalidate release tag and main ancestry
@@ -1313,7 +1315,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -1331,7 +1333,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -1356,7 +1358,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -1376,7 +1378,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -1405,7 +1407,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --
@@ -1436,7 +1438,7 @@ jobs:
           dotnet run
           --project tools/FhirPkg.Release/FhirPkg.Release.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --no-restore
           --

@@ -139,7 +139,7 @@ internal sealed class ReleasePackageValidator
             "FhirPkg.dll",
         ];
         foreach (string framework in
-                 ReleasePackageValidationCommon.Frameworks)
+                 ReleaseFrameworkPolicy.Frameworks)
         {
             string toolRoot = $"tools/{framework}/any";
             foreach (string toolFile in requiredToolFiles)
@@ -225,7 +225,7 @@ internal sealed class ReleasePackageValidator
         HashSet<string> entryNames)
     {
         foreach (string framework in
-                 ReleasePackageValidationCommon.Frameworks)
+                 ReleaseFrameworkPolicy.Frameworks)
         {
             string requiredEntry = $"lib/{framework}/FhirPkg.dll";
             if (!entryNames.Contains(requiredEntry))

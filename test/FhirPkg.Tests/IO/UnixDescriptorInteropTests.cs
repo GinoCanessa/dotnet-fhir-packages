@@ -242,6 +242,72 @@ public sealed class UnixDescriptorInteropTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void DescriptorFlagSeams_CaptureOnceAndPreserveFlags(bool setting, bool succeeds)
+    {
+        const int flags = 0x01020882;
+        List<string> calls = [];
+        int Invoke(int descriptor, int command)
+        {
+            descriptor.ShouldBe(7);
+            command.ShouldBe(setting ? 4 : 3);
+            calls.Add("native");
+            return succeeds ? setting ? 0 : flags : -1;
+        }
+        int Error()
+        {
+            calls.ShouldBe(["native"]);
+            calls.Add("errno");
+            return 123456;
+        }
+        string path = Path.Combine(_root, "descriptor-flags");
+        FileSystemReplayOutcomeKind kind;
+        FileSystemPrimitiveFailure? failure;
+        if (setting)
+        {
+            FileSystemReplayOutcome<bool> outcome = NativeFileSystemPrimitives.SetDescriptorFlags(
+                7, flags, (descriptor, command, value) =>
+                {
+                    value.ShouldBe(flags);
+                    return Invoke(descriptor, command);
+                }, Error, path);
+            kind = outcome.Kind;
+            failure = outcome.PrimitiveFailure;
+            if (succeeds)
+                outcome.Value.ShouldBeTrue();
+        }
+        else
+        {
+            FileSystemReplayOutcome<int> outcome = NativeFileSystemPrimitives.GetDescriptorFlags(7, Invoke, Error, path);
+            kind = outcome.Kind;
+            failure = outcome.PrimitiveFailure;
+            if (succeeds)
+                outcome.Value.ShouldBe(flags);
+        }
+
+        calls.ShouldBe(["native", "errno"]);
+        kind.ShouldBe(succeeds ? FileSystemReplayOutcomeKind.Completed : FileSystemReplayOutcomeKind.PrimitiveFailure);
+        if (succeeds)
+        {
+            failure.ShouldBeNull();
+        }
+        else
+        {
+            failure!.ReplaySafety.ShouldBe(FileSystemReplaySafety.Safe);
+            failure.Exception.ShouldBeOfType<IOException>().InnerException.ShouldBeOfType<Win32Exception>()
+                .NativeErrorCode.ShouldBe(123456);
+            FileSystemFailureContext.TryGetOrigin(failure.Exception, out FileSystemFailureContext? context).ShouldBeTrue();
+            context!.Operation.ShouldBe(setting ? "fcntl(F_SETFL)" : "fcntl(F_GETFL)");
+            context.Path.ShouldBe(path);
+            context.NativeErrorCode.ShouldBe(123456);
+            context.NativeFlags.ShouldBe(setting ? flags : 3);
+        }
+    }
+
     [Fact]
     public void RealUnix_ModeOpenAndNoModeOpenPreservePermissions()
     {

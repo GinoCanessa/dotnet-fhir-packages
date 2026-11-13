@@ -7,6 +7,7 @@ on:
       - 'src/**'
       - 'test/**'
       - 'FhirPkg.sln'
+      - 'Directory.Build.props'
       - 'Directory.Packages.props'
       - 'global.json'
       - '.github/scripts/**'
@@ -19,6 +20,7 @@ on:
       - 'src/**'
       - 'test/**'
       - 'FhirPkg.sln'
+      - 'Directory.Build.props'
       - 'Directory.Packages.props'
       - 'global.json'
       - '.github/scripts/**'
@@ -88,6 +90,7 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
+            11.0.100
             10.0.302
             9.0.119
             8.0.423
@@ -98,12 +101,12 @@ jobs:
       - name: Build
         run: dotnet build FhirPkg.sln --configuration Release --no-restore
 
-      # FhirPkg.Tests multi-targets net10.0;net9.0;net8.0 and this step
+      # FhirPkg.Tests multi-targets net11.0;net10.0;net9.0;net8.0 and this step
       # deliberately does not pin --framework, so MSBuild's
-      # DispatchToInnerBuildsWithVSTestTarget would otherwise launch three
+      # DispatchToInnerBuildsWithVSTestTarget would otherwise launch four
       # concurrent vstest.console + testhost pairs on a 4 vCPU runner. That
-      # oversubscription starved testhost startup and silently aborted two of
-      # the three per-framework runs. Serializing them via the
+      # oversubscription previously starved testhost startup and silently
+      # aborted per-framework runs. Serializing them via the
       # TestTfmsInParallel property is the fix -- do not remove this as an
       # "optimization".
       - name: Unit tests
@@ -114,11 +117,11 @@ jobs:
           --verbosity normal
           -p:TestTfmsInParallel=false
 
-      - name: Remaining integration tests (net10.0)
+      - name: Remaining integration tests (net11.0)
         run: >-
           dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
           --configuration Release
-          --framework net10.0
+          --framework net11.0
           --no-build
           --verbosity normal
           --filter "FullyQualifiedName!~HardenedInstallationIntegrationTests&FullyQualifiedName!~CrossProcessCacheIntegrationTests"
@@ -131,7 +134,7 @@ jobs:
           dotnet run `
             --project test/FhirPkg.Qualification/FhirPkg.Qualification.csproj `
             --configuration Release `
-            --framework net10.0 `
+            --framework net11.0 `
             --no-build `
             -- `
             --validate-only true `
@@ -147,7 +150,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        framework: [net8.0, net9.0, net10.0]
+        framework: [net8.0, net9.0, net10.0, net11.0]
 
     steps:
       - uses: actions/checkout@v6
@@ -178,6 +181,7 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
+            11.0.100
             10.0.302
             9.0.119
             8.0.423

@@ -46,7 +46,7 @@ into your .NET applications.
 | [SDK API Reference](sdk-api-reference.md) | Reference for the supported public surface — interfaces, models, enums, and options. |
 | [Package Request Process](process.md) | End-to-end walkthrough of resolution, download, extraction, caching, and indexing. |
 | [Version Resolution Policy](versioning-policy.md) | Configuration snapshots, fixups, pre-release rules, and FHIR-release filtering. |
-| [Release Process and Evidence](releases/README.md) | Exact-commit source CI, immutable candidate handoff, 3 x 3 qualification, publication gates, and evidence. |
+| [Release Process and Evidence](releases/README.md) | Exact-commit source CI, immutable candidate handoff, 3 x 4 qualification (twelve jobs), publication gates, and evidence. |
 | [Changelog](../CHANGELOG.md) | User-visible changes for both packages, by release. |
 
 ## CLI (Command-Line Tool)
@@ -72,7 +72,8 @@ of any one implementation.
 
 ### CLI (.NET Global Tool)
 
-Running `fhir-pkg` requires the [.NET 8 SDK or runtime](https://dotnet.microsoft.com/) or later (.NET 8, 9, and 10 are supported; .NET 10 is recommended).
+Running `fhir-pkg` requires the [.NET 8 SDK or runtime](https://dotnet.microsoft.com/)
+or later (.NET 8, 9, 10, and 11 are supported; .NET 11 is recommended).
 
 The CLI pulls in the following packages (resolved automatically on install):
 
@@ -85,7 +86,8 @@ The CLI pulls in the following packages (resolved automatically on install):
 ### SDK (NuGet Library)
 
 Integrating **fhir-pkg-lib** into your application requires a project targeting **net8.0**
-or later (net8.0, net9.0, and net10.0 are supported; net10.0 is recommended).
+or later (`net8.0`, `net9.0`, `net10.0`, and `net11.0` are supported;
+`net11.0` is recommended).
 
 | Package | Purpose |
 |---------|---------|
@@ -99,7 +101,17 @@ All four packages are transitive — they are restored automatically when you ad
 
 ### Development (Working With This Project)
 
-Building and testing locally requires the [.NET 8 SDK](https://dotnet.microsoft.com/) or later (.NET 10 is recommended).
+Building and testing this checkout requires the **stable [.NET 11 SDK](https://dotnet.microsoft.com/),
+version `11.0.100` or later within .NET 11**. `global.json` permits later
+.NET 11 feature bands with `latestFeature` roll-forward and disables prerelease
+SDKs. This contributor requirement is separate from the SDK/CLI consumer
+compatibility above.
+
+All seven projects inherit the four supported targets from
+`Directory.Build.props`. Unqualified builds and tests cover `net8.0`, `net9.0`,
+`net10.0`, and `net11.0`; explicit single-framework development uses `net11.0`.
+Running every test target requires the .NET 8, 9, 10, and 11 runtimes, not just
+the .NET 11 SDK.
 
 | Package | Purpose |
 |---------|---------|
@@ -111,6 +123,33 @@ Building and testing locally requires the [.NET 8 SDK](https://dotnet.microsoft.
 | [coverlet.collector](https://www.nuget.org/packages/coverlet.collector) | Code-coverage collection |
 
 All test dependencies are restored automatically by `dotnet restore`.
+
+#### Building and testing this checkout
+
+Primary single-framework development examples, matching [AGENTS.md](../AGENTS.md):
+
+```bash
+dotnet build src/FhirPkg/FhirPkg.csproj --framework net11.0
+dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net11.0 \
+  --filter "FullyQualifiedName~DiskPackageCacheTests"
+```
+
+Comprehensive build and per-project tests (all four frameworks):
+
+```bash
+dotnet restore FhirPkg.sln
+dotnet build FhirPkg.sln
+dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj
+dotnet test test/FhirPkg.IntegrationTests/FhirPkg.IntegrationTests.csproj
+```
+
+Legacy .NET 10 compatibility variants (not the development default):
+
+```bash
+dotnet build src/FhirPkg/FhirPkg.csproj --framework net10.0
+dotnet test test/FhirPkg.Tests/FhirPkg.Tests.csproj --framework net10.0 \
+  --filter "FullyQualifiedName~DiskPackageCacheTests"
+```
 
 ## Getting Started
 

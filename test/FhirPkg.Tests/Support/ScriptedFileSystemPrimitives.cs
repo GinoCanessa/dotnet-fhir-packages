@@ -204,6 +204,14 @@ internal sealed class ScriptedFileSystemPrimitives : IFileSystemPrimitives
         Invoke(new FileSystemPrimitiveCall("DuplicateDescriptor", path, Descriptor: descriptor, Flags: command),
             SystemFallback(() => SystemFileSystemPrimitives.Instance.DuplicateDescriptor(descriptor, command, minimum, path)));
 
+    public FileSystemReplayOutcome<int> GetDescriptorFlags(int descriptor, string? path = null) =>
+        Invoke(new FileSystemPrimitiveCall("GetDescriptorFlags", path, Descriptor: descriptor),
+            SystemFallback(() => SystemFileSystemPrimitives.Instance.GetDescriptorFlags(descriptor, path)));
+
+    public FileSystemReplayOutcome<bool> SetDescriptorFlags(int descriptor, int flags, string? path = null) =>
+        Invoke(new FileSystemPrimitiveCall("SetDescriptorFlags", path, Descriptor: descriptor, Flags: flags),
+            SystemFallback(() => SystemFileSystemPrimitives.Instance.SetDescriptorFlags(descriptor, flags, path)));
+
     public FileSystemReplayOutcome<FileSystemDirectorySyncOutcome> SynchronizeDescriptor(int descriptor, bool fullSync, string? path = null) =>
         Invoke(new FileSystemPrimitiveCall(
             "SynchronizeDescriptor", path, Descriptor: descriptor, Flags: fullSync ? 1 : 0),

@@ -15,6 +15,8 @@ internal static class NativeFileSystemPrimitives
     internal const int DarwinDuplicateFileDescriptorCloseOnExec = 67;
     internal const int MinimumTransferDescriptor = 3;
 
+    private const int GetFileStatusFlags = 3;
+    private const int SetFileStatusFlags = 4;
     private const int MacFullFileSync = 51;
     private const int AtFileDescriptorCurrentWorkingDirectory = -100;
     private const int AtSymbolicLinkNoFollow = 0x100;
@@ -343,6 +345,50 @@ internal static class NativeFileSystemPrimitives
             : Failed<int>(
                 "The package manifest descriptor could not be duplicated safely.",
                 result.Error, "fcntl(F_DUPFD_CLOEXEC)", path, nativeFlags: command);
+
+    internal static FileSystemReplayOutcome<int> GetDescriptorFlags(int descriptor, string? path = null) =>
+        GetDescriptorFlagsResult(UnixDescriptorInterop.Control(descriptor, GetFileStatusFlags), path);
+
+    internal static FileSystemReplayOutcome<int> GetDescriptorFlags(
+        int descriptor,
+        Func<int, int, int> control,
+        Func<int> getLastError,
+        string? path = null)
+    {
+        int result = control(descriptor, GetFileStatusFlags);
+        int error = getLastError();
+        return GetDescriptorFlagsResult(new UnixDescriptorResult(result, error), path);
+    }
+
+    private static FileSystemReplayOutcome<int> GetDescriptorFlagsResult(UnixDescriptorResult result, string? path) =>
+        result.ReturnValue >= 0
+            ? FileSystemReplayOutcome<int>.Complete(result.ReturnValue)
+            : Failed<int>(
+                "The file descriptor flags could not be read.",
+                result.Error, "fcntl(F_GETFL)", path, nativeFlags: GetFileStatusFlags);
+
+    internal static FileSystemReplayOutcome<bool> SetDescriptorFlags(int descriptor, int flags, string? path = null) =>
+        SetDescriptorFlagsResult(UnixDescriptorInterop.ControlInteger(descriptor, SetFileStatusFlags, flags), flags, path);
+
+    internal static FileSystemReplayOutcome<bool> SetDescriptorFlags(
+        int descriptor,
+        int flags,
+        Func<int, int, int, int> control,
+        Func<int> getLastError,
+        string? path = null)
+    {
+        int result = control(descriptor, SetFileStatusFlags, flags);
+        int error = getLastError();
+        return SetDescriptorFlagsResult(new UnixDescriptorResult(result, error), flags, path);
+    }
+
+    private static FileSystemReplayOutcome<bool> SetDescriptorFlagsResult(
+        UnixDescriptorResult result, int flags, string? path) =>
+        result.ReturnValue == 0
+            ? FileSystemReplayOutcome<bool>.Complete(true)
+            : Failed<bool>(
+                "The file descriptor flags could not be set.",
+                result.Error, "fcntl(F_SETFL)", path, nativeFlags: flags);
 
     internal static FileSystemReplayOutcome<FileSystemDirectorySyncOutcome> SynchronizeDescriptor(
         int descriptor,

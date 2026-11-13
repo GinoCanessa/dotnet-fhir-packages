@@ -5,6 +5,11 @@ The `Publish synchronized FhirPkg SDK and CLI` workflow releases
 release requires both primary packages to match the same immutable candidate;
 neither package is considered independently complete.
 
+The dispatch and publication instructions below are for maintainers. Agents
+must not dispatch `nuget-generator.yaml` in any mode (release, validation-only,
+or recovery) or `fixture-drift.yaml`, invoke the publish workflow locally, or
+publish packages from a local machine.
+
 ## Administrator preflight
 
 Before enabling publication, a repository administrator must:
@@ -154,6 +159,11 @@ fhir-pkg-cli.<version>.sha512
 release-metadata.json
 ```
 
+Build and pack retain all four supported targets: `net8.0`, `net9.0`,
+`net10.0`, and `net11.0`. The release tool and non-matrix harness paths use
+the primary `net11.0` framework. The validator requires all four package,
+symbol, and embedded-SDK framework legs regardless of the runtime executing it.
+
 Candidate validation checks both nuspec identities, versions, repository URL
 and full commit, SDK library assets, CLI `DotnetTool` metadata and command
 settings, both symbol layouts, both SHA-512 manifests, metadata filenames and
@@ -215,10 +225,12 @@ No frozen fixture bundle for test/FhirPkg.Qualification/qualification-corpus.jso
 Do exactly that. A drift check dispatched at the tag freezes a bundle for the
 tag's own corpus, and its head commit is already on `main`.
 
-Until `hl7.fhir.us.core#6.0.0` is re-pinned in the corpus, no bundle can be
-frozen: packages2.fhir.org now serves bytes for it that differ from its pin,
-so every drift run fails on that row, and every release and validation run
-stops at this error. The re-pin is a separate change.
+The `hl7.fhir.us.core#6.0.0` pin was updated in commit `ee4c3c7` after the
+upstream archive changed. The
+[November 9 drift check](https://github.com/GinoCanessa/dotnet-fhir-packages/actions/runs/42656908733)
+passed on `main` and froze a bundle for the updated corpus. The earlier drift
+blocker is resolved; still perform the pre-release drift check described under
+[Preparing the changelog](#preparing-the-changelog).
 
 `pack-release-candidate` downloads the located bundle with `fetch-artifact`,
 which requires the downloaded zip's SHA-256 to equal the digest GitHub
@@ -253,7 +265,7 @@ Qualification inputs: bundle sha256:<digest> · corpus <sha256> · approvals: <n
 answer: a URL outside the frozen routes, or a method other than `GET` or
 `HEAD`. The fixture registry answers it with `404` and records it, and the
 case fails with `Unrouted fixture request(s): <METHOD> <URL>; …`, identically
-in all nine jobs. It points at a gap between the harness and its frozen
+in all twelve jobs. It points at a gap between the harness and its frozen
 inputs; it is neither upstream drift nor a transient failure that a re-run
 would clear.
 
@@ -282,9 +294,10 @@ The workflow enforces this dependency chain:
    ran, and fails unless the expected one succeeded and the other was skipped.
    It checks every hash, digest, and run id, and writes the
    `### Release identity` summary. Every later job reads the identity from it.
-6. Nine `qualify-<os>-<framework>` jobs run Ubuntu, Windows, and macOS crossed
-   with `net8.0`, `net9.0`, and `net10.0`.
-7. `publish-nuget` runs only after all nine qualification jobs pass, and only
+6. Twelve `qualify-<os>-<framework>` jobs run Ubuntu, Windows, and macOS
+   (`ubuntu-latest`, `windows-latest`, and `macos-latest`) crossed with
+   `net8.0`, `net9.0`, `net10.0`, and `net11.0`.
+7. `publish-nuget` runs only after all twelve qualification jobs pass, and only
    for a published GitHub Release (`release.published`) or for a recovery
    dispatch with `validation_only=false` whose GitHub Release is published.
    Just before it uses the credential, it re-checks that the Release is
@@ -310,9 +323,11 @@ Every qualification job downloads and revalidates the same candidate, from the
 run that produced it, and records the same SDK hash, CLI hash, artifact
 digest, and bundle SHA-256. It then:
 
-- restores `fhir-pkg-lib` from the candidate, rejects a project reference,
-  proves `lib/<framework>/FhirPkg.dll` was selected, and runs the
-  qualification corpus offline from the verified bundle (see
+- restores `fhir-pkg-lib` from the candidate with singular
+  `-p:TargetFramework=<framework>`, checks both the qualification harness and
+  process host's `project.assets.json` for the exact candidate package and
+  selected `lib/<framework>/FhirPkg.dll`, rejects project references, and
+  runs the qualification corpus offline from the verified bundle (see
   [Frozen qualification inputs](#frozen-qualification-inputs));
 - installs `fhir-pkg-cli` with explicit version, framework, tool path,
   NuGet configuration, and `--no-cache`;
@@ -330,6 +345,8 @@ failed only because a required artifact was unavailable) or independent.
 Every rejected artifact and independent failure is also an error annotation.
 
 No qualification or publication job rebuilds either package.
+Local source tests and synthetic package fixtures do not replace this
+twelve-job exact-package qualification evidence.
 
 ## Validation-only run
 
@@ -371,7 +388,7 @@ gh run view <run-id> --json headSha,conclusion,jobs
 The head SHA must equal the tag SHA, `validate-release` must locate the
 bundle, source CI must pass, the candidate must contain exactly seven files,
 `pack-release-candidate` must upload `fhir-pkg-<version>-fixture-bundle` after
-the candidate, `release-identity` must show both identities, all nine
+the candidate, `release-identity` must show both identities, all twelve
 qualification jobs must report the same two package hashes, artifact digest,
 and bundle SHA-256, each tool install must select its matrix framework, and
 `publish-nuget` must remain skipped.
@@ -507,7 +524,7 @@ Recovery finishes an already-authorized release from its original run,
 including after GitHub's 30-day re-run window has closed. It is a third,
 dispatch-only mode of the same workflow, run at the release tag. It verifies
 GitHub's own records of the original run, retrieves the original candidate and
-qualification inputs by digest, re-qualifies them through the same nine jobs,
+qualification inputs by digest, re-qualifies them through the same twelve jobs,
 and publishes through the same protected `publish-nuget` job.
 
 Recovery never re-runs source CI and never rebuilds: `exact-source-ci` and
@@ -626,13 +643,13 @@ only in a dry run does R2 also accept a `workflow_dispatch` original. R1 is
 only reported, so the Release need not be published, and `publish-nuget` is
 always skipped, because it requires `validation_only` to be `false`.
 Everything else runs as in a real recovery: R2–R5, the digest-checked
-retrieval, any approval, the nine qualification jobs, and `release-identity`.
+retrieval, any approval, the twelve qualification jobs, and `release-identity`.
 
 To rehearse the whole path before a real release depends on it, dispatch a
 [validation-only run](#validation-only-run) at a test tag, then a dry run at
 the same tag with `recover_run_id` naming that run. Expect R1 `reported`,
 R2–R4 `passed`, `retrieve-release-candidate` to fetch both artifacts by digest
-and revalidate the candidate, all nine qualification jobs to pass from the
+and revalidate the candidate, all twelve qualification jobs to pass from the
 original bundle, and `publish-nuget` to be skipped.
 
 ## Evidence record
@@ -670,10 +687,13 @@ corpus blob, and approval author; for a recovered release, the drift run and
 corpus blob are in the original run's summary. The approval file at its
 commit gives each approval's artifact, hashes, approver, and reason.
 
-Also record all nine qualification reports, the selected framework and CLI
-informational version for each matrix job, and the corpus outcome. NuGet.org
-indexes symbols asynchronously, so symbol indexing is post-workflow evidence.
-Never rewrite the release tag to add evidence.
+Also record all twelve qualification reports across the three OSes and four
+frameworks in [Required release gates](#required-release-gates), the selected
+framework and CLI informational version for each matrix job, and the corpus
+outcome. NuGet.org indexes symbols asynchronously, so symbol indexing is
+post-workflow evidence. Never rewrite the release tag to add evidence.
+Historical release records retain their originally observed frameworks and
+results; do not rewrite them to claim new framework coverage.
 
 See [`2026.722.1030.md`](2026.722.1030.md) for the historical SDK-only release
 that prompted the synchronized pipeline.

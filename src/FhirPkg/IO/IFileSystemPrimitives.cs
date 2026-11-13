@@ -101,6 +101,10 @@ internal interface IFileSystemPrimitives
 
     FileSystemReplayOutcome<int> DuplicateDescriptor(int descriptor, int command, int minimum, string? path = null);
 
+    FileSystemReplayOutcome<int> GetDescriptorFlags(int descriptor, string? path = null);
+
+    FileSystemReplayOutcome<bool> SetDescriptorFlags(int descriptor, int flags, string? path = null);
+
     FileSystemReplayOutcome<FileSystemDirectorySyncOutcome> SynchronizeDescriptor(
         int descriptor,
         bool fullSync,
