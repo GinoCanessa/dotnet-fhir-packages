@@ -125,6 +125,16 @@ public record PackageVersionInfo
     [JsonPropertyName("date")]
     public string? PublicationDate { get; init; }
 
+    /// <summary>Raw source-specific listing metadata, without eligibility interpretation.</summary>
+    /// <remarks>
+    /// <see cref="JsonValueKind.Undefined"/> means absent; <see cref="JsonValueKind.Null"/>
+    /// means explicit null. Strings retain their exact decoded contents and other JSON
+    /// kinds retain their raw values. Deserialized elements own their value; callers
+    /// supplying an element programmatically are responsible for its document lifetime.
+    /// </remarks>
+    [JsonPropertyName("unlisted")]
+    public JsonElement Unlisted { get; init; }
+
     /// <summary>The number of FHIR resources in this package version.</summary>
     [JsonPropertyName("count")]
     public int? ResourceCount { get; init; }
@@ -187,6 +197,9 @@ internal sealed class PackageVersionInfoJsonConverter : JsonConverter<PackageVer
             Canonical = GetString(root, "canonical"),
             Kind = GetString(root, "kind"),
             PublicationDate = GetString(root, "date"),
+            Unlisted = TryGetProperty(root, "unlisted", out JsonElement unlisted)
+                ? unlisted.Clone()
+                : default,
             ResourceCount = GetInt32(root, "count", options),
             License = GetString(root, "license"),
             Url = GetString(root, "url"),
@@ -233,6 +246,12 @@ internal sealed class PackageVersionInfoJsonConverter : JsonConverter<PackageVer
         WriteString(writer, "canonical", value.Canonical);
         WriteString(writer, "kind", value.Kind);
         WriteString(writer, "date", value.PublicationDate);
+        if (value.Unlisted.ValueKind != JsonValueKind.Undefined)
+        {
+            writer.WritePropertyName("unlisted");
+            value.Unlisted.WriteTo(writer);
+        }
+
         if (value.ResourceCount is int resourceCount)
         {
             writer.WriteNumber("count", resourceCount);
