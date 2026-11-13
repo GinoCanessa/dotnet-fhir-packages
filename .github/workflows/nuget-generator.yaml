@@ -1264,6 +1264,10 @@ jobs:
       }}
     runs-on: ubuntu-latest
     environment: nuget.org
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     timeout-minutes: 90
 
     steps:
@@ -1387,10 +1391,17 @@ jobs:
           --version "$RELEASE_VERSION"
           --repository-commit "${{ needs.validate.outputs.commit }}"
 
+      - name: Authenticate CLI publication to NuGet.org
+        if: steps.publication_state.outputs.cli_state == 'missing'
+        id: nuget_cli
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       - name: Push CLI primary package to NuGet.org
         if: steps.publication_state.outputs.cli_state == 'missing'
         env:
-          NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
+          NUGET_API_KEY: ${{ steps.nuget_cli.outputs.NUGET_API_KEY }}
         run: >-
           dotnet nuget push
           "${{ steps.candidate.outputs.cli_package_path }}"
@@ -1418,10 +1429,17 @@ jobs:
           --version "$RELEASE_VERSION"
           --repository-commit "${{ needs.validate.outputs.commit }}"
 
+      - name: Authenticate SDK publication to NuGet.org
+        if: steps.publication_state.outputs.sdk_state == 'missing'
+        id: nuget_sdk
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       - name: Push SDK primary package to NuGet.org
         if: steps.publication_state.outputs.sdk_state == 'missing'
         env:
-          NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
+          NUGET_API_KEY: ${{ steps.nuget_sdk.outputs.NUGET_API_KEY }}
         run: >-
           dotnet nuget push
           "${{ steps.candidate.outputs.sdk_package_path }}"
@@ -1449,9 +1467,15 @@ jobs:
           --version "$RELEASE_VERSION"
           --repository-commit "${{ needs.validate.outputs.commit }}"
 
+      - name: Authenticate symbol publication to NuGet.org
+        id: nuget_symbols
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       - name: Push CLI symbols package to NuGet.org
         env:
-          NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
+          NUGET_API_KEY: ${{ steps.nuget_symbols.outputs.NUGET_API_KEY }}
         run: >-
           dotnet nuget push
           "${{ steps.candidate.outputs.cli_symbols_path }}"
@@ -1461,7 +1485,7 @@ jobs:
 
       - name: Push SDK symbols package to NuGet.org
         env:
-          NUGET_API_KEY: ${{ secrets.GINOC_NUGET }}
+          NUGET_API_KEY: ${{ steps.nuget_symbols.outputs.NUGET_API_KEY }}
         run: >-
           dotnet nuget push
           "${{ steps.candidate.outputs.sdk_symbols_path }}"

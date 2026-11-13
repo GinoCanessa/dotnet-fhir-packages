@@ -119,9 +119,10 @@ public class ReleaseWorkflowContractTests
             releaseWorkflow,
             "environment: nuget.org").ShouldBe(1);
         releaseWorkflow.ShouldContain("vars.NUGET_PUBLISH_ENVIRONMENT_READY");
+        releaseWorkflow.ShouldNotContain("secrets.GINOC_NUGET");
         CountOccurrences(
             releaseWorkflow,
-            "secrets.GINOC_NUGET").ShouldBe(4);
+            ".outputs.NUGET_API_KEY").ShouldBe(4);
         CountOccurrences(
             releaseWorkflow,
             "dotnet nuget push").ShouldBe(4);
@@ -226,6 +227,81 @@ public class ReleaseWorkflowContractTests
         qualificationProject.ShouldNotContain("<TargetFrameworks>");
         testProject.ShouldNotContain(
             "..\\..\\.github\\scripts\\*.ps1");
+    }
+
+    [Fact]
+    public void ReleaseWorkflow_UsesJobScopedTrustedPublishingAfterPreflight()
+    {
+        string releaseWorkflow = ReadContract("nuget-generator.yaml");
+        string publishSection = GetSection(
+            releaseWorkflow,
+            "  publish:\n",
+            null);
+        string publishHeader = GetSection(
+            publishSection,
+            "  publish:\n",
+            "    steps:\n");
+
+        publishHeader.ShouldContain(
+            "    permissions:\n      contents: read\n      actions: read\n      id-token: write\n");
+        CountOccurrences(releaseWorkflow, "id-token:").ShouldBe(1);
+        CountOccurrences(releaseWorkflow, "NuGet/login@v1").ShouldBe(3);
+        CountOccurrences(publishSection, "NuGet/login@v1").ShouldBe(3);
+        CountOccurrences(releaseWorkflow, "secrets.NUGET_USER").ShouldBe(3);
+
+        (string Name, string Id, string PushName, string? Condition, string Prerequisite)[] logins =
+        [
+            ("CLI", "nuget_cli", "CLI primary",
+                "steps.publication_state.outputs.cli_state == 'missing'",
+                "inspect-publication"),
+            ("SDK", "nuget_sdk", "SDK primary",
+                "steps.publication_state.outputs.sdk_state == 'missing'",
+                "Verify published CLI primary matches candidate"),
+            ("symbol", "nuget_symbols", "CLI symbols", null,
+                "Verify published SDK primary matches candidate"),
+        ];
+
+        foreach ((string name, string id, string pushName, string? condition, string prerequisite) in logins)
+        {
+            string loginMarker =
+                $"      - name: Authenticate {name} publication to NuGet.org\n";
+            string pushMarker =
+                $"      - name: Push {pushName} package to NuGet.org\n";
+            string loginSection = GetSection(
+                publishSection,
+                loginMarker,
+                pushMarker);
+            string pushHeader = GetSection(
+                publishSection,
+                pushMarker,
+                "        run: >-\n");
+
+            loginSection.ShouldContain($"        id: {id}\n");
+            loginSection.ShouldContain("        uses: NuGet/login@v1\n");
+            loginSection.ShouldContain("          user: ${{ secrets.NUGET_USER }}\n");
+            pushHeader.ShouldContain(
+                "          NUGET_API_KEY: ${{ steps." + id + ".outputs.NUGET_API_KEY }}\n");
+            if (condition is not null)
+            {
+                loginSection.ShouldContain($"        if: {condition}\n");
+                pushHeader.ShouldContain($"        if: {condition}\n");
+            }
+            else
+            {
+                loginSection.ShouldNotContain("        if:");
+            }
+
+            int prerequisiteIndex = publishSection.IndexOf(
+                prerequisite,
+                StringComparison.Ordinal);
+            prerequisiteIndex.ShouldBeGreaterThanOrEqualTo(0);
+            prerequisiteIndex.ShouldBeLessThan(
+                publishSection.IndexOf(loginMarker, StringComparison.Ordinal));
+        }
+
+        CountOccurrences(
+            publishSection,
+            "NUGET_API_KEY: ${{ steps.nuget_symbols.outputs.NUGET_API_KEY }}").ShouldBe(2);
     }
 
     [Fact]
@@ -503,7 +579,7 @@ public class ReleaseWorkflowContractTests
         releasePublishedIndex.ShouldBeGreaterThanOrEqualTo(0);
         releasePublishedIndex.ShouldBeLessThan(
             publishSection.IndexOf(
-                "secrets.GINOC_NUGET",
+                "uses: NuGet/login@v1",
                 StringComparison.Ordinal));
 
         validateSection.ShouldContain("verify-recovery");

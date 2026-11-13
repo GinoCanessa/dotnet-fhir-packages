@@ -17,22 +17,30 @@ Before enabling publication, a repository administrator must:
 1. Configure the protected `nuget.org` environment with required reviewers or
    other deployment protection rules.
 2. Define `NUGET_PUBLISH_ENVIRONMENT_READY=true` in that environment.
-3. Store `GINOC_NUGET` only in that environment, not as a repository-scoped
-   secret.
-4. Confirm that the NuGet account or scoped API key can push both
-   `fhir-pkg-cli` and `fhir-pkg-lib`.
-5. Confirm that the `nuget.org` environment's deployment branch and tag rule
+3. Store `NUGET_USER` in that environment. Its value is the nuget.org profile
+   username, not an email address.
+4. Configure a [NuGet trusted-publishing policy](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing)
+   with repository owner `GinoCanessa`, repository `dotnet-fhir-packages`,
+   workflow filename `nuget-generator.yaml` (without the directory), and
+   environment `nuget.org`.
+5. Confirm that the policy's selected user or organization owns both
+   `fhir-pkg-cli` and `fhir-pkg-lib`, and permits publishing new versions of
+   both packages, for example with the package glob `fhir-pkg-*`.
+6. Confirm that the `nuget.org` environment's deployment branch and tag rule
    admits the release tags for `workflow_dispatch` runs too, not only for
    `release` events: a [recovery](#recovery) dispatch runs at the release tag
    and publishes through the same environment.
-6. Brief the environment's required reviewers to compare, before approving
+7. Brief the environment's required reviewers to compare, before approving
    `publish-nuget`, both identities in the run's `release-identity` summary
    with the release being approved: the product candidate, and the
    qualification inputs it was qualified on (see
    [Required release gates](#required-release-gates)).
 
-The workflow publishes the CLI primary first. A key that lacks CLI ownership
-or push scope therefore fails before a new SDK-only release can be created.
+Only `publish-nuget` has `id-token: write`. It uses `NuGet/login@v1` to
+exchange a GitHub OIDC token for a temporary NuGet API key, so no long-lived
+API-key secret is needed for new releases. The workflow publishes the CLI
+primary first. A policy that lacks CLI ownership or push scope therefore
+fails before a new SDK-only release can be created.
 
 ## Fixture drift check
 
@@ -399,9 +407,9 @@ dispatch only finishes a release that event already authorized.
 
 ## Publication ordering and reconciliation
 
-NuGet publication is not transactional across two package IDs. Before using
-`GINOC_NUGET`, `publish-nuget` downloads and revalidates the candidate, then
-checks both primary package URLs:
+NuGet publication is not transactional across two package IDs. Before
+requesting any NuGet credential, `publish-nuget` downloads and revalidates the
+candidate, then checks both primary package URLs:
 
 - `missing` means that package may be pushed;
 - `verified` means the visible repository-signed package passed signature,
@@ -418,8 +426,11 @@ After that all-package preflight:
 5. Only after both primaries are verified, explicitly push the CLI `.snupkg`
    and SDK `.snupkg`, each with `--skip-duplicate`.
 
-The protected `nuget.org` environment is the only job that receives the NuGet
-credential.
+The protected `nuget.org` environment's `publish-nuget` job is the only job
+that receives NuGet credentials. Temporary keys last one hour, so it requests
+a fresh key immediately before each missing primary package push and another
+before the two symbol pushes. This avoids reusing a key across both primary
+packages' visibility waits.
 
 ## Failure recovery
 
@@ -442,6 +453,13 @@ credential.
   job, or use a recovery dispatch after the re-run window. Either way, its
   preflight verifies every primary package already accepted by NuGet.org
   before resuming the missing package or symbol pushes.
+- Reruns and recovery dispatches use the workflow at the original release
+  tag, not a newer workflow on `main`. To finish a release whose tagged
+  workflow still uses `GINOC_NUGET`, replace its expired API key with one
+  scoped to both packages and rerun the failed publication job. Retain that
+  secret until outstanding API-key-based releases are finished, then revoke
+  the key and delete the secret. Do not move an existing release tag to adopt
+  trusted publishing.
 - Never rebuild an expired candidate for the same version. If the candidate or
   its qualification inputs have expired, or the original run predates frozen
   qualification inputs, recovery refuses; release a new version.

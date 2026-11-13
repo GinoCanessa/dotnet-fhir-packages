@@ -10,6 +10,11 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+### Changed
+- Switched NuGet publication to trusted publishing with job-scoped GitHub
+  OIDC and short-lived credentials refreshed before primary and symbol
+  publication, replacing long-lived API-key secrets for new releases.
+
 ## [2026.1112.1330] - 2026-11-12
 
 ### Added
