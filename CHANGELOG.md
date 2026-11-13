@@ -11,6 +11,9 @@ qualification evidence) lives alongside this file under
 ## Current
 
 ### Changed
+- Removed NuGet package download-back checks from publication so accepted
+  primary uploads proceeded directly to symbol uploads without waiting for
+  indexing.
 - Switched NuGet publication to trusted publishing with job-scoped GitHub
   OIDC and short-lived credentials refreshed before primary and symbol
   publication, replacing long-lived API-key secrets for new releases.

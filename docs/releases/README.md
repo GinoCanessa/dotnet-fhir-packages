@@ -1,9 +1,10 @@
 # Releases and evidence
 
 The `Publish synchronized FhirPkg SDK and CLI` workflow releases
-`fhir-pkg-lib` and `fhir-pkg-cli` as one versioned package pair. A successful
-release requires both primary packages to match the same immutable candidate;
-neither package is considered independently complete.
+`fhir-pkg-lib` and `fhir-pkg-cli` as one versioned package pair. Successful
+publication requires NuGet.org to accept both primary packages and both symbol
+packages from the same immutable, qualified candidate. NuGet indexing and
+consumer-facing availability are asynchronous and do not gate the workflow.
 
 The dispatch and publication instructions below are for maintainers. Agents
 must not dispatch `nuget-generator.yaml` in any mode (release, validation-only,
@@ -405,32 +406,30 @@ For an actual release, publish a GitHub Release for that already-validated tag.
 The `release.published` event is the publication authorization; a recovery
 dispatch only finishes a release that event already authorized.
 
-## Publication ordering and reconciliation
+## Publication ordering and upload acceptance
 
 NuGet publication is not transactional across two package IDs. Before
-requesting any NuGet credential, `publish-nuget` downloads and revalidates the
-candidate, then checks both primary package URLs:
+requesting any NuGet credential, `publish-nuget` downloads the immutable
+candidate artifact from GitHub and revalidates its identities and expected
+hashes. It does not download packages back from NuGet.org.
 
-- `missing` means that package may be pushed;
-- `verified` means the visible repository-signed package passed signature,
-  metadata, provenance, and unsigned-entry byte comparison against the
-  candidate; and
-- any mismatch stops the job before any push.
+After candidate validation:
 
-After that all-package preflight:
+1. Push the CLI primary with `--no-symbols --skip-duplicate`.
+2. Push the SDK primary with `--no-symbols --skip-duplicate`.
+3. Push the CLI `.snupkg` and SDK `.snupkg`, each with `--skip-duplicate`.
 
-1. Push the CLI primary with `--no-symbols --skip-duplicate` when missing.
-2. Poll NuGet.org and verify the published CLI against the candidate.
-3. Push the SDK primary with `--no-symbols --skip-duplicate` when missing.
-4. Poll NuGet.org and verify the published SDK against the candidate.
-5. Only after both primaries are verified, explicitly push the CLI `.snupkg`
-   and SDK `.snupkg`, each with `--skip-duplicate`.
+Each accepted upload or skipped duplicate permits the next push. Other
+authentication or upload failures stop the job. Successful workflow completion
+means upload acceptance, not completed NuGet indexing, public availability, or
+verification of repository-signed packages. Indexing lag cannot block symbol
+uploads or fail the workflow. Duplicate packages are not automatically compared
+to the candidate; retries must use the original immutable candidate.
 
 The protected `nuget.org` environment's `publish-nuget` job is the only job
 that receives NuGet credentials. Temporary keys last one hour, so it requests
-a fresh key immediately before each missing primary package push and another
-before the two symbol pushes. This avoids reusing a key across both primary
-packages' visibility waits.
+a fresh key immediately before each primary package push and another before
+the two symbol pushes.
 
 ## Failure recovery
 
@@ -450,16 +449,18 @@ packages' visibility waits.
   [recovery](#recovery) dispatch while its candidate and qualification inputs
   are retained.
 - If publication partially succeeds, rerun only the failed `publish-nuget`
-  job, or use a recovery dispatch after the re-run window. Either way, its
-  preflight verifies every primary package already accepted by NuGet.org
-  before resuming the missing package or symbol pushes.
+  job, or use a recovery dispatch after the re-run window. Either way, it
+  revalidates the original candidate and retries all four uploads with
+  `--skip-duplicate`, allowing packages already accepted by NuGet.org to be
+  skipped without waiting for indexing.
 - Reruns and recovery dispatches use the workflow at the original release
-  tag, not a newer workflow on `main`. To finish a release whose tagged
-  workflow still uses `GINOC_NUGET`, replace its expired API key with one
-  scoped to both packages and rerun the failed publication job. Retain that
-  secret until outstanding API-key-based releases are finished, then revoke
-  the key and delete the secret. Do not move an existing release tag to adopt
-  trusted publishing.
+  tag, not a newer workflow on `main`. Older tagged workflows may still wait
+  for NuGet downloads; changing `main` does not change those runs. To finish
+  a release whose tagged workflow still uses `GINOC_NUGET`, replace its
+  expired API key with one scoped to both packages and rerun the failed
+  publication job. Retain that secret until outstanding API-key-based
+  releases are finished, then revoke the key and delete the secret. Do not
+  move an existing release tag to adopt trusted publishing.
 - Never rebuild an expired candidate for the same version. If the candidate or
   its qualification inputs have expired, or the original run predates frozen
   qualification inputs, recovery refuses; release a new version.
@@ -627,8 +628,8 @@ SHA-256 and any approval commit and author; and the **Recovery** block, with
 this run and its `workflow_sha`. `publish-nuget` runs only when
 `validation_only` is `false` and R1 found the Release published, and
 `verify-release-published` re-checks the Release just before the credential
-is used. Its preflight then verifies any package NuGet.org already accepted
-and pushes only what is missing.
+is used. It then revalidates the original candidate and retries all four
+uploads with `--skip-duplicate`, without downloading packages from NuGet.org.
 
 Recovery passes `--allow-published-version` (see
 [Version and source gates](#version-and-source-gates)), so it can finish a
@@ -673,7 +674,10 @@ original bundle, and `publish-nuget` to be skipped.
 ## Evidence record
 
 Each synchronized release gets a `<version>.md` record after NuGet.org finishes
-repository signing. Record, for both package IDs:
+repository signing. Package downloads and verification for this record are
+post-workflow evidence, not publication gates. The standalone
+`inspect-publication` and `validate-published-package` release-tool commands
+remain available for manual checks. Record, for both package IDs:
 
 - the pre-upload SHA-256 of the exact unsigned `.nupkg`;
 - the published SHA-256 of the repository-signed `.nupkg`;
@@ -708,8 +712,9 @@ commit gives each approval's artifact, hashes, approver, and reason.
 Also record all twelve qualification reports across the three OSes and four
 frameworks in [Required release gates](#required-release-gates), the selected
 framework and CLI informational version for each matrix job, and the corpus
-outcome. NuGet.org indexes symbols asynchronously, so symbol indexing is
-post-workflow evidence. Never rewrite the release tag to add evidence.
+outcome. NuGet.org indexes primary packages and symbols asynchronously, so
+indexing and availability are post-workflow evidence. Never rewrite the release
+tag to add evidence.
 Historical release records retain their originally observed frameworks and
 results; do not rewrite them to claim new framework coverage.
 
