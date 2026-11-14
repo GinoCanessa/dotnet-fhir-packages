@@ -18,6 +18,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
   - [FileSystemRetryOptions](#filesystemretryoptions)
   - [InstallOptions](#installoptions)
   - [PackageSourceInstallOptions](#packagesourceinstalloptions)
+  - [PackageInstallLimits](#packageinstalllimits)
   - [RestoreOptions](#restoreoptions)
   - [VersionResolveOptions](#versionresolveoptions)
 - [Models](#models)
@@ -26,6 +27,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
   - [PackageRecord](#packagerecord)
   - [PackageManifest](#packagemanifest)
   - [PackageListing & PackageVersionInfo](#packagelisting--packageversioninfo)
+  - [Bounded Metadata Inventory and Local Evidence](#bounded-metadata-inventory-and-local-evidence)
   - [CatalogEntry](#catalogentry)
   - [CiBuildRecord & CiBuildManifest](#cibuildrecord--cibuildmanifest)
   - [ResolvedDirective](#resolveddirective)
@@ -47,6 +49,7 @@ introduction and quick-start examples, see the [SDK Overview](sdk-overview.md).
 - [Registry](#registry)
   - [IRegistryClient](#iregistryclient)
   - [RegistryEndpoint](#registryendpoint)
+  - [RegistryClientFactory](#registryclientfactory)
   - [Built-in Registry Clients](#built-in-registry-clients)
   - [RegistryClientBase](#registryclientbase)
 - [Resolution](#resolution)
@@ -727,16 +730,111 @@ The nullable corruption policy overrides the manager-level repair/strict
 setting for that URI or stream operation. Hardened custom caches receive the
 resolved value through public `InstallCacheOptions` before source consumption.
 
-`PackageInstallLimits` has finite defaults: 100 MiB compressed, 1 GiB expanded,
-128 MiB per entry, 50,000 entries, path length 1,024 (both exact and canonical
-spelling during extraction), and depth 32. Extraction also enforces the
-portable component limits against exact spelling (255 UTF-16 units and 255
-UTF-8 bytes); generic existing-path handling is not tightened by this check.
-Per-call values may only tighten manager limits. Unspecified manager values can
-be configured with `FHIRPKG_MAX_COMPRESSED_BYTES`,
-`FHIRPKG_MAX_EXPANDED_BYTES`, `FHIRPKG_MAX_ENTRY_BYTES`,
-`FHIRPKG_MAX_ARCHIVE_ENTRIES`, `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH`, and
-`FHIRPKG_MAX_ARCHIVE_DEPTH`.
+`InstallLimits` may only tighten the manager's construction policy. For direct
+cache calls the corresponding property is `InstallCacheOptions.Limits`;
+source hashes map to `ExpectedSha256Sum` and `ExpectedShaSum` there, not to
+new option names. See [PackageInstallLimits](#packageinstalllimits).
+
+### PackageInstallLimits
+
+Finite acquisition/extraction policy for managers, direct caches, and explicit
+individual endpoint construction:
+
+```csharp
+public sealed class PackageInstallLimits
+{
+    public long MaxCompressedBytes { get; set; }
+    public long MaxExpandedBytes { get; set; }
+    public long MaxEntryBytes { get; set; }
+    public int MaxArchiveEntries { get; set; }
+    public int MaxArchivePathLength { get; set; }
+    public int MaxArchiveDepth { get; set; }
+
+    public static PackageInstallLimits FromEnvironment();
+    public void Validate();
+}
+```
+
+| Field | Finite default | Environment fallback | Native measurement |
+|-------|---------------:|----------------------|--------------------|
+| `MaxCompressedBytes` | 104,857,600 (100 MiB) | `FHIRPKG_MAX_COMPRESSED_BYTES` | Original gzip bytes, reported and actually acquired |
+| `MaxExpandedBytes` | 1,073,741,824 (1 GiB) | `FHIRPKG_MAX_EXPANDED_BYTES` | Sum of regular-file payload bytes, including manifest and ancillary files, not tar headers/padding |
+| `MaxEntryBytes` | 134,217,728 (128 MiB) | `FHIRPKG_MAX_ENTRY_BYTES` | One regular-file payload |
+| `MaxArchiveEntries` | 50,000 | `FHIRPKG_MAX_ARCHIVE_ENTRIES` | Yielded tar entries, including explicit directories, not implied parents |
+| `MaxArchivePathLength` | 1,024 | `FHIRPKG_MAX_ARCHIVE_PATH_LENGTH` | Both normalized canonical and exact-spelling path lengths, UTF-16 units including separators and `package/` |
+| `MaxArchiveDepth` | 32 | `FHIRPKG_MAX_ARCHIVE_DEPTH` | Normalized segments including filename and `package`; trailing directory separator adds none |
+
+Hidden PAX/GNU metadata has **separate** preflight entry-count and byte budgets;
+its count is not added to the extractor's yielded-entry counter. Extraction
+also retains portable component caps of 255 UTF-16 units and 255 UTF-8 bytes
+against exact spelling. Raising a policy does not bypass path, archive,
+identity, integrity, or transactional safety checks or host filesystem limits.
+
+Construction resolves each field independently: **explicitly assigned value >
+environment > default**. Getters show defaults for unassigned fields; assigning
+even a default is explicit. Overridden malformed environment values are not
+parsed, but malformed unresolved fields still fail. Environment values must be
+positive invariant decimal integers fitting the field's `Int64`/`Int32` type.
+All effective limits must be positive, entry bytes must not exceed expanded
+bytes, and compressed+expanded and entry-bytes×entry-count accounting must fit
+`Int64`. Null construction policy and invalid values throw
+`PackageInstallException` with `InvalidPolicy` / `PolicyValidation`.
+`Validate()` validates the object's values; `FromEnvironment()` resolves a
+fresh environment/default policy.
+
+Valid higher finite construction ceilings are allowed. Construction snapshots
+both installation and [ordinary retry options](#filesystemretryoptions);
+later caller-object or environment mutations do not reconfigure an instance.
+The new cache route validates before cache-root discovery/creation. The new
+endpoint routes validate ordinary endpoint/transport/logger arguments first,
+then installation and retry policies before client construction or HTTP.
+
+Per-call `InstallOptions.InstallLimits` and `InstallCacheOptions.Limits` inherit
+unassigned fields from that instance, do not reread environment, allow equality
+or tightening only, and validate the resulting combination. An upward override
+fails with `InvalidPolicy` / `PolicyValidation` before source consumption,
+even when it is below some other instance's ceiling.
+
+This complete example explicitly assigns **all six** finite fields and normal
+retry settings, without process-global production configuration:
+
+```csharp
+PackageInstallLimits limits = new()
+{
+    MaxCompressedBytes = 200L * 1024 * 1024,
+    MaxExpandedBytes = 2L * 1024 * 1024 * 1024,
+    MaxEntryBytes = 256L * 1024 * 1024,
+    MaxArchiveEntries = 100_000,
+    MaxArchivePathLength = 2_048,
+    MaxArchiveDepth = 64,
+};
+FileSystemRetryOptions retry = new()
+{
+    RetryCount = 5,
+    MinimumDelayMilliseconds = 10,
+    MaximumJitterMilliseconds = 10,
+};
+using DiskPackageCache cache = new(
+    cacheDirectory: "./isolated-cache",
+    logger: null,
+    timeProvider: null,
+    fileSystemRetry: retry,
+    installLimits: limits);
+
+await using FileStream source = File.OpenRead("package.tgz");
+PackageRecord imported = await cache.ImportAsync(
+    source,
+    new InstallCacheOptions
+    {
+        Unmodified = true,
+        VerifyChecksum = true,
+        Limits = new PackageInstallLimits { MaxArchiveDepth = 48 },
+    },
+    cancellationToken);
+```
+
+The partial per-call object above tightens only depth; it does not replace the
+other five construction values.
 
 ### RestoreOptions
 
@@ -922,6 +1020,42 @@ String/memory parsing remains pure. See
 public record NpmRepository(string? Type, string? Url, string? Directory);
 ```
 
+`Repository` remains `NpmRepository?`, with a property-local converter only on
+`PackageManifest.Repository`. A JSON string, including shorthand
+`"github:example/repo"`, full URLs, empty strings, or whitespace, becomes
+`new NpmRepository(null, input, null)` verbatim. There is no trimming, shorthand
+expansion, inferred type, URL validation, or fetch. Object `type`, `url`, and
+`directory` members accept strings/null and retain exactly empty strings;
+unknown members are ignored. Casing follows serializer options, as for author.
+Every recognized occurrence is validated before last-occurrence assignment,
+including null/empty clearing. Numbers, booleans, arrays, and malformed
+recognized members throw `JsonException`; absent/null remain null.
+Explicit model writing delegates to ordinary `NpmRepository` serialization,
+using JSON names `type`, `url`, `directory` and the supplied options; it emits
+an object, not the original string.
+
+`Date` remains `string?`. Strings stay verbatim, including ordinary noncompact
+strings, empty strings, and strings with leading zeroes. A numeric JSON token
+must lexically contain **exactly eight or fourteen ASCII digits**; for example
+`20240203` and `20240203123456` become those strings. No calendar, time-zone,
+or numeric normalization is performed (`99999999` is therefore accepted).
+Signs, fractions, exponents, other digit lengths, booleans, arrays, and objects
+are rejected. Invalid JSON such as leading-zero numbers is also rejected.
+Absent/null remain null. Writing emits a JSON string, with normal null handling:
+manifest `Serialize()` omits nulls; default external serialization emits null.
+Top-level recognized repository/date duplicates also validate every occurrence,
+even if a later valid/null value would replace an invalid earlier value.
+
+These converters do not change public metadata types or R0 author behavior
+above, register global converters, or rewrite/repack imported archives.
+Native validating import/install still reads the **complete** manifest before
+layout preparation, including in unmodified mode. Distributed manifest,
+resources, opaque data, safe ancillary bytes, and explicit empty directories
+are preserved according to the existing layout contract; model serialization
+is projection, not a byte-fidelity API. Malformed repository/date JSON retains
+native `InvalidArchive` / `ArchiveValidation` wrapping with inner
+`JsonException` (normally the containing property's path).
+
 ### PackageListing & PackageVersionInfo
 
 Returned by `GetPackageListingAsync`. Contains all published versions and
@@ -951,6 +1085,7 @@ public record PackageVersionInfo
     public string? Canonical { get; init; }
     public string? Kind { get; init; }
     public string? PublicationDate { get; init; }
+    public JsonElement Unlisted { get; init; }             // "unlisted"; raw source value
     public int? ResourceCount { get; init; }
     public string? License { get; init; }
     public string? Url { get; init; }
@@ -970,6 +1105,32 @@ Registry JSON may provide `fhirVersion` as a scalar or array, or use the plural
 `fhirVersions` field. `FhirVersion` exposes the first value for compatibility;
 `FhirVersions` exposes the complete normalized set.
 
+Listing date is **not** manifest date conversion: strings are retained
+(including empty/whitespace); numeric dates and other non-string kinds are
+ignored as null. Both FHIR fields accept nonblank scalar strings or string
+array entries; blank/non-string entries and malformed field kinds are ignored.
+Accepted strings are not trimmed, are combined singular first, then plural,
+and deduplicated case-insensitively. An explicit field with no usable strings
+still records explicit metadata internally; writing retains that presence as
+an empty `fhirVersions` array rather than inventing a declaration.
+
+`Unlisted` is raw source-specific JSON, **not a boolean eligibility flag**:
+`JsonValueKind.Undefined` means absent, `Null` means explicit null, and strings
+retain exact decoded contents (`""`, `"true"`, `"false"`, and whitespace are
+distinct). Boolean, number, object, and array values are retained without
+interpretation. The reader clones the element before disposing its parser
+document. Programmatic `init` assignment does not clone: keep the owning
+`JsonDocument` alive or assign `document.RootElement.Clone()` yourself.
+The custom writer omits only `Undefined` and writes every other kind via
+`WriteTo`, including explicit null even with `WhenWritingNull` or
+`WhenWritingDefault` options.
+
+Listing lookup deliberately differs from manifest enumeration: exact spelling
+takes precedence, repeated exact spelling takes the last match, and without
+an exact spelling the existing case-insensitive enumeration takes the first
+match, independently of serializer casing options. No extra listing fetch or
+caller duplicate parser is needed.
+
 Composite listings preserve every source copy in `VersionCandidates`. The
 representative `Versions` dictionary follows configured source priority, while
 resolution selects one complete source candidate atomically. If
@@ -981,6 +1142,273 @@ latest/wildcard/range selections throw `RegistryOperationException`.
 Returned `SourceRegistry` values are credential-free provenance snapshots: they
 retain only the registry origin and protocol type, never configured
 authorization, custom headers, user information, paths, queries, or fragments.
+
+The raw marker stays paired with each complete source record's artifact,
+hashes/integrity, dependencies, FHIR declarations, latest flag, and provenance
+in both normal and representative-only merge branches. It does not change SDK
+tags, prerelease/FHIR matching, wildcard resolution, or explicit known-version
+acquisition. **Later Candle consumer obligation:** listed-only selection
+excludes nonempty strings (including `"false"` and whitespace); absent, null,
+and exactly empty strings are not excluded by that string rule. No SDK
+listed-only default or prohibition on explicit acquisition was added.
+Non-string eligibility interpretation requires independent supplier/consumer
+evidence; the SDK does not guess.
+
+Whole-listing JSON supports representative `Versions` records, not replay of
+all-source state: `VersionCandidates`, `SourceRegistry`, `IsComplete`,
+`QueryFailures`, and per-record provenance/latest fields are JSON-ignored.
+Serializing a representative or an individual candidate separately retains
+its raw marker and existing metadata, but not provenance. Deserializing the
+whole-listing JSON cannot reconstruct the ignored candidates.
+
+### Bounded Metadata Inventory and Local Evidence
+
+This inventory covers **18 manifest JSON input properties total: 16 optional
+plus required `name`/`version`**, every listed group and the nine recognized
+nested members, unknown-byte controls, and relevant listing forms.
+`SemVer`/`InferredFhirRelease` are computed, not additional input fields.
+Baseline here means the retained model/read contract, not an independently
+executed old-supplier comparison. Historical observations are inherited;
+all candidate outcomes below link to the actual Windows runs in
+[the execution record](#candidate-execution-record).
+
+Fixture/test keys resolve to these checked-in, independently authored sources:
+
+- **M** — [PackageManifestTests](../test/FhirPkg.Tests/Models/PackageManifestTests.cs),
+  `Deserialize_OptionalFieldInventory_PreservesBaselineContracts`, data
+  `OptionalFieldInventory`, literal recipe `CreateInventoryManifest`.
+- **R/D/A** — the same file's `RepositoryForms`, `CompactDateForms`, and
+  retained `AuthorForms`/`ObjectAuthorManifestJson`/`AuthorDuplicateMembers`.
+  **F** is its retained `FullManifestJson`/`MinimalManifestJson` and inference
+  examples; these are repository examples, not live-registry observations.
+- **C** — [DiskPackageCacheTests](../test/FhirPkg.Tests/Cache/DiskPackageCacheTests.cs),
+  literal manifest/archive recipes `CreatePreservationManifest`,
+  `CreatePreservationTarball`, `RepositoryDateAuthorMatrix`,
+  `RepositoryDateInstallControls`, `MalformedRepositoryOrDate`, and
+  `MetadataIdentityAndArchiveFailures`.
+- **L** — [PackageListingTests](../test/FhirPkg.Tests/Models/PackageListingTests.cs),
+  independently authored `VersionJson`, `UnlistedForms`, `UnlistedLookupCases`,
+  `UnlistedWriterCases`, and `ListingOptionalForms`.
+- **S** — [PackageRegistryResolutionTests](../test/FhirPkg.Tests/Registry/PackageRegistryResolutionTests.cs),
+  offline `SourceListingJson`/`PolicyListingJson` and `MarkerForms`, supplementing
+  retained `FhirNpmClient_UsesSharedVersionPolicy`/`NpmClient_UsesSharedVersionPolicy`.
+- **H** — [HardenedInstallationIntegrationTests](../test/FhirPkg.IntegrationTests/HardenedInstallationIntegrationTests.cs),
+  generated `CreateBoundaryArchive`, `CreateMetadataBudgetArchive`,
+  `CreateNativeFailureArchive`, and `CreatePreservationArchive`.
+
+#### Per-case fixture/read matrix
+
+M identifies each executed case exactly as **`row/control/reader`**.
+Every row below has `absent`, `null`, `known-valid`, and
+`malformed-shape:<literal>` controls for its listed rejected literals.
+Nested row `parent.member` is independently inserted as
+`"parent":{"member":<literal>}`; absent removes the parent. All recipes add
+`"name":"test.package","version":"1.0.0"`. Each case executes on `String`,
+`Stream`, and `DefaultSerializer` reader routes. The first two are
+case-insensitive model helpers; the third is default case-sensitive external
+`JsonSerializer`. Thus **210 row/control specimens × 3 readers = 630
+inventory data cases per TFM**, not 630 cold archive imports.
+
+Additional exact control IDs: dictionaries have `null-dictionary-value` and
+`empty-dictionary`; lists have `null-list-element`; unknown has `ignored:42`,
+`ignored:true`, `ignored:[]`, `ignored:"raw"`. In the table, **scalar bad**
+means the literal set `42`, `true`, `{}`, `[]`; **dictionary bad** means
+`42`, `true`, `[]`, `"x"`, `{"bad":42}`, `{"bad":true}`, `{"bad":{}}`,
+`{"bad":[]}`; **list bad** means `42`, `true`, `{}`, `"x"`, `[42]`, `[true]`,
+`[{}]`, `[[]]`. These finite sets are controls, not a promise about unseen
+legacy shapes. “Pass” means the asserted accepted/rejected/ignored outcome
+occurred, not that malformed data was accepted.
+
+| Input field/member | Retained baseline model/read contract | Independent local fixture ID / known-valid literal and provenance | Candidate disposition and executed evidence | Original supplier / Firely / live corpus |
+|--------------------|---------------------------------------|------------------------------------------------------------------|---------------------------------------------|-----------------------------------------|
+| `name` (required) | Required presence; ordinary string reading is separate from native identity validation | F `MinimalManifestJson`; C `MetadataIdentityAndArchiveFailures`: `missing-name`, `empty-name`, `null-name`, `unsafe-name`, `mismatched-name` | Pass: missing rejected as JSON/native `InvalidArchive`; empty/null/unsafe and expected mismatch rejected as `InvalidPackageIdentity` at identity validation. [U11/U10](#candidate-execution-record) | **unverified** |
+| `version` (required) | Required presence; concrete identity/selectors validated natively, not inferred from optional metadata | F `MinimalManifestJson`; C `missing-version`, `blank-version`, `range-version`, `mismatched-version`; M companion `Deserialize_RepositoryOrDateMalformedJsonAndMissingRequiredFields_Throws` | Pass: missing rejected as JSON/native `InvalidArchive`; blank/range/mismatch rejected at identity validation. [U11/U10](#candidate-execution-record) | **unverified** |
+| `description` | `string?`, absent/null/string accepted; no shape relaxation | M `description/*/*`, `"description"`; F `"FHIR R4 Core definitions"` | Pass: valid/absent/null accepted, scalar bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `license` | `string?`, absent/null/string | M `license/*/*`, `"CC0-1.0"`; F same | Pass: accepted baseline forms; scalar bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `homepage` | `string?`, absent/null/string; no URL validation | M `homepage/*/*`, `"https://example.test/"`; F HL7 homepage | Pass: accepted baseline forms; scalar bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `canonical` | `string?`, absent/null/string | M `canonical/*/*`, `"https://example.test/fhir"`; F `"http://hl7.org/fhir"` | Pass: accepted baseline forms; scalar bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `type` | `string?`, absent/null/string | M `type/*/*`, `"ig"`; F `"fhir.core"` | Pass: accepted baseline forms; scalar bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `title` | `string?`, absent/null/string | M `title/*/*`, `"Example IG"`; F `"FHIR R4"` | Pass: accepted baseline forms; scalar bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `jurisdiction` | `string?`, absent/null/string | M `jurisdiction/*/*`, `"US"`; newly authored local row, not an F field | Pass: accepted baseline forms; scalar bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `author` | R0 `string?`: string/object/null; lossy ordered projection, unchanged | M `author/*/*`, `{"name":"Example","email":"e@test","url":"raw"}`; A retained matrices | Pass: object → `"Example <e@test> (raw)"`; string/null preserved; `42`, `true`, `[]`, `[null]` rejected; unknown members ignored. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `author.name` | String/null; missing/null/empty omitted, whitespace not trimmed | M `author.name/*/*`, `"Example"`; A casing/duplicate/empty controls | Pass: → `"Example"`; scalar bad rejected, every recognized occurrence validated before last wins/clearing. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `author.email` | Same R0 member contract | M `author.email/*/*`, `"e@test"`; A | Pass: → `"<e@test>"`; scalar bad rejected; retained casing/duplicates/null/empty. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `author.url` | Same R0 member contract; no URL interpretation | M `author.url/*/*`, `"raw"`; A | Pass: → `"(raw)"`; scalar bad rejected; retained casing/duplicates/null/empty. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `repository` | Public `NpmRepository?`; baseline object/null, now bounded string projection | M `repository/*/*`, `{"type":"git","url":"raw","directory":"src"}`; R shorthand/URL/empty/Unicode/opaque members; C three-form matrix | Pass: object/null retained, all supplied strings project verbatim to Url; `42`, `true`, `[]`, `[null]` rejected; unknown members ignored. [T11/T10, U11/U10, H11/H10](#candidate-execution-record) | **unverified** |
+| `repository.type` | String/null component; converter retains empty and option casing | M `repository.type/*/*`, `"git"`; R every-occurrence controls | Pass: string/null/empty, last clearing retained; scalar bad rejected even before later valid/null. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `repository.url` | String/null component; no validation/expansion | M `repository.url/*/*`, `"raw"`; R full URL/shorthand/whitespace | Pass: exact strings retained; scalar bad rejected; casing/duplicate controls pass. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `repository.directory` | String/null component; no trimming | M `repository.directory/*/*`, `"src"`; R empty/whitespace | Pass: exact strings/null/empty retained; scalar bad rejected; every-occurrence/clearing controls pass. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `date` | Public `string?`; baseline arbitrary strings/null, now exactly 8/14 ASCII-digit numeric tokens | M `date/*/*`, `20240203123456`; D lexical/date-shape controls; C `object8`, `shorthand8`, `baseline`, `absent`, `null`, `empty` | Pass: numeric → lexical string; all supplied strings verbatim; scalar bad and D signed/fraction/exponent/other lengths rejected. Listing dates are separate below. [T11/T10, U11/U10, H11/H10](#candidate-execution-record) | **unverified** |
+| `dependencies` | `IReadOnlyDictionary<string,string>?`; serializer accepts null **values** despite C# annotation | M `dependencies/*/*`, `{"dependency.package":"2.0.0"}`, `{"nullable":null}`, `{}`; F dependency/inference examples | Pass: absent/null/string map/null value/empty map accepted; dictionary bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `devDependencies` | Same ordinary dictionary contract, no new permissive converter | M `devDependencies/*/*`, `{"dev.package":"2.0.0"}`, null-value/empty controls | Pass: accepted baseline forms including null values; dictionary bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `dist-tags` | Same ordinary dictionary contract | M `dist-tags/*/*`, `{"latest":"1.0.0"}`, null-value/empty controls; S retained tags | Pass: accepted baseline forms including null values; dictionary bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `keywords` | `IReadOnlyList<string>?`; null elements accepted by baseline reader | M `keywords/*/*`, `["fhir","ig"]`, `["fhir",null]`; F keywords | Pass: absent/null/string list/null element accepted; list bad rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `fhirVersions` | Same list reading; inference uses first element, then dependency-name fallback | M `fhirVersions/*/*`, `["4.0.1"]`, `["4.0.1",null]`; F inference tests; `Deserialize_NullCollectionValues_PreservesBaselineInferenceContracts` | Pass: null elements accepted, list bad rejected; `[null]` still throws `ArgumentNullException("version")` **on inference**, not deserialization; dependency-only null value still infers R5 by key. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `dist` | `NpmDistribution?`, ordinary object/null; no converter change | M `dist/*/*`, `{"shasum":"sha1","tarball":"https://example.test/p.tgz","integrity":"sha256-value"}`; L/S distribution examples | Pass: object/absent/null accepted; `42`, `true`, `[]`, `"x"` rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `dist.shasum` | `string?` SHA-1 metadata, ordinary serializer string/null | M `dist.shasum/*/*`, `"sha1"`; L/S source hash fixtures | Pass: baseline forms accepted; scalar bad rejected; paired source hash retained. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `dist.tarball` | `string?` artifact URL, ordinary serializer | M `dist.tarball/*/*`, `"https://example.test/p.tgz"`; L/S source artifacts | Pass: baseline forms accepted; scalar bad rejected; source pairing unchanged. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| `dist.integrity` | `string?` integrity metadata, ordinary serializer | M `dist.integrity/*/*`, `"sha256-value"`; L/S distinct-source integrity | Pass: baseline forms accepted; scalar bad rejected; no cross-source splicing. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| Unknown manifest properties | Ignored by model; native archive bytes/tree remain authoritative | M `unknown/*/*`, `{"opaque":[1,true,null,{"nested":"unchanged"}]}` and four `ignored:*`; C unknown manifest/root bytes/empty directory; H `unknown-manifest` | Pass: supplied shapes ignored by model; original manifest/resource/ancillary bytes and explicit directories verified immediately and after reopen. Not a model round-trip promise. [T11/T10, U11/U10, H11/H10](#candidate-execution-record) | **unverified** |
+| Listing `unlisted` | Previously discarded; now raw `JsonElement`, no eligibility semantics | L `UnlistedForms` 16 named specimens; S `MarkerForms` six absence/null/string specimens, actual leaf/composite/fallback routes | Pass: absent/null/all JSON kinds retained with exact decoded strings, owned read clones, lookup and writer controls; ignored provenance/candidates stay ignored. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| Listing `date` | Custom string lookup only, not manifest converter | L `ListingOptionalForms`: `date/<label>`, `date/exact-last`, `date/insensitive-first`; retained `VersionJson` | Pass: strings including empty/whitespace accepted verbatim; numeric date/bool/object/arrays ignored to null; malformed JSON rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| Listing `fhirVersion` | Nonblank string or array string entries, presence and singular-first order retained | L `fhirVersion/<label>`, `fhir/exact-last`, `fhir/insensitive-first`, `combined/deduplicated`; S shared-policy examples | Pass: supplied nonblank strings accepted; blanks/non-string/malformed entries ignored, mixed arrays retain only usable strings; malformed JSON rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+| Listing `fhirVersions` | Same lookup/entry contract; plural follows singular, case-insensitive deduplication | L `fhirVersions/<label>`, `combined/deduplicated`; S plural declarations | Pass: supplied nonblank strings accepted, other shapes/entries ignored; explicit empty metadata preserved on writing; malformed JSON rejected. [T11/T10, U11/U10](#candidate-execution-record) | **unverified** |
+
+L `UnlistedForms` exact IDs are `absent`, `null`, `empty`, `string-true`,
+`string-false`, `whitespace`, `escaped-string`, `boolean-true`, `boolean-false`,
+`zero`, `negative`, `fraction-exponent`, `object`, `duplicate-object-members`,
+`array`, `empty-array`. `UnlistedLookupCases` supplies 12 literal spelling/
+duplicate cases × both casing options; `UnlistedWriterCases` supplies each of
+the 16 specimens × `Never`/`WhenWritingNull`/`WhenWritingDefault`. The exact
+test IDs are `Deserialize_UnlistedForms_PreservesPresenceAndOwnedValue`,
+`Deserialize_UnlistedCasingAndDuplicates_UsesExistingListingLookup`,
+`Serialize_UnlistedForms_RoundTripsWithoutDroppingNull`, and
+`Serialize_ListingWithUnlisted_RetainsIgnoredProvenance`.
+
+L `ListingOptionalForms` labels for **each** date/singular/plural field are
+`absent`, `null`, `empty-string`, `whitespace`, `compact-string`,
+`ordinary-string`, `compact-number`, `boolean`, `object`, `empty-array`,
+`string-array`, `mixed-array`, plus the five combined lookup/deduplication
+controls above: **41 data cases**. Each checks direct/stream reading with both
+casing options and round-trip writing in
+`Deserialize_ListingOptionalForms_PreservesExistingDateAndFhirRules`.
+`Deserialize_ListingOptionalMalformedJsonOrRequiredFields_RemainRejected`
+adds seven malformed/required-string controls.
+
+#### Projection, native, and policy companion controls
+
+| Exact test IDs / fixture recipe | Bounded outcome established | Candidate evidence |
+|--------------------------------|-----------------------------|--------------------|
+| M/R `Deserialize_RepositoryForms_PreservesProjection`, `Deserialize_RepositoryMembers_RespectsCasingAndEveryOccurrence`, `Deserialize_RepositoryAndDateCasing_UsesExplicitOptions` | Three reader routes, object/string/null/empty/unknown, option casing, every recognized nested occurrence and clearing | Pass [T11/T10, U11/U10](#candidate-execution-record) |
+| M/D `Deserialize_CompactDateForms_PreservesLexicalText`, `Deserialize_InvalidRepositoryOrDate_ThrowsJsonException`, `Deserialize_DuplicateRepositoryOrDate_ValidatesEveryOccurrence`, `Deserialize_RepositoryOrDateMalformedJsonAndMissingRequiredFields_Throws`, `Serialize_RepositoryAndDate_UsesExistingPublicTypes` | 8/14 numeric/string, noncalendar and arbitrary strings; signed/fraction/exponent/length/kind/invalid-JSON rejection; top-level duplicates in both orders, external/helper output/null policy | Pass [T11/T10, U11/U10](#candidate-execution-record) |
+| Retained A `Deserialize_AuthorForms_ReturnExpectedValue`, `Deserialize_AuthorMemberCasing_RespectsSerializerOptions`, `Deserialize_AuthorDuplicateMembers_UsesLastRecognizedValue`, `Deserialize_InvalidAuthorShapes_ThrowsJsonException`, author serialization tests | R0 projection/validation unchanged; every-occurrence/casing/null/empty/writer behavior retained | Pass [T11/T10, U11/U10](#candidate-execution-record) |
+| C `ImportAsync_RepositoryDateAuthorMatrix_PreservesBytesAndTree`, `RepositoryDateAuthorMatrix` | Three repository forms × two fourteen-digit date forms × two author forms = **12 cold imports per TFM**, each isolated identity/cache, SHA-256, JSON/XML, root opaque bytes, empty directory; complete bytes/tree/readback | Pass [U11/U10](#candidate-execution-record); 24 imports across the two TFMs |
+| C `InstallAsync_RepositoryDateForms_ValidatesAndPreservesBytes`, `ImportAsync_RepositoryDateControls_PreservesBytesAndTree`, `RepositoryDateInstallControls` | `shorthand14`, `url14`, `object8`, `shorthand8`, `baseline`, `absent`, `null`, `empty` × ordinary/unmodified: **16 expected installs + 16 extra imports per TFM** | Pass [U11/U10](#candidate-execution-record) |
+| C `ImportAsync_MalformedRepositoryOrDate_ReturnsTypedManifestFailure`, `MalformedRepositoryOrDate`; `ImportOrInstallAsync_InvalidIdentityAndArchive_PreservesPriorAndNeighbour`, `MetadataIdentityAndArchiveFailures` | **131 malformed fixtures × missing/overwrite = 262 failed-import controls**, plus **32 identity/archive controls per TFM**; typed paths/inner JSON, no publication/debris, prior/neighbour snapshots before SDK read | Pass [U11/U10](#candidate-execution-record) |
+| S `IndividualClients_UnlistedForms_PreserveSameResponseMetadata`, `CompositeListing_UnlistedMarkers_StayPairedWithSource`, `CompositeListing_UnlistedMarkers_RepresentativeOnlyFallbackStaysPaired`, `ResolveAndDownload_UnlistedMarker_DoesNotChangeSdkPolicy` | 12 individual, 12 composite, 12 fallback, 18 policy/download cases per TFM; configured order, exact record/source pairing, one response per queried source, unchanged 270 resolutions/18 explicit downloads | Pass [U11/U10](#candidate-execution-record) |
+| [PackageInstallLimitsTests](../test/FhirPkg.Tests/PackageInstallLimitsTests.cs) `DirectCache_CompleteExplicitPolicy_OverridesAllAmbientFields`, `DirectCache_PartialPolicy_UsesExplicitEnvironmentDefaultPrecedence`, `DirectCache_PartialPolicy_MixesExplicitEnvironmentAndDefaults`, `DirectCache_InvalidPolicy_FailsBeforeRootCreation`, `DirectCache_PolicySnapshots_AreIndependent`, `DirectCache_PerCallLimits_OnlyTightenConstructionPolicy`, higher-finite and retry controls | All six fields, complete/partial malformed ambient precedence, safe validation before root, two independent mutable caller policies, per-call equality/tightening/upward pre-read rejection | Pass [T11/T10, U11/U10](#candidate-execution-record) |
+| [RegistryClientFactoryTests](../test/FhirPkg.Tests/Registry/RegistryClientFactoryTests.cs) `EndpointPolicyOverloads_CompleteExplicitPolicy_AvoidsAmbientParsing`, `EndpointPolicyOverloads_PartialAndInvalidPolicy_RetainValidation`, partial-mixed/invalid-explicit/invalid-retry/ordinary-argument/higher-finite/retry-snapshot controls; `EndpointPolicyOverloads_NpmSnapshots_ControlPublishPreparation` | Both transport families × four endpoint types, all six fields, precedence/snapshots/no HTTP on invalid configuration; NPM accepted preparation reaches offline PUT or retained unverified-body guard, quota failures send no request | Pass [T11/T10, U11/U10](#candidate-execution-record); no live publication |
+| Same factory tests `StandaloneConstructorsAndLegacyEndpointFactories_PreserveBindings`, `PublicPolicySurface_AdditionalRequiredArity_PreservesLegacySignatures` | Public-only parameter types/names/default flags, exactly one new required-five cache/two required-six endpoint overloads; old null/default/named/typed-null bindings | Pass [T11/T10, U11/U10](#candidate-execution-record); friend-assembly/source evidence, not external packaged binding |
+| H `DirectCache_ConfiguredLimits_BelowAtAbove_UseNativeValidation`, `NativeLimitBoundaries` | **18 cases per TFM**, six measured quantities q with ceilings q+1/q/q−1; below/at pass, above typed failure. Expanded q=4146 bytes, entry=4096, yielded=5 (3 files/2 explicit directories), path=54 ASCII UTF-16 units, depth=5; compressed q is runtime gzip length logged by each case | Pass [H11/H10](#candidate-execution-record); small-policy mechanics, not all default envelopes |
+| H `DirectCache_MetadataEntryBudget_BelowAtAbove_PreservesPreflight`; `DirectCache_DefaultDepth32And33_RetainsFiniteCeiling` | **3 hidden-metadata cases**, four hidden GNU entries/39 bytes versus two yielded, ceilings 5/4/3; **1 depth case with 3 operations**: default32 accepted, default33 rejected, explicit33 accepted | Pass [H11/H10](#candidate-execution-record); environment restored, no filesystem relabel/mandatory skip |
+| H `EndpointDownload_NativeImport_EnforcesReportedAndActualLength`, `EndpointLengthCases` | **80 cases per TFM**: both transports/FHIR-NPM/NPM; `accurate`, `absent`, `under`, `over-within`, `negative`, `over-rejected`, `accurate-rejected`, `absent-excess`, `under-excess` × SHA-256 presence, plus `bad-sha1`/`bad-sha256`; pre-read vs actual checks, mappings and response disposal | Pass [H11/H10](#candidate-execution-record); no download spool/strict length equality added |
+| H `DirectCache_FailedImportOrReplacement_PreservesPriorAndNeighbourTrees`, `NativeFailureCases` | **84 cold/overwrite import/expected-install cases per TFM**: six quotas, both hashes, invalid/mismatched identity, JSON/repository/date, traversal/link/truncated/ambiguous archive, read failure, acquisition/extraction cancellation. No import-only expected mismatch. Prior/neighbour/cache metadata and cleanup checked before recovery-capable reads; caller stream remains open, caller cancellation unwrapped | Pass [H11/H10](#candidate-execution-record); not a Candle adapter repair |
+| H `ManagerSourceModes_RepositoryDateMetadata_UsesSameProjection`, `NativeMetadataSourceModes` | **96 cases per TFM**: four stream/URI import/expected modes × two layouts × ordinary/unmodified × three repository forms × two date forms; actual manager resources, bytes/empty directories, cache reopen | Pass [H11/H10](#candidate-execution-record) |
+
+Phase-2 additions total **206 cases per TFM**: 16 raw reads, 24 lookup,
+48 writer, 16 listing serialization, 41 optional, 7 malformed/required,
+12 individual, 12 composite, 12 fallback, 18 resolve/download.
+Phase-3 additions total **786 cases per TFM** (95 cache-policy + 691 factory):
+70 accepted imports, 36 quota failures, 156 upward pre-read rejections;
+152 accepted NPM preparations (76 offline PUTs + 76 unverified-body guards)
+and 72 quota failures without request.
+Phase-4 generated additions total **282 per TFM**:
+18 six-limit + 3 metadata + 1 default-depth (three operations) + 80 endpoint +
+84 failure + 96 manager. These are executed additions, not entire filter
+totals. No new mandatory case skipped.
+
+#### Candidate execution record
+
+Source candidate HEAD: **`cd87e9996abcd2a83c79e23dcbfa4616b25ed366`**.
+Implementation commits: phase1 `fa2ce5ee40d5ffd44b7b8c3981dd3464216401fc`,
+phase2 `127c5c4696f160dc5c734951dcefc755760dc19e`,
+phase3 `5a586e2e188fe752f19ed08625c5b06790af3cb0`,
+phase4 `cd87e9996abcd2a83c79e23dcbfa4616b25ed366`.
+Documentation is the uncommitted phase-5 working-tree addition to that source,
+not a new release/asset identity.
+
+Executed locally on **2026-11-13, Windows 10.0.26300 win-x64**, SDK
+**11.0.100**, Microsoft.NETCore.App **11.0.0 and 10.0.15**.
+Conventions source: full root `AGENTS.md` (no fallback).
+`dotnet --info` confirmed the installed SDK/runtimes. All commands below were
+run from the repository root with Windows backslash paths, the documented
+VSTest runner/filter semantics, and the exact framework selectors; no extra
+logger, parallelism, qualification setup, or tooling was added.
+
+| Evidence ID | Actual outcome |
+|-------------|----------------|
+| T11 / T10 | Phase-5 targeted filter: each **2440 passed, 0 failed, 0 skipped, total 2440** |
+| Restore | Solution restore succeeded (exit 0), no warnings/errors reported |
+| Release | Solution Release build succeeded for both TFMs, **0 warnings, 0 errors** |
+| U11 / U10 | Full unpinned unit project: each **5481 passed, 0 failed, 20 skipped, total 5501** |
+| N11 / N10 | Non-hardened integration: each **351 passed, 0 failed, 0 skipped, total 351** |
+| H11 / H10 | Hardened/cross-process integration: each **348 passed, 0 failed, 3 skipped, total 351** |
+
+Every invocation exited 0; no build/test warning or error was emitted.
+The exact executed phase-5 and final commands were:
+
+```powershell
+dotnet test test\FhirPkg.Tests\FhirPkg.Tests.csproj --framework net11.0 --filter "FullyQualifiedName~PackageManifestTests|FullyQualifiedName~PackageListingTests|FullyQualifiedName~PackageInstallLimitsTests|FullyQualifiedName~RegistryClientFactoryTests"
+dotnet test test\FhirPkg.Tests\FhirPkg.Tests.csproj --framework net10.0 --filter "FullyQualifiedName~PackageManifestTests|FullyQualifiedName~PackageListingTests|FullyQualifiedName~PackageInstallLimitsTests|FullyQualifiedName~RegistryClientFactoryTests"
+dotnet restore FhirPkg.sln
+dotnet build FhirPkg.sln --configuration Release --no-restore
+dotnet test test\FhirPkg.Tests\FhirPkg.Tests.csproj
+dotnet test test\FhirPkg.IntegrationTests\FhirPkg.IntegrationTests.csproj --framework net11.0 --filter "FullyQualifiedName!~HardenedInstallationIntegrationTests&FullyQualifiedName!~CrossProcessCacheIntegrationTests"
+dotnet test test\FhirPkg.IntegrationTests\FhirPkg.IntegrationTests.csproj --framework net10.0 --filter "FullyQualifiedName!~HardenedInstallationIntegrationTests&FullyQualifiedName!~CrossProcessCacheIntegrationTests"
+dotnet test test\FhirPkg.IntegrationTests\FhirPkg.IntegrationTests.csproj --framework net11.0 --filter "FullyQualifiedName~HardenedInstallationIntegrationTests|FullyQualifiedName~CrossProcessCacheIntegrationTests"
+dotnet test test\FhirPkg.IntegrationTests\FhirPkg.IntegrationTests.csproj --framework net10.0 --filter "FullyQualifiedName~HardenedInstallationIntegrationTests|FullyQualifiedName~CrossProcessCacheIntegrationTests"
+```
+
+Full-unit skips on each TFM were the existing Windows-inapplicable native Unix/
+macOS tests: `UnixDescriptorInteropTests.RealUnix_FailuresRetainImmediateErrnoAcrossLaterCalls`,
+`RealUnix_DuplicateUsesNontrivialMinimumAndCloseOnExec`,
+`RealUnix_ModeOpenAndNoModeOpenPreservePermissions`, three
+`RealMacOS_ReadAheadUsesProtectedHandle` options; two
+`NativeFileSystemTests.UnixNative_RegularOpenAndRecursiveDeleteDoNotFollowLinks`
+platforms; and twelve `PositionedFileStreamTests` permission/mode cases
+(`OwnedCreation_MatchesManagedPermissionsAndCanReopen` six,
+`OwnedCreation_ExistingFilePreservesModeAndModeSemantics` four,
+`OwnedCreation_CreateNewCollisionPreservesForeignFile` two).
+Hardened skips on each TFM were existing retained-input opt-ins:
+`RetainedR4CorePrimary_CliCache_IsUsable`,
+`RetainedR4CorePrimary_ExpectedStreamInstall_IsUsable`,
+`RetainedR4CoreSecondary_ExpectedStreamInstall_IsUsable`.
+No retained archive/cache setup was invented or run. These skips establish
+neither generated-case failure nor external retained-input success.
+
+Inherited coordinator phase evidence, **not rerun as those filters by the
+documentation implementer**, is separate from the final-source runs above:
+
+| Checkpoint | Exact VSTest class selector (unit unless stated) | Recorded result on each net11.0/net10.0 |
+|------------|------------------------------------------------|----------------------------------------|
+| Phase1 | `FullyQualifiedName~PackageManifestTests\|FullyQualifiedName~DiskPackageCacheTests` | 1693 passed, 0 failed, 0 skipped |
+| Phase2 | `FullyQualifiedName~PackageListingTests\|FullyQualifiedName~PackageRegistryResolutionTests\|FullyQualifiedName~RedundantRegistryClientTests\|FullyQualifiedName~RegistryOperationExceptionTests` | 264 passed, 0 failed, 0 skipped |
+| Phase3 | `FullyQualifiedName~PackageInstallLimitsTests\|FullyQualifiedName~RegistryClientFactoryTests\|FullyQualifiedName~DiskPackageCacheTests\|FullyQualifiedName~NpmRegistryClientTests` | 1084 passed, 0 failed, 0 skipped |
+| Phase4 native unit | `FullyQualifiedName~TarballExtractorLimitTests\|FullyQualifiedName~PackageContentAcquirerTests\|FullyQualifiedName~PackageIdentityValidatorTests\|FullyQualifiedName~PortableArchivePathTests\|FullyQualifiedName~RegistryOperationExceptionTests` | 147 passed, 0 failed, 0 skipped |
+| Phase4 integration | `FullyQualifiedName~HardenedInstallationIntegrationTests\|FullyQualifiedName~CrossProcessCacheIntegrationTests` | 348 passed, 0 failed, 3 retained-core skips |
+
+The pipes above are VSTest OR operators (escaped only for Markdown tables).
+Earlier phase1/3
+hardened runs were each 66 passed/3 retained-core skips before phase4 additions.
+Coordinator SDK net11 builds reported 0 warnings/errors. The final full unit
+and integration runs now execute those retained and new local controls on the
+coherent source candidate.
+
+Manual comparison covered exact signatures, nullable/required arguments,
+examples, all inventory rows/recipes and caller routes in the four changed SDK
+files and tests, plus unchanged resolver/provenance/acquisition/NPM mechanisms.
+Existing license headers, explicit types, file-scoped namespaces, Allman
+braces, nullable handling and net10-compatible converter APIs were retained.
+No format/lint command or review dispatch was run.
+
+Local **L1–L7** have passing bounded evidence on the exercised Windows TFMs.
+This is **source-local readiness only**, not publication, packaged-binary or
+external-consumer compatibility, Firely equivalence, Candle migration, all
+production-default envelopes, or multi-platform qualification:
+
+| Later gate | Obligation | Exact-candidate state |
+|------------|------------|-----------------------|
+| Q1 | Same independent archives through Firely 5.0.2; independent/copied cache byte/tree and old/replacement readback comparison | **NOT RUN**; inherited author evidence is not these cases |
+| Q2 | Actual synchronized packaged net10/net11 SDK/CLI assets, version/commit/hashes and externally compiled old-source/additive public bindings | **NOT RUN**; friend-assembly public-only inspection is narrower |
+| Q3 | Measured production-default below/at/above boundaries for all six fields and Candle finite envelope decision | **NOT RUN**; small-policy/default-depth controls are narrower |
+| Q4 | Candle listed-only/C1 fallback/C2 publication safety and R4/R4B/R5 cold resource/order/dependency/failure controls on both TFMs (72 core cases before extras) | **NOT RUN**; no Candle edits or eligibility inference |
+| Q5 | Exact-candidate Windows/Linux/macOS supported-runtime release provenance/license/validation and one outcome checklist | **NOT RUN**; Windows-local testing does not certify Linux/macOS or release assets |
+
+Original-supplier, Firely and live corpus contents were not independently
+inspected for this inventory: **unverified in every row**. Unseen forms are not
+silently accepted or rejected on someone else's behalf. No pack, publish,
+release/recovery/drift workflow, external consumer project, qualification
+harness, or other platform run was performed.
 
 ### CatalogEntry
 
@@ -1102,7 +1530,8 @@ effect leave `Disposition`, `PreviousManifestDate`, and `ManifestDate` null.
 Manager-owned already-current short circuits can still report their recognized
 outcome without a cache commit.
 
-The date fields are raw nullable `package.json` `date` strings. For an update,
+The date fields are nullable `package.json` `date` projections: verbatim
+strings or the lexical text of accepted compact numeric tokens. For an update,
 `PreviousManifestDate` identifies the replaced cache entry and `ManifestDate`
 identifies the resulting package. Dates are presentation data and are not used
 to decide whether the cache changed.
@@ -1659,6 +2088,16 @@ root-layout tree only in ordinary mode. It stores no protection marker.
 Manager callers configure `FhirPackageManagerOptions.Unmodified` instead so
 the same policy also covers dependencies, restore, and index operations.
 
+`Limits` inherits the direct cache snapshot and only tightens assigned fields.
+Map endpoint `PackageDownloadResult.ContentLength` to `ReportedContentLength`,
+the **selected source's** `ResolvedDirective.ShaSum` to `ExpectedShaSum`, and
+its available `Sha256Sum` to `ExpectedSha256Sum`, retaining `VerifyChecksum`.
+Do not combine checksums from different candidates. Native acquisition rejects
+negative reports as `DownloadFailed` / `Acquisition`; reports above the ceiling
+fail with `CompressedSizeLimitExceeded` before reading. Absent/underreported
+actual excess fails during acquisition. Within-ceiling discrepancies do not
+introduce a strict reported-versus-actual length-equality contract.
+
 ### IHardenedPackageCache
 
 `IHardenedPackageCache : IPackageCache` advertises bounded acquisition,
@@ -1723,8 +2162,9 @@ var cache = new DiskPackageCache();
 var cache = new DiskPackageCache("/my/cache");
 ```
 
-The original constructor remains; the configured overload adds a required
-fourth argument, without changing old null/default bindings:
+The original and retry-configured constructors remain; exactly one new
+required-five-argument overload supplies installation policy without changing
+old null/default/named-argument bindings:
 
 ```csharp
 public DiskPackageCache(
@@ -1737,9 +2177,23 @@ public DiskPackageCache(
     ILogger<DiskPackageCache>? logger,
     TimeProvider? timeProvider,
     FileSystemRetryOptions fileSystemRetry);
+
+public DiskPackageCache(
+    string? cacheDirectory,
+    ILogger<DiskPackageCache>? logger,
+    TimeProvider? timeProvider,
+    FileSystemRetryOptions fileSystemRetry,
+    PackageInstallLimits installLimits);
 ```
 
-Retry settings are snapshotted before cache-root discovery or creation.
+**All five arguments are required**, including nullable logger/time-provider
+positions; null there selects the existing defaults. No optional policy
+parameter or exposed internal context overload competes with old calls:
+zero–three argument calls still bind to the original constructor, four to the
+retry constructor. Retry and installation settings are validated and
+snapshotted before cache-root discovery or creation. Use the
+[complete six-field example](#packageinstalllimits) for finite higher ceilings
+and the per-call only-tightening rule.
 
 Key behaviors:
 
@@ -1934,6 +2388,9 @@ These are methods on `RegistryClientFactory`. Each snapshots once. The existing
 for the whole owned chain; no additional public context parameter is exposed.
 HTTP transport/header/redirect requirements are unchanged by retry options.
 
+Explicit finite installation policy uses the new required-six-argument
+[RegistryClientFactory](#registryclientfactory) overloads below.
+
 **Well-known endpoints:**
 
 | Static Property | URL | Type |
@@ -1950,6 +2407,98 @@ HTTP transport/header/redirect requirements are unchanged by retry options.
 |-------|------------|
 | `DefaultPublishedChain` | Primary → Secondary → HL7 Website |
 | `DefaultFullChain` | Primary → Secondary → CI Build → HL7 Website |
+
+### RegistryClientFactory
+
+Exactly two additive endpoint signatures, one per existing transport family:
+
+```csharp
+public static IRegistryClient CreateClientForEndpoint(
+    RegistryEndpoint endpoint,
+    HttpClient httpClient,
+    ILoggerFactory loggerFactory,
+    TimeProvider? timeProvider,
+    FileSystemRetryOptions fileSystemRetry,
+    PackageInstallLimits installLimits);
+
+public static IRegistryClient CreateClientForEndpoint(
+    RegistryEndpoint endpoint,
+    RegistryHttpTransport transport,
+    ILoggerFactory loggerFactory,
+    TimeProvider? timeProvider,
+    FileSystemRetryOptions fileSystemRetry,
+    PackageInstallLimits installLimits);
+```
+
+**All six arguments are required.** The existing three/four-argument calls
+(optional `timeProvider = null`) and required-five retry calls retain their
+public parameter types, names, default flags, and null/default bindings.
+Typed null transport arguments retain `ArgumentNullException`; required null
+installation/retry policies retain typed `InvalidPolicy` /
+`PolicyValidation`. No GitHub-token/context parameter or new NPM leaf policy
+constructor was made public. These wrappers use existing resolver/context
+routes and pass no GitHub token.
+
+Both families support all four endpoint types. An `HttpClient` overload
+remains unverified; a supplied redirect-controlled transport retains its
+guarantees, without granting new header/redirect privileges. Each validates
+and snapshots policy as described under [PackageInstallLimits](#packageinstalllimits).
+NPM uses its snapshot for **local publication preparation**, including bounded
+archive reading/extraction before PUT. This does not add a download spool:
+FHIR-NPM/NPM downloads remain response-backed; direct native cache acquisition
+and extraction enforce their **separate cache policy**.
+
+For a direct download/install route, reuse the complete all-six-field `limits`
+and normal `retry` objects from the preceding example. The caller owns the
+HTTP client; a real handler must have automatic redirects disabled. Disposing
+`PackageDownloadResult` releases the response and content stream; cache
+installation borrows that stream and does not dispose it:
+
+```csharp
+using HttpClient httpClient = new(
+    new HttpClientHandler { AllowAutoRedirect = false });
+RegistryHttpTransport transport = RegistryHttpTransport.CreateRedirectControlled(
+    httpClient, TimeSpan.FromSeconds(30), 5);
+RegistryEndpoint endpoint = new()
+{
+    Url = "https://registry.example.test/",
+    Type = RegistryType.Npm,
+};
+IRegistryClient client = RegistryClientFactory.CreateClientForEndpoint(
+    endpoint, transport, NullLoggerFactory.Instance, null, retry, limits);
+// For uncredentialed reads, the other required-six family is:
+IRegistryClient unverified = RegistryClientFactory.CreateClientForEndpoint(
+    endpoint, httpClient, NullLoggerFactory.Instance, null, retry, limits);
+using DiskPackageCache cache = new(
+    "./endpoint-cache", null, null, retry, limits);
+
+ResolvedDirective? selected = await client.ResolveAsync(
+    PackageDirective.Parse("example.package#1.0.0"),
+    cancellationToken: cancellationToken);
+if (selected is not null)
+{
+    await using PackageDownloadResult? download =
+        await client.DownloadAsync(selected, cancellationToken);
+    if (download is not null)
+    {
+        PackageRecord installed = await cache.InstallAsync(
+            selected.Reference,
+            download.Content,
+            new InstallCacheOptions
+            {
+                Unmodified = true,
+                VerifyChecksum = true,
+                ReportedContentLength = download.ContentLength,
+                ExpectedShaSum = selected.ShaSum,
+                ExpectedSha256Sum = selected.Sha256Sum,
+            },
+            cancellationToken);
+    }
+}
+```
+
+`NullLoggerFactory` is from `Microsoft.Extensions.Logging.Abstractions`.
+This example is acquisition only, not permission or a recipe to publish.
 
 ### Built-in Registry Clients
 
@@ -2417,7 +2966,7 @@ interfaces, and 1 record struct — with 94 distinct names, one per row below.
 | `PackageCacheKey` | `FhirPkg.Installation` | Intentionally undocumented — implementation detail, not part of the supported contract |
 | `PackageClosure` | `FhirPkg.Models` | Documented → [§PackageClosure](#packageclosure) |
 | `PackageDirective` | `FhirPkg.Models` | Documented → [§PackageDirective](#packagedirective) |
-| `PackageDownloadResult` | `FhirPkg.Models` | Intentionally undocumented — registry transport result returned only by `IRegistryClient.DownloadAsync` ([§IRegistryClient](#iregistryclient)); no `IFhirPackageManager` operation surfaces it |
+| `PackageDownloadResult` | `FhirPkg.Models` | Response ownership and direct-cache mappings documented → [§RegistryClientFactory](#registryclientfactory); no `IFhirPackageManager` operation surfaces it |
 | `PackageFixups` | `FhirPkg.Utilities` | Intentionally undocumented — implementation detail, not part of the supported contract |
 | `PackageIndex` | `FhirPkg.Indexing` | Documented → [§PackageIndex & ResourceIndexEntry](#packageindex--resourceindexentry) |
 | `PackageIndexer` | `FhirPkg.Indexing` | Standalone retry constructors and interface contract documented → [§IPackageIndexer](#ipackageindexer) |
@@ -2425,7 +2974,7 @@ interfaces, and 1 record struct — with 94 distinct names, one per row below.
 | `PackageInstallDisposition` | `FhirPkg.Models` | Documented → [§PackageInstallDisposition](#packageinstalldisposition) |
 | `PackageInstallErrorCode` | `FhirPkg.Installation` | Documented → [§PackageInstallErrorCode](#packageinstallerrorcode) |
 | `PackageInstallException` | `FhirPkg.Installation` | Intentionally undocumented — the typed failure it carries is enumerated as [§PackageInstallErrorCode](#packageinstallerrorcode) and [§PackageInstallStage](#packageinstallstage), which is where callers branch |
-| `PackageInstallLimits` | `FhirPkg` | Intentionally undocumented — its defaults, per-call tightening rule, and `FHIRPKG_*` overrides are stated under [§PackageSourceInstallOptions](#packagesourceinstalloptions) |
+| `PackageInstallLimits` | `FhirPkg` | Documented → [§PackageInstallLimits](#packageinstalllimits) |
 | `PackageInstallResult` | `FhirPkg.Models` | Documented → [§PackageInstallResult](#packageinstallresult) |
 | `PackageInstallStage` | `FhirPkg.Installation` | Documented → [§PackageInstallStage](#packageinstallstage) |
 | `PackageInstallStatus` | `FhirPkg.Models` | Documented → [§PackageInstallStatus](#packageinstallstatus) |
@@ -2443,7 +2992,7 @@ interfaces, and 1 record struct — with 94 distinct names, one per row below.
 | `RedundantRegistryClient` | `FhirPkg.Registry` | Documented → [§Built-in Registry Clients](#built-in-registry-clients) |
 | `RegistryAttemptFailure` | `FhirPkg.Registry` | Documented → [§IRegistryClient](#iregistryclient) |
 | `RegistryClientBase` | `FhirPkg.Registry` | Documented → [§RegistryClientBase](#registryclientbase) |
-| `RegistryClientFactory` | `FhirPkg.Registry` | Intentionally undocumented — covered where it is required: `CreateClientForEndpoint` in [§RegistryEndpoint](#registryendpoint) and `BuildRegistryClient` in [§FhirPackageManagerOptions](#fhirpackagemanageroptions) |
+| `RegistryClientFactory` | `FhirPkg.Registry` | Endpoint policy documented → [§RegistryClientFactory](#registryclientfactory); existing retry families in [§RegistryEndpoint](#registryendpoint), `BuildRegistryClient` in [§FhirPackageManagerOptions](#fhirpackagemanageroptions) |
 | `RegistryEndpoint` | `FhirPkg.Registry` | Documented → [§RegistryEndpoint](#registryendpoint) |
 | `RegistryFailureCategory` | `FhirPkg.Registry` | Documented → [§RegistryFailureCategory](#registryfailurecategory) |
 | `RegistryHttpTransport` | `FhirPkg.Registry` | Intentionally undocumented — the transport guarantee it carries is described where it is required, in [§RegistryEndpoint](#registryendpoint) and [§FhirPackageManagerOptions](#fhirpackagemanageroptions) |

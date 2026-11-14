@@ -10,6 +10,22 @@ qualification evidence) lives alongside this file under
 
 ## Current
 
+## [2026.1113.1815] - 2026-11-13
+
+### Added
+- Retained raw source-specific `unlisted` listing values through reading and
+  supported serialization without changing SDK version eligibility.
+- Added required-argument direct cache and individual endpoint construction
+  overloads for explicit finite installation limits and filesystem retries,
+  preserving existing overload bindings and per-call tightening.
+
+### Fixed
+- Accepted string-valued repositories and eight- or fourteen-digit numeric
+  manifest dates during import, installation, and cache reads while preserving
+  public metadata types, author behavior, and imported bytes.
+- Made extraction-cancellation regression tests deterministic without changing
+  installation behavior.
+
 ## [2026.1113.1240] - 2026-11-13
 
 ### Fixed

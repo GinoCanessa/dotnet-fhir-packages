@@ -621,6 +621,559 @@ public class PackageManifestTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(RepositoryForms))]
+    public void Deserialize_RepositoryForms_PreservesProjection(
+        string? repositoryJson,
+        string? type,
+        string? url,
+        string? directory,
+        string reader)
+    {
+        PackageManifest manifest = DeserializeManifest(CreateMetadataManifest("repository", repositoryJson), reader);
+
+        manifest.Repository.ShouldBe(repositoryJson is null or "null"
+            ? null
+            : new NpmRepository(type, url, directory));
+        manifest.Description.ShouldBe("After metadata");
+        manifest.Dependencies!["dependency.package"].ShouldBe("2.0.0");
+    }
+
+    public static IEnumerable<object?[]> RepositoryForms()
+    {
+        (string? Json, string? Type, string? Url, string? Directory)[] cases =
+        [
+            (null, null, null, null),
+            ("null", null, null, null),
+            ("\"github:example/repo\"", null, "github:example/repo", null),
+            ("\"https://example.test/repo.git\"", null, "https://example.test/repo.git", null),
+            ("\"\"", null, "", null),
+            ("\"  Éxample/作者\\t  \"", null, "  Éxample/作者\t  ", null),
+            ("""{"type":"git","url":"https://example.test/repo.git","directory":"src"}""",
+                "git", "https://example.test/repo.git", "src"),
+            ("{}", null, null, null),
+            ("""{"type":null,"url":null,"directory":null}""", null, null, null),
+            ("""{"type":"","url":"","directory":""}""", "", "", ""),
+            ("""{"directory":" src ","url":" invalid URL ","type":" git "}""", " git ", " invalid URL ", " src "),
+            ("""{"url":"github:example/repo","unknown":{"type":42,"nested":[true,null]},"other":[]}""",
+                null, "github:example/repo", null),
+        ];
+        foreach ((string? json, string? type, string? url, string? directory) in cases)
+        {
+            foreach (string reader in s_manifestReaders)
+            {
+                yield return [json, type, url, directory, reader];
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("String")]
+    [InlineData("Stream")]
+    [InlineData("DefaultSerializer")]
+    public void Deserialize_RepositoryMembers_RespectsCasingAndEveryOccurrence(string reader)
+    {
+        foreach (string member in new[] { "type", "url", "directory" })
+        {
+            string upper = member.ToUpperInvariant();
+            (string Json, string? Expected)[] cases =
+            [
+                ($$"""{"{{member}}":"first","{{member}}":"last"}""", "last"),
+                ($$"""{"{{member}}":"first","{{member}}":null}""", null),
+                ($$"""{"{{member}}":"first","{{member}}":""}""", ""),
+                ($$"""{"{{member}}":null,"{{member}}":"last"}""", "last"),
+                ($$"""{"{{member}}":"","{{member}}":"last"}""", "last"),
+                ($$"""{"{{member}}":"first","{{upper}}":"last"}""",
+                    reader == "DefaultSerializer" ? "first" : "last"),
+                ($$"""{"{{upper}}":"first","{{member}}":"last"}""", "last"),
+                ($$"""{"{{member}}":"first","{{upper}}":null}""",
+                    reader == "DefaultSerializer" ? "first" : null),
+                ($$"""{"{{member}}":"first","{{upper}}":""}""",
+                    reader == "DefaultSerializer" ? "first" : ""),
+                ($$"""{"{{upper}}":42,"{{member}}":"last"}""", "last"),
+            ];
+            foreach ((string json, string? expected) in cases)
+            {
+                if (json.Contains(":42", StringComparison.Ordinal) && reader != "DefaultSerializer")
+                {
+                    Should.Throw<JsonException>(() => DeserializeManifest(
+                        CreateMetadataManifest("repository", json), reader)).Path.ShouldBe("$.repository");
+                    continue;
+                }
+
+                NpmRepository repository = DeserializeManifest(
+                    CreateMetadataManifest("repository", json), reader).Repository!;
+                GetRepositoryMember(repository, member).ShouldBe(expected);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Deserialize_RepositoryAndDateCasing_UsesExplicitOptions(bool caseInsensitive)
+    {
+        JsonSerializerOptions options = new() { PropertyNameCaseInsensitive = caseInsensitive };
+        const string json = """
+            {"name":"test.package","version":"1.0.0","Repository":{"TYPE":"git","URL":"raw","DIRECTORY":""},"Date":20240203}
+            """;
+        PackageManifest manifest = JsonSerializer.Deserialize<PackageManifest>(json, options)!;
+
+        manifest.Repository.ShouldBe(caseInsensitive ? new NpmRepository("git", "raw", "") : null);
+        manifest.Date.ShouldBe(caseInsensitive ? "20240203" : null);
+        const string invalid = """
+            {"name":"test.package","version":"1.0.0","repository":{"URL":42,"url":null},"DATE":true}
+            """;
+        if (caseInsensitive)
+        {
+            Should.Throw<JsonException>(() => JsonSerializer.Deserialize<PackageManifest>(invalid, options))
+                .Path.ShouldBe("$.repository");
+        }
+        else
+        {
+            JsonSerializer.Deserialize<PackageManifest>(invalid, options)!.Repository
+                .ShouldBe(new NpmRepository(null, null, null));
+        }
+
+        string dateOnly = """{"name":"test.package","version":"1.0.0","date":"first","DATE":true}""";
+        if (caseInsensitive)
+        {
+            Should.Throw<JsonException>(() => JsonSerializer.Deserialize<PackageManifest>(dateOnly, options))
+                .Path.ShouldBe("$.DATE");
+        }
+        else
+        {
+            JsonSerializer.Deserialize<PackageManifest>(dateOnly, options)!.Date.ShouldBe("first");
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(CompactDateForms))]
+    public void Deserialize_CompactDateForms_PreservesLexicalText(string? dateJson, string? expected, string reader)
+    {
+        PackageManifest manifest = DeserializeManifest(CreateMetadataManifest("date", dateJson), reader);
+
+        manifest.Date.ShouldBe(expected);
+        manifest.Description.ShouldBe("After metadata");
+        manifest.Dependencies!["dependency.package"].ShouldBe("2.0.0");
+    }
+
+    public static IEnumerable<object?[]> CompactDateForms()
+    {
+        (string? Json, string? Expected)[] cases =
+        [
+            (null, null),
+            ("null", null),
+            ("20240203", "20240203"),
+            ("20240203123456", "20240203123456"),
+            ("99999999", "99999999"),
+            ("99999999999999", "99999999999999"),
+            ("\"20240203\"", "20240203"),
+            ("\"20240203123456\"", "20240203123456"),
+            ("\"00000000\"", "00000000"),
+            ("\"00000000000000\"", "00000000000000"),
+            ("\"2024-02-03T12:34:56+05:30\"", "2024-02-03T12:34:56+05:30"),
+            ("\"not a date\"", "not a date"),
+            ("\"\"", ""),
+            ("\"  日期\\t  \"", "  日期\t  "),
+        ];
+        foreach ((string? json, string? expected) in cases)
+        {
+            foreach (string reader in s_manifestReaders)
+            {
+                yield return [json, expected, reader];
+            }
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidRepositoryOrDateForms))]
+    public void Deserialize_InvalidRepositoryOrDate_ThrowsJsonException(string field, string value, string reader)
+    {
+        JsonException exception = Should.Throw<JsonException>(
+            () => DeserializeManifest(CreateMetadataManifest(field, value), reader));
+
+        exception.Path.ShouldBe($"$.{field}");
+    }
+
+    public static IEnumerable<object?[]> InvalidRepositoryOrDateForms()
+    {
+        foreach (string reader in s_manifestReaders)
+        {
+            foreach (string value in new[] { "42", "1.5", "true", "false", "[]", "[null]" })
+            {
+                yield return ["repository", value, reader];
+            }
+
+            foreach (string member in new[] { "type", "url", "directory" })
+            {
+                foreach (string value in new[] { "42", "true", "false", "{}", "[]" })
+                {
+                    foreach (string members in new[]
+                    {
+                        $"\"{member}\":{value}",
+                        $"\"{member}\":{value},\"{member}\":\"last\"",
+                        $"\"{member}\":{value},\"{member}\":null",
+                        $"\"{member}\":{value},\"{member}\":\"\"",
+                        $"\"{member}\":\"first\",\"{member}\":{value}",
+                    })
+                    {
+                        yield return ["repository", "{" + members + "}", reader];
+                    }
+                }
+            }
+
+            foreach (string value in new[]
+            {
+                "-20240203", "-20240203123456", "-1234567", "-1234567890123",
+                "202402.3", "123456789012.3", "20240203.0", "20240203123456.0",
+                "20240203e0", "20240203123456E0", "2.0240203e7", "2024e003", "1234567890e+03", "2024020312e+003",
+                "0", "1234567", "123456789", "1234567890123", "123456789012345",
+                "true", "false", "[]", "[null]", "{}",
+            })
+            {
+                yield return ["date", value, reader];
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("String")]
+    [InlineData("Stream")]
+    [InlineData("DefaultSerializer")]
+    public void Deserialize_DuplicateRepositoryOrDate_ValidatesEveryOccurrence(string reader)
+    {
+        foreach ((string field, string valid, string invalid) in new[]
+        {
+            ("repository", "\"github:example/repo\"", "true"),
+            ("repository", """{"url":"raw"}""", """{"url":42}"""),
+            ("date", "20240203123456", "20240203e0"),
+        })
+        {
+            foreach (string later in new[] { valid, "null", "\"\"" })
+            {
+                foreach (string properties in new[]
+                {
+                    $"\"{field}\":{invalid},\"{field}\":{later}",
+                    $"\"{field}\":{later},\"{field}\":{invalid}",
+                })
+                {
+                    Should.Throw<JsonException>(() => DeserializeManifest(
+                        CreateMetadataProperties(properties), reader)).Path.ShouldBe($"$.{field}");
+                }
+            }
+
+            foreach ((string first, string last) in new[]
+            {
+                (valid, "null"), ("null", valid), (valid, "\"\""), ("\"\"", valid), (valid, valid),
+            })
+            {
+                PackageManifest manifest = DeserializeManifest(CreateMetadataProperties(
+                    $"\"{field}\":{first},\"{field}\":{last}"), reader);
+                PackageManifest expected = DeserializeManifest(CreateMetadataManifest(field, last), reader);
+                manifest.Repository.ShouldBe(expected.Repository);
+                manifest.Date.ShouldBe(expected.Date);
+            }
+
+            foreach (string properties in new[]
+            {
+                $"\"{field.ToUpperInvariant()}\":{invalid},\"{field}\":null",
+                $"\"{field}\":null,\"{field.ToUpperInvariant()}\":{invalid}",
+            })
+            {
+                if (reader == "DefaultSerializer")
+                    GetInventoryValue(DeserializeManifest(CreateMetadataProperties(properties), reader), field).ShouldBeNull();
+                else
+                    Should.Throw<JsonException>(() => DeserializeManifest(CreateMetadataProperties(properties), reader));
+            }
+
+            foreach (string clearing in new[] { "null", "\"\"" })
+            {
+                foreach (string properties in new[]
+                {
+                    $"\"{field}\":{valid},\"{field.ToUpperInvariant()}\":{clearing}",
+                    $"\"{field.ToUpperInvariant()}\":{valid},\"{field}\":{clearing}",
+                })
+                {
+                    PackageManifest actual = DeserializeManifest(CreateMetadataProperties(properties), reader);
+                    string expectedLast = reader == "DefaultSerializer"
+                        && properties.StartsWith($"\"{field}\":", StringComparison.Ordinal) ? valid : clearing;
+                    PackageManifest expected = DeserializeManifest(CreateMetadataManifest(field, expectedLast), reader);
+                    actual.Repository.ShouldBe(expected.Repository);
+                    actual.Date.ShouldBe(expected.Date);
+                }
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("String")]
+    [InlineData("Stream")]
+    [InlineData("DefaultSerializer")]
+    public void Deserialize_RepositoryOrDateMalformedJsonAndMissingRequiredFields_Throws(string reader)
+    {
+        foreach (string json in new[]
+        {
+            """{"version":"1.0.0","repository":"github:example/repo","date":20240203}""",
+            """{"name":"test.package","repository":{},"date":20240203}""",
+            """{"name":"test.package","version":"1.0.0","repository":{"url":}}""",
+            """{"name":"test.package","version":"1.0.0","date":20240203""",
+            """{"name":"test.package","version":"1.0.0","date":+20240203}""",
+            """{"name":"test.package","version":"1.0.0","date":020240203}""",
+            """{"name":"test.package","version":"1.0.0","date":２０２４０２０３}""",
+        })
+        {
+            Should.Throw<JsonException>(() => DeserializeManifest(json, reader));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Serialize_RepositoryAndDate_UsesExistingPublicTypes(bool defaultSerializer)
+    {
+        foreach (string repository in new[]
+        {
+            "\"github:example/repo\"",
+            """{"type":"git","url":" raw ","directory":""}""",
+            """{"type":null,"url":"","directory":null}""",
+            "null",
+        })
+        {
+            foreach (string date in new[] { "20240203", "20240203123456", "\"ordinary date\"", "null" })
+            {
+                PackageManifest manifest = DeserializeManifest(CreateMetadataProperties(
+                    $"\"repository\":{repository},\"date\":{date}"), "String");
+                NpmRepository? publicRepository = manifest.Repository;
+                string? publicDate = manifest.Date;
+                string json = defaultSerializer ? JsonSerializer.Serialize(manifest) : manifest.Serialize();
+                using JsonDocument document = JsonDocument.Parse(json);
+                JsonElement root = document.RootElement;
+                if (publicRepository is null)
+                {
+                    root.TryGetProperty("repository", out JsonElement value).ShouldBe(defaultSerializer);
+                    if (defaultSerializer)
+                        value.ValueKind.ShouldBe(JsonValueKind.Null);
+                }
+                else
+                {
+                    JsonElement value = root.GetProperty("repository");
+                    value.ValueKind.ShouldBe(JsonValueKind.Object);
+                    using JsonDocument expected = JsonDocument.Parse(JsonSerializer.Serialize(
+                        publicRepository,
+                        new JsonSerializerOptions
+                        {
+                            DefaultIgnoreCondition = defaultSerializer
+                                ? System.Text.Json.Serialization.JsonIgnoreCondition.Never
+                                : System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+                        }));
+                    JsonElement.DeepEquals(value, expected.RootElement).ShouldBeTrue();
+                    value.GetProperty("url").GetString().ShouldBe(publicRepository.Url);
+                }
+
+                if (publicDate is null)
+                {
+                    root.TryGetProperty("date", out JsonElement value).ShouldBe(defaultSerializer);
+                    if (defaultSerializer)
+                        value.ValueKind.ShouldBe(JsonValueKind.Null);
+                }
+                else
+                {
+                    root.GetProperty("date").ValueKind.ShouldBe(JsonValueKind.String);
+                    root.GetProperty("date").GetString().ShouldBe(publicDate);
+                }
+
+                foreach (string reader in s_manifestReaders)
+                {
+                    PackageManifest reopened = DeserializeManifest(json, reader);
+                    reopened.Repository.ShouldBe(publicRepository);
+                    reopened.Date.ShouldBe(publicDate);
+                }
+            }
+        }
+    }
+
+    // Raw specimens below are independently authored local controls. FullManifestJson,
+    // AuthorForms and the retained inference tests provide repository-example provenance,
+    // not independently observed Firely/live-registry/corpus evidence (all unverified).
+    [Theory]
+    [MemberData(nameof(OptionalFieldInventory))]
+    public void Deserialize_OptionalFieldInventory_PreservesBaselineContracts(
+        string row,
+        string control,
+        string? value,
+        string? expectedJson,
+        bool rejected,
+        string reader)
+    {
+        string json = CreateInventoryManifest(row, value);
+        if (rejected)
+        {
+            Should.Throw<JsonException>(() => DeserializeManifest(json, reader), $"{row}/{control}/{reader}");
+            return;
+        }
+
+        PackageManifest manifest = DeserializeManifest(json, reader);
+        manifest.Name.ShouldBe("test.package");
+        manifest.Version.ShouldBe("1.0.0");
+        object? actual = GetInventoryValue(manifest, row);
+        using JsonDocument actualDocument = JsonDocument.Parse(JsonSerializer.Serialize(actual));
+        using JsonDocument expectedDocument = JsonDocument.Parse(expectedJson ?? "null");
+        JsonElement.DeepEquals(actualDocument.RootElement, expectedDocument.RootElement)
+            .ShouldBeTrue($"{row}/{control}/{reader}");
+        if (row == "fhirVersions")
+        {
+            manifest.InferredFhirRelease.ShouldBe(actual is null ? null : FhirRelease.R4);
+        }
+    }
+
+    public static IEnumerable<object?[]> OptionalFieldInventory()
+    {
+        (string Row, string Valid, string Expected, string[] Invalid)[] rows =
+        [
+            ("description", "\"description\"", "\"description\"", ["42", "true", "{}", "[]"]),
+            ("license", "\"CC0-1.0\"", "\"CC0-1.0\"", ["42", "true", "{}", "[]"]),
+            ("homepage", "\"https://example.test/\"", "\"https://example.test/\"", ["42", "true", "{}", "[]"]),
+            ("canonical", "\"https://example.test/fhir\"", "\"https://example.test/fhir\"", ["42", "true", "{}", "[]"]),
+            ("type", "\"ig\"", "\"ig\"", ["42", "true", "{}", "[]"]),
+            ("title", "\"Example IG\"", "\"Example IG\"", ["42", "true", "{}", "[]"]),
+            ("jurisdiction", "\"US\"", "\"US\"", ["42", "true", "{}", "[]"]),
+            ("author", """{"name":"Example","email":"e@test","url":"raw"}""", "\"Example <e@test> (raw)\"",
+                ["42", "true", "[]", "[null]"]),
+            ("author.name", "\"Example\"", "\"Example\"", ["42", "true", "{}", "[]"]),
+            ("author.email", "\"e@test\"", "\"<e@test>\"", ["42", "true", "{}", "[]"]),
+            ("author.url", "\"raw\"", "\"(raw)\"", ["42", "true", "{}", "[]"]),
+            ("repository", """{"type":"git","url":"raw","directory":"src"}""",
+                """{"type":"git","url":"raw","directory":"src"}""", ["42", "true", "[]", "[null]"]),
+            ("repository.type", "\"git\"", "\"git\"", ["42", "true", "{}", "[]"]),
+            ("repository.url", "\"raw\"", "\"raw\"", ["42", "true", "{}", "[]"]),
+            ("repository.directory", "\"src\"", "\"src\"", ["42", "true", "{}", "[]"]),
+            ("date", "20240203123456", "\"20240203123456\"", ["42", "true", "{}", "[]"]),
+            ("dependencies", """{"dependency.package":"2.0.0"}""", """{"dependency.package":"2.0.0"}""",
+                ["42", "true", "[]", "\"x\"", """{"bad":42}""", """{"bad":true}""", """{"bad":{}}""", """{"bad":[]}"""]),
+            ("devDependencies", """{"dev.package":"2.0.0"}""", """{"dev.package":"2.0.0"}""",
+                ["42", "true", "[]", "\"x\"", """{"bad":42}""", """{"bad":true}""", """{"bad":{}}""", """{"bad":[]}"""]),
+            ("dist-tags", """{"latest":"1.0.0"}""", """{"latest":"1.0.0"}""",
+                ["42", "true", "[]", "\"x\"", """{"bad":42}""", """{"bad":true}""", """{"bad":{}}""", """{"bad":[]}"""]),
+            ("keywords", """["fhir","ig"]""", """["fhir","ig"]""",
+                ["42", "true", "{}", "\"x\"", "[42]", "[true]", "[{}]", "[[]]"]),
+            ("fhirVersions", """["4.0.1"]""", """["4.0.1"]""",
+                ["42", "true", "{}", "\"x\"", "[42]", "[true]", "[{}]", "[[]]"]),
+            ("dist", """{"shasum":"sha1","tarball":"https://example.test/p.tgz","integrity":"sha256-value"}""",
+                """{"shasum":"sha1","tarball":"https://example.test/p.tgz","integrity":"sha256-value"}""",
+                ["42", "true", "[]", "\"x\""]),
+            ("dist.shasum", "\"sha1\"", "\"sha1\"", ["42", "true", "{}", "[]"]),
+            ("dist.tarball", "\"https://example.test/p.tgz\"", "\"https://example.test/p.tgz\"", ["42", "true", "{}", "[]"]),
+            ("dist.integrity", "\"sha256-value\"", "\"sha256-value\"", ["42", "true", "{}", "[]"]),
+            ("unknown", """{"opaque":[1,true,null,{"nested":"unchanged"}]}""", "null", []),
+        ];
+        foreach ((string row, string valid, string expected, string[] invalid) in rows)
+        {
+            foreach (string reader in s_manifestReaders)
+            {
+                yield return [row, "absent", null, null, false, reader];
+                yield return [row, "null", "null", null, false, reader];
+                yield return [row, "known-valid", valid, expected, false, reader];
+                foreach (string shape in invalid)
+                {
+                    yield return [row, "malformed-shape:" + shape, shape, null, true, reader];
+                }
+
+                if (row is "dependencies" or "devDependencies" or "dist-tags")
+                {
+                    yield return [row, "null-dictionary-value", """{"nullable":null}""",
+                        """{"nullable":null}""", false, reader];
+                    yield return [row, "empty-dictionary", "{}", "{}", false, reader];
+                }
+                else if (row is "keywords" or "fhirVersions")
+                {
+                    string list = row == "fhirVersions" ? """["4.0.1",null]""" : """["fhir",null]""";
+                    yield return [row, "null-list-element", list, list, false, reader];
+                }
+                else if (row == "unknown")
+                {
+                    foreach (string ignored in new[] { "42", "true", "[]", "\"raw\"" })
+                        yield return [row, "ignored:" + ignored, ignored, null, false, reader];
+                }
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("String")]
+    [InlineData("Stream")]
+    [InlineData("DefaultSerializer")]
+    public void Deserialize_NullCollectionValues_PreservesBaselineInferenceContracts(string reader)
+    {
+        PackageManifest manifest = DeserializeManifest("""
+            {"name":"test.package","version":"1.0.0","fhirVersions":[null],
+             "dependencies":{"hl7.fhir.r5.core":null},"keywords":[null]}
+            """, reader);
+
+        manifest.FhirVersions![0].ShouldBeNull();
+        manifest.Keywords![0].ShouldBeNull();
+        manifest.Dependencies!["hl7.fhir.r5.core"].ShouldBeNull();
+        // The baseline reader accepts a null first element, but inference rejects it.
+        Should.Throw<ArgumentNullException>(() => manifest.InferredFhirRelease).ParamName.ShouldBe("version");
+        PackageManifest dependenciesOnly = manifest with { FhirVersions = null };
+        dependenciesOnly.InferredFhirRelease.ShouldBe(FhirRelease.R5);
+    }
+
+    private static object? GetInventoryValue(PackageManifest manifest, string row) => row switch
+    {
+        "description" => manifest.Description,
+        "license" => manifest.License,
+        "homepage" => manifest.Homepage,
+        "canonical" => manifest.Canonical,
+        "type" => manifest.Type,
+        "title" => manifest.Title,
+        "jurisdiction" => manifest.Jurisdiction,
+        "author" or "author.name" or "author.email" or "author.url" => manifest.Author,
+        "repository" => manifest.Repository,
+        "repository.type" => manifest.Repository?.Type,
+        "repository.url" => manifest.Repository?.Url,
+        "repository.directory" => manifest.Repository?.Directory,
+        "date" => manifest.Date,
+        "dependencies" => manifest.Dependencies,
+        "devDependencies" => manifest.DevDependencies,
+        "dist-tags" => manifest.DistTags,
+        "keywords" => manifest.Keywords,
+        "fhirVersions" => manifest.FhirVersions,
+        "dist" => manifest.Distribution,
+        "dist.shasum" => manifest.Distribution?.ShaSum,
+        "dist.tarball" => manifest.Distribution?.TarballUrl,
+        "dist.integrity" => manifest.Distribution?.Integrity,
+        "unknown" => null,
+        _ => throw new ArgumentOutOfRangeException(nameof(row)),
+    };
+
+    private static string? GetRepositoryMember(NpmRepository repository, string member) => member switch
+    {
+        "type" => repository.Type,
+        "url" => repository.Url,
+        "directory" => repository.Directory,
+        _ => throw new ArgumentOutOfRangeException(nameof(member)),
+    };
+
+    private static string CreateInventoryManifest(string row, string? value)
+    {
+        if (value is null)
+            return """{"name":"test.package","version":"1.0.0"}""";
+        string[] parts = row.Split('.');
+        string property = parts.Length == 1
+            ? $"\"{row}\":{value}"
+            : $"\"{parts[0]}\":{{\"{parts[1]}\":{value}}}";
+        return "{\"name\":\"test.package\",\"version\":\"1.0.0\"," + property + "}";
+    }
+
+    private static string CreateMetadataManifest(string field, string? value) =>
+        CreateMetadataProperties(value is null ? null : $"\"{field}\":{value}");
+
+    private static string CreateMetadataProperties(string? properties) =>
+        "{\"name\":\"test.package\",\"version\":\"1.0.0\"," +
+        (properties is null ? string.Empty : properties + ",") +
+        "\"description\":\"After metadata\",\"dependencies\":{\"dependency.package\":\"2.0.0\"}}";
+
     private static string CreateAuthorManifest(string? authorJson)
     {
         string authorProperty = authorJson is null ? string.Empty : $"\"author\": {authorJson},";
