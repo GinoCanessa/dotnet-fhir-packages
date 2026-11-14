@@ -13,10 +13,12 @@ using FhirPkg.Cli.Commands;
 using FhirPkg.Cache;
 using FhirPkg.Indexing;
 using FhirPkg.Installation;
+using FhirPkg.IO;
 using FhirPkg.Models;
 using FhirPkg.Registry;
 using FhirPkg.Utilities;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Win32.SafeHandles;
 using Shouldly;
 using Xunit;
 
@@ -31,6 +33,8 @@ public sealed class HardenedInstallationEnvironmentCollection
 [Trait("Category", "Integration")]
 public sealed class HardenedInstallationIntegrationTests
 {
+    private const int CancellationPayloadSize = 128 * 1024;
+
     public static TheoryData<string, int> NativeLimitBoundaries
     {
         get
@@ -481,7 +485,17 @@ public sealed class HardenedInstallationIntegrationTests
         string failure, bool import, bool overwrite)
     {
         using TestWorkspace workspace = new(useTemporaryDirectory: true);
-        using DiskPackageCache cache = CreateExplicitCache(workspace.CachePath, NativeLimits());
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        NativeFailureProgress progress = new(cancellation);
+        using DiskPackageCache cache = failure == "cancel-extraction"
+            ? new DiskPackageCache(
+                workspace.CachePath, null, null, NativeLimits(),
+                new FileSystemContext(
+                    new FileSystemRetryOptions(),
+                    new ExtractionCancellationPrimitives(progress),
+                    new FileSystemRetryExecutor()))
+            : CreateExplicitCache(workspace.CachePath, NativeLimits());
         PackageReference prior = new("failure.prior", "1.0.0");
         PackageReference neighbour = new("failure.neighbour", "1.0.0");
         PackageReference target = overwrite ? prior : new("failure.cold", "1.0.0");
@@ -496,8 +510,6 @@ public sealed class HardenedInstallationIntegrationTests
         InstallCacheOptions options = NativeOptions(bytes);
         options.OverwriteExisting = true;
         IOException readFailure = new("controlled one-shot source failure");
-        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            TestContext.Current.CancellationToken);
         using TrackingNativeStream source = new(bytes, blockSize: 17, beforeRead: call =>
         {
             if (call == 3 && failure == "read")
@@ -505,7 +517,6 @@ public sealed class HardenedInstallationIntegrationTests
             if (call == 3 && failure == "cancel-acquisition")
                 cancellation.Cancel();
         });
-        using NativeFailureProgress progress = new(workspace.CachePath, cancellation, failure == "cancel-extraction");
         options.Progress = progress;
         PackageInstallErrorCode code = PackageInstallErrorCode.InvalidArchive;
         PackageInstallStage stage = PackageInstallStage.ArchiveValidation;
@@ -539,57 +550,49 @@ public sealed class HardenedInstallationIntegrationTests
         Func<Task<PackageRecord>> attempt = () => import
             ? cache.ImportAsync(source, options, cancellation.Token)
             : cache.InstallAsync(target, source, options, cancellation.Token);
-        try
+        if (failure.StartsWith("cancel-", StringComparison.Ordinal))
         {
-            if (failure.StartsWith("cancel-", StringComparison.Ordinal))
+            OperationCanceledException exception = await Should.ThrowAsync<OperationCanceledException>(attempt);
+            exception.CancellationToken.ShouldBe(cancellation.Token);
+            if (failure == "cancel-acquisition")
             {
-                OperationCanceledException exception = await Should.ThrowAsync<OperationCanceledException>(attempt);
-                exception.CancellationToken.ShouldBe(cancellation.Token);
-                if (failure == "cancel-acquisition")
-                {
-                    source.ReadCalls.ShouldBe(3);
-                    source.BytesRead.ShouldBe(34);
-                    progress.Phases.ShouldNotContain(PackageProgressPhase.Extracting);
-                }
-                else
-                {
-                    source.BytesRead.ShouldBe(bytes.LongLength);
-                    progress.PartialExtractionBytes.ShouldBeGreaterThan(0);
-                    progress.PartialExtractionBytes.ShouldBeLessThan(8 * 1024 * 1024);
-                    progress.ManifestWritten.ShouldBeTrue();
-                    progress.LastExtractionEntryExists.ShouldBeFalse();
-                    progress.StagedArchiveBytes.ShouldBe(bytes.LongLength);
-                    progress.Phases.ShouldContain(PackageProgressPhase.Extracting);
-                    progress.Phases.ShouldNotContain(PackageProgressPhase.Validating);
-                }
+                source.ReadCalls.ShouldBe(3);
+                source.BytesRead.ShouldBe(34);
+                progress.Phases.ShouldNotContain(PackageProgressPhase.Extracting);
             }
             else
             {
-                PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(attempt);
-                exception.ErrorCode.ShouldBe(code);
-                exception.Stage.ShouldBe(stage);
-                if (failure == "read")
-                {
-                    exception.InnerException.ShouldBeSameAs(readFailure);
-                    source.ReadCalls.ShouldBe(3);
-                    source.BytesRead.ShouldBe(34);
-                }
-                if (failure is "json" or "repository" or "date")
-                {
-                    JsonException json = exception.InnerException.ShouldBeOfType<JsonException>();
-                    if (failure != "json")
-                        json.Path.ShouldBe("$." + failure);
-                    progress.Phases.ShouldContain(PackageProgressPhase.Validating);
-                }
-                if (stage == PackageInstallStage.IdentityValidation)
-                    progress.Phases.ShouldContain(PackageProgressPhase.Validating);
-                if (failure == "link")
-                    exception.Message.ShouldContain("unsupported raw entry type 0x32");
+                source.BytesRead.ShouldBe(bytes.LongLength);
+                progress.PartialExtractionBytes.ShouldBe(CancellationPayloadSize);
+                progress.ManifestWritten.ShouldBeTrue();
+                progress.LastExtractionEntryExists.ShouldBeFalse();
+                progress.StagedArchiveBytes.ShouldBe(bytes.LongLength);
+                progress.Phases.ShouldContain(PackageProgressPhase.Extracting);
+                progress.Phases.ShouldNotContain(PackageProgressPhase.Validating);
             }
         }
-        finally
+        else
         {
-            await progress.StopAsync();
+            PackageInstallException exception = await Should.ThrowAsync<PackageInstallException>(attempt);
+            exception.ErrorCode.ShouldBe(code);
+            exception.Stage.ShouldBe(stage);
+            if (failure == "read")
+            {
+                exception.InnerException.ShouldBeSameAs(readFailure);
+                source.ReadCalls.ShouldBe(3);
+                source.BytesRead.ShouldBe(34);
+            }
+            if (failure is "json" or "repository" or "date")
+            {
+                JsonException json = exception.InnerException.ShouldBeOfType<JsonException>();
+                if (failure != "json")
+                    json.Path.ShouldBe("$." + failure);
+                progress.Phases.ShouldContain(PackageProgressPhase.Validating);
+            }
+            if (stage == PackageInstallStage.IdentityValidation)
+                progress.Phases.ShouldContain(PackageProgressPhase.Validating);
+            if (failure == "link")
+                exception.Message.ShouldContain("unsupported raw entry type 0x32");
         }
         source.Disposed.ShouldBeFalse("All failed native routes leave the caller's one-shot stream open.");
         // Must precede IsInstalled/GetPackage/metadata reads, which can recover operations.
@@ -618,17 +621,11 @@ public sealed class HardenedInstallationIntegrationTests
             return CreateBoundaryArchive(target);
         if (failure == "cancel-extraction")
         {
-            // Many bounded entries keep a genuine extraction window after the
-            // first output appears, instead of racing a single fast gzip entry.
-            byte[] chunk = new byte[128 * 1024];
-            List<RawNativeEntry> entries =
-            [
+            byte[] chunk = new byte[CancellationPayloadSize];
+            return CreateRawNativeArchive(
                 new("package/package.json", ManifestBytes(target, ",\"description\":\"new\"")),
                 new("package/cancel.bin", chunk),
-            ];
-            for (int index = 1; index < 64; index++)
-                entries.Add(new($"package/chunk-{index:D2}.bin", chunk));
-            return CreateRawNativeArchive(entries.ToArray());
+                new("package/chunk-01.bin", chunk));
         }
         byte[] manifest = failure switch
         {
@@ -652,68 +649,117 @@ public sealed class HardenedInstallationIntegrationTests
         return CreateRawNativeArchive(new RawNativeEntry("package/package.json", manifest), extra);
     }
 
-    private sealed class NativeFailureProgress : IProgress<PackageProgress>, IDisposable
+    private sealed class NativeFailureProgress(CancellationTokenSource caller) : IProgress<PackageProgress>
     {
-        private readonly string _root;
-        private readonly CancellationTokenSource _caller;
-        private readonly bool _cancelExtraction;
-        private readonly CancellationTokenSource _stop = new();
-        private Task _probe = Task.CompletedTask;
-        internal NativeFailureProgress(string root, CancellationTokenSource caller, bool cancelExtraction)
-        {
-            _root = root;
-            _caller = caller;
-            _cancelExtraction = cancelExtraction;
-        }
         internal List<PackageProgressPhase> Phases { get; } = [];
         internal long PartialExtractionBytes { get; private set; }
         internal long StagedArchiveBytes { get; private set; }
         internal bool ManifestWritten { get; private set; }
         internal bool LastExtractionEntryExists { get; private set; }
-        public void Report(PackageProgress value)
+        public void Report(PackageProgress value) => Phases.Add(value.Phase);
+
+        internal void CancelAfterPayloadClosed(string path)
         {
-            Phases.Add(value.Phase);
-            if (_cancelExtraction && value.Phase == PackageProgressPhase.Extracting)
+            string directory = Path.GetDirectoryName(path)!;
+            PartialExtractionBytes = File.ReadAllBytes(path).LongLength;
+            ManifestWritten = File.ReadAllBytes(Path.Combine(directory, "package.json")).LongLength > 0;
+            LastExtractionEntryExists = File.Exists(Path.Combine(directory, "chunk-01.bin"));
+            string operation = Directory.GetParent(directory)!.Parent!.FullName;
+            StagedArchiveBytes = Directory.GetFiles(operation, "*.tgz")
+                .Select(file => new FileInfo(file).Length).Single();
+            caller.Cancel();
+        }
+    }
+
+    private sealed class ExtractionCancellationPrimitives(NativeFailureProgress progress) : IFileSystemPrimitives
+    {
+        private readonly IFileSystemPrimitives _inner = SystemFileSystemPrimitives.Instance;
+
+        public FileSystemPlatform Platform => _inner.Platform;
+        public FileSystemReplayOutcome<string> GetCurrentDirectory() => _inner.GetCurrentDirectory();
+        public FileSystemReplayOutcome<string> GetTempPath() => _inner.GetTempPath();
+        public FileSystemReplayOutcome<string> GetHomeDirectory() => _inner.GetHomeDirectory();
+        public FileSystemReplayOutcome<string> GetFullPath(string path) => _inner.GetFullPath(path);
+        public FileSystemReplayOutcome<FileSystemProbeResult> Probe(string path, bool followLinks = false) =>
+            _inner.Probe(path, followLinks);
+        public FileSystemReplayOutcome<FileAttributes> GetAttributes(string path) => _inner.GetAttributes(path);
+        public FileSystemReplayOutcome<long> GetLength(string path) => _inner.GetLength(path);
+        public FileSystemReplayOutcome<IEnumerator<string>> CreateDirectoryEnumerator(string path) =>
+            _inner.CreateDirectoryEnumerator(path);
+        public FileSystemReplayOutcome<bool> MoveNext(IEnumerator<string> enumerator, string path) =>
+            _inner.MoveNext(enumerator, path);
+        public FileSystemReplayOutcome<string> GetCurrent(IEnumerator<string> enumerator, string path) =>
+            _inner.GetCurrent(enumerator, path);
+        public FileSystemReplayOutcome<bool> DisposeEnumerator(IEnumerator<string> enumerator, string path) =>
+            _inner.DisposeEnumerator(enumerator, path);
+        public FileSystemReplayOutcome<FileStream> OpenFile(
+            string path, FileMode mode, FileAccess access, FileShare share, int bufferSize, FileOptions options) =>
+            _inner.OpenFile(path, mode, access, share, bufferSize, options);
+        public FileSystemReplayOutcome<SafeFileHandle> OpenFileHandle(
+            string path, FileMode mode, FileAccess access, FileShare share, FileOptions options) =>
+            _inner.OpenFileHandle(path, mode, access, share, options);
+        public FileSystemReplayOutcome<int> OpenOwnedDescriptor(
+            string path, FileMode mode, FileAccess access, FileShare share, FileOptions options) =>
+            _inner.OpenOwnedDescriptor(path, mode, access, share, options);
+        public FileSystemReplayOutcome<bool> ConfigureFileSharing(SafeFileHandle handle, FileShare share, string path) =>
+            _inner.ConfigureFileSharing(handle, share, path);
+        public FileSystemReplayOutcome<bool> AdviseFileAccess(SafeFileHandle handle, FileOptions options, string path) =>
+            _inner.AdviseFileAccess(handle, options, path);
+        public FileSystemReplayOutcome<int> ReadAt(SafeFileHandle handle, Memory<byte> buffer, long offset, string path) =>
+            _inner.ReadAt(handle, buffer, offset, path);
+        public ValueTask<FileSystemReplayOutcome<int>> ReadAtAsync(
+            SafeFileHandle handle, Memory<byte> buffer, long offset, string path, CancellationToken cancellationToken) =>
+            _inner.ReadAtAsync(handle, buffer, offset, path, cancellationToken);
+        public FileSystemReplayOutcome<bool> WriteAt(SafeFileHandle handle, ReadOnlyMemory<byte> buffer, long offset, string path) =>
+            _inner.WriteAt(handle, buffer, offset, path);
+        public ValueTask<FileSystemReplayOutcome<bool>> WriteAtAsync(
+            SafeFileHandle handle, ReadOnlyMemory<byte> buffer, long offset, string path, CancellationToken cancellationToken) =>
+            _inner.WriteAtAsync(handle, buffer, offset, path, cancellationToken);
+        public FileSystemReplayOutcome<long> GetLength(SafeFileHandle handle, string path) => _inner.GetLength(handle, path);
+        public FileSystemReplayOutcome<bool> SetLength(SafeFileHandle handle, long length, string path) =>
+            _inner.SetLength(handle, length, path);
+        public FileSystemReplayOutcome<bool> FlushFile(SafeFileHandle handle, string path) => _inner.FlushFile(handle, path);
+        public FileSystemReplayOutcome<bool> CloseFile(SafeFileHandle handle, string path)
+        {
+            FileSystemReplayOutcome<bool> outcome = _inner.CloseFile(handle, path);
+            if (outcome.Kind == FileSystemReplayOutcomeKind.Completed
+                && Path.GetFileName(path) == "cancel.bin")
             {
-                using ManualResetEventSlim started = new();
-                _probe = Task.Run(() =>
-                {
-                    started.Set();
-                    string staging = Path.Combine(_root, ".fhirpkg", "staging");
-                    while (!_stop.IsCancellationRequested)
-                    {
-                        string? path = Directory.GetFiles(staging, "cancel.bin", SearchOption.AllDirectories).FirstOrDefault();
-                        if (path is not null)
-                        {
-                            string directory = Path.GetDirectoryName(path)!;
-                            if (!File.Exists(Path.Combine(directory, "chunk-63.bin")))
-                            {
-                                // The closed manifest and first payload's creation prove
-                                // real extraction; later payloads have not all been written.
-                                PartialExtractionBytes = File.ReadAllBytes(Path.Combine(
-                                    directory, "package.json")).LongLength;
-                                ManifestWritten = PartialExtractionBytes > 0;
-                                LastExtractionEntryExists = File.Exists(Path.Combine(directory, "chunk-63.bin"));
-                                string operation = Directory.GetParent(directory)!.Parent!.FullName;
-                                StagedArchiveBytes = Directory.GetFiles(operation, "*.tgz")
-                                    .Select(file => new FileInfo(file).Length).Single();
-                                _caller.Cancel();
-                                return;
-                            }
-                        }
-                        Thread.Yield();
-                    }
-                });
-                started.Wait(TimeSpan.FromSeconds(10)).ShouldBeTrue("Extraction cancellation observer must be ready before extraction.");
+                // The extractor cannot advance to the next entry until this close returns.
+                progress.CancelAfterPayloadClosed(path);
             }
+            return outcome;
         }
-        internal async Task StopAsync()
-        {
-            _stop.Cancel();
-            try { await _probe; }
-            catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
-        }
-        public void Dispose() => _stop.Dispose();
+        public FileSystemReplayOutcome<BorrowedFileReadState> PrepareBorrowedRead(FileStream stream) =>
+            _inner.PrepareBorrowedRead(stream);
+        public FileSystemReplayOutcome<long> GetPosition(FileStream stream) => _inner.GetPosition(stream);
+        public FileSystemReplayOutcome<long> SetPosition(FileStream stream, long position) => _inner.SetPosition(stream, position);
+        public FileSystemReplayOutcome<int> ReadBorrowed(FileStream stream, Memory<byte> buffer) =>
+            _inner.ReadBorrowed(stream, buffer);
+        public ValueTask<FileSystemReplayOutcome<int>> ReadBorrowedAsync(
+            FileStream stream, Memory<byte> buffer, CancellationToken cancellationToken) =>
+            _inner.ReadBorrowedAsync(stream, buffer, cancellationToken);
+        public FileSystemReplayOutcome<bool> CreateDirectory(string path) => _inner.CreateDirectory(path);
+        public FileSystemReplayOutcome<bool> MovePath(string sourcePath, string destinationPath, bool replace) =>
+            _inner.MovePath(sourcePath, destinationPath, replace);
+        public FileSystemReplayOutcome<bool> DeleteEntry(string path, FileSystemEntryKind kind) => _inner.DeleteEntry(path, kind);
+        public FileSystemReplayOutcome<int> OpenDescriptor(string path, int flags, uint mode) =>
+            _inner.OpenDescriptor(path, flags, mode);
+        public FileSystemReplayOutcome<FileSystemProbeResult> InspectDescriptor(int descriptor, string? path = null) =>
+            _inner.InspectDescriptor(descriptor, path);
+        public FileSystemReplayOutcome<int> DuplicateDescriptor(int descriptor, int command, int minimum, string? path = null) =>
+            _inner.DuplicateDescriptor(descriptor, command, minimum, path);
+        public FileSystemReplayOutcome<int> GetDescriptorFlags(int descriptor, string? path = null) =>
+            _inner.GetDescriptorFlags(descriptor, path);
+        public FileSystemReplayOutcome<bool> SetDescriptorFlags(int descriptor, int flags, string? path = null) =>
+            _inner.SetDescriptorFlags(descriptor, flags, path);
+        public FileSystemReplayOutcome<FileSystemDirectorySyncOutcome> SynchronizeDescriptor(
+            int descriptor, bool fullSync, string? path = null) =>
+            _inner.SynchronizeDescriptor(descriptor, fullSync, path);
+        public FileSystemReplayOutcome<bool> CloseDescriptor(int descriptor, string? path = null) =>
+            _inner.CloseDescriptor(descriptor, path);
+        public FileSystemReplayOutcome<bool> TryLock(FileStream stream) => _inner.TryLock(stream);
+        public FileSystemReplayOutcome<bool> Unlock(FileStream stream) => _inner.Unlock(stream);
     }
 
     public static TheoryData<string, bool, bool, string, bool> NativeMetadataSourceModes
